@@ -1,0 +1,154 @@
+# ==============================================================================
+# AtlasX 本地配置
+# 路径：config/agent_zero/config.yaml
+#
+# 单用户 / sqlite / 静态前端。LLM 端点也可在应用「设置」里改（写入 sqlite）。
+# ==============================================================================
+
+server:
+  host: 127.0.0.1
+  port: 10210
+  # 端口被占用时自动向后顺延；false = 严格使用上面的 port
+  auto_port: true
+  port_tries: 30
+
+logging:
+  log_level: INFO
+
+# ── 数据库：sqlite 单文件（唯一数据源）──────────────────────────
+sqlalchemy:
+  db_path: data/agent_zero/agent_zero.db
+  echo: false
+  # 连接池：要覆盖「并发 run + 路由线程池」；太小会让并发会话排队等连接。
+  # pool_size: 10
+  # max_overflow: 20
+
+# ── LLM：直连 OpenAI 兼容端点 ──────────────────────────────────
+# 可用环境变量覆盖：AGENT_ZERO_LLM_BASE_URL / AGENT_ZERO_LLM_API_KEY / AGENT_ZERO_LLM_MODEL
+llm:
+  base_url: https://api.openai.com/v1
+  api_key: ""
+  model: gpt-4o-mini
+  context_window: 128000
+  max_tokens: 4096
+  # 图片支持：开启后该模型可接收上传图片（也可在「设置 → 模型」里逐档案开关）
+  vision: false
+  # 思考级别：勾选后发送处出现下拉框；留空 / 不配置则不显示
+  thinking_levels: []
+  # API 协议：openai-chat（默认，/chat/completions）或 openai-response（/responses）
+  # 可用环境变量 AGENT_ZERO_LLM_PROTOCOL 覆盖；模型档案也可各自指定 protocol
+  # protocol: openai-chat
+  # 可重试错误（网络 / 超时 / 429 / 5xx）的自动重试：默认 20 次、每次间隔 2.5s
+  # （20 次 × 2.5s ≈ 50s 的退让窗口，比原来的 1s 更能熬过短时抖动 / 限流）。
+  # 429 若带 Retry-After 则按它等待（取 max(间隔, Retry-After)，上限 30s）。
+  # retry_attempts: 20
+  # retry_backoff_s: 2.5
+  # 连续失败多久就放弃（秒；0 = 不限）。默认 900：上游整体挂掉时不会无限重试，
+  # 让 run 尽快以「失败」收尾，而不是挂在运行中几个小时。
+  # retry_deadline_s: 900
+  # HTTP 超时（秒）：连接类快速失败 → 交给重试；读类放宽 → 长生成不被打断。
+  # connect_timeout_s 默认 10；request_timeout_s 默认 600（0 = 读不设超时）。
+  # connect_timeout_s: 10
+  # request_timeout_s: 600
+  # 连接池：同一渠道复用连接（不再每次请求重做 TCP/TLS 握手）。
+  # 默认 32 条连接 / 16 条 keep-alive；不同 base_url 各自一个池。
+  # max_connections: 32
+  # max_keepalive: 16
+  # 流式看门狗：等上游期间多久推一次心跳（前端据此显示"仍在等待"）。
+  # stream_idle_timeout_s 默认 0 = **永不因"没有输出"中止**：长思考、长工具参数、
+  # 上游排队、网关整段缓冲都会长时间没有流事件，用秒数一刀切判定"上游无响应"
+  # 误判极多。需要硬上限时再填正数（秒）。
+  # stream_keepalive_s: 20
+  # stream_idle_timeout_s: 0
+  # 整条 run 的事件静默上限（秒）：默认 0 = 不中止（后台长任务可能跑一小时以上）；
+  # 填正数后，连续这么久没有任何事件才判定卡死并失败收尾。
+  # run_event_stall_s: 0
+  # 走系统代理（默认 false，直连；桌面端需要代理时打开）
+  # trust_env: false
+  # 上下文压缩（对齐 OpenCode V2 compaction，两级）：
+  # - 触发：上游实测 prompt 达到「窗口 − 预留」才压；预留默认 max(15% 窗口, 16000)，
+  #   不做增速预测——到点才压，不会每轮都去调摘要模型；
+  # - 一级（prune / microcompact）：先把保留窗口之外的旧工具输出清成一行，
+  #   多数长任务到这一步就够，不调摘要模型、对话结构不变；
+  # - 二级（checkpoint）：清理后仍超上限才调摘要模型，产物是一条
+  #   <conversation-checkpoint> 摘要消息 + 最近 keep tokens 原文；
+  # - 摘要调用单次硬超时 90s、不重试（失败降级为确定性摘要，run 不中断）；
+  # - 等待摘要期间每 20s 推一次心跳，界面显示「正在压缩上下文」，不会假死；
+  # - auto=false：不做主动压缩，仅靠 provider 400 后的溢出恢复兜底。
+  compaction:
+    auto: true
+    # precompute: false   # 明确不启用：省的是延迟不是 token（详见 README）
+    keep:
+      tokens: 15000   # 检查点旁保留的近期原文
+    buffer: 0         # 0 = 自动：max(15% 窗口, 16000)；正数 = 固定预留 tokens
+  # 跨轮历史：每轮从库里取多少条对话放进上下文（vibecoding 长会话别把早先的
+  # 约定挤掉，也别让历史吃掉窗口）。
+  # 条数 + token 预算双上限：短问答多留几轮，长代码 / 大附件消息自动少留；
+  # 起点对齐到用户消息（不切断问答对），最新一轮永不裁剪。
+  history:
+    max_messages: 60   # 条数上限（用户 + 助手各一条，约 30 轮）
+    max_tokens: 0      # 0 = 自动：模型窗口的 20%（8k～60k）；正数 = 固定预算
+  # 旧口径百分比触发（显式填写时覆盖上面的 ceiling 判定，保留兼容）：
+  # context_compress_percent: 70
+  # 当前模型档案：default = 上面这套默认配置；也可以填 models 里的 code
+  active_model: default
+  # 订阅（也可在应用「设置 → 订阅」里增删）：共享 Base URL / Key，下面挂多个模型
+  # subscriptions:
+  #   opencode-go:
+  #     name: OpenCode Go
+  #     provider: opencode-go
+  #     base_url: https://opencode.ai/inference/go/openai/v1
+  #     anthropic_base_url: https://opencode.ai/inference/go/anthropic
+  #     api_key: ""
+  # 多模型档案（也可在应用「设置 → 模型」里增删和切换）
+  # 未填的 base_url / api_key / context_window / max_tokens / vision / thinking_levels 继承默认配置
+  # protocol 可选 openai-chat / openai-response / anthropic；subscription_id 指向上面的订阅
+  # 每个档案还可以单独覆盖 retry_attempts / retry_backoff_s / retry_deadline_s /
+  # connect_timeout_s / request_timeout_s：只影响该模型
+  # （慢推理渠道和快模型可以有不同的超时与重试预算）。
+  # models:
+  #   fast:
+  #     name: Fast
+  #     model: gpt-4o-mini
+  #   smart:
+  #     name: Smart
+  #     model: gpt-4.1
+  #     base_url: https://api.example.com/v1
+  #     api_key: ""
+  #     context_window: 200000
+  #     max_tokens: 8192
+  #     vision: true
+  #     thinking_levels: [low, medium, high]
+  #   claude:
+  #     name: Claude
+  #     model: claude-sonnet-4-5
+  #     protocol: anthropic
+  #     subscription_id: opencode-go
+  #     request_timeout_s: 1800     # 这个模型出长文更慢，读超时放宽
+  #     retry_attempts: 3
+
+# ── 工具组织 ────────────────────────────────────────────────────
+# packs=true（默认）：同类工具合并成「包 + op」下发（fs / net / memory /
+#   plan / skill / mcp），命令与代码类（shell / tool_job / vcs / codegraph /
+#   workspace）作为独立工具直接下发——它们参数差异大、风险等级不同，塞进包
+#   只会让模型多绕一层。执行、权限、审批预览仍按具体工具名工作。
+# packs=false：退回逐个工具下发（排查兼容问题时用）。
+# max_output_chars：单条工具输出超过多少字符就落盘到工作区
+#   `.atlas/tool-output/`，上下文只留预览 + 路径（0 = 不落盘，默认 40000）。
+tools:
+  packs: true
+  max_output_chars: 40000
+  # 前台等待工具的预算（秒）：超过它仍未结束就把工具转入后台托管，
+  # 立刻把 {"status":"background","job_id":...} 交给模型，模型用 tool_job
+  # 主动监督（list / status / result / wait / kill），不再被工具卡住整轮。
+  # 0 = 一直前台等（老行为，不推荐：慢工具会让模型完全失去决策权）。
+  foreground_budget_s: 45
+  # shell 空闲兜底（秒）：不设总超时（长构建不中途 kill），但连续这么久
+  # 一个字都没输出就判定挂住并杀掉。0 = 不判定。
+  shell_idle_timeout_s: 600
+  # 「长等待」提示阈值（秒）：命令里的 sleep 超过它时，只在工具结果里加一句
+  # 提示（命令**按原样执行，绝不改写**）。等待时长属于命令语义 —— 过去把它
+  # 截到 120s 会让 `sleep 300 && deploy.sh` 提前 3 分钟执行，定时脚本跑错时间点。
+  # 模型的等待体验由上面的 foreground_budget_s 保证：超预算即转后台托管。
+  # 0 = 不提示。
+  max_sleep_s: 120

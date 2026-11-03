@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+
+# 运行时数据（sqlite 库 / 工作区 / 地址信息 / 产物）
+data/agent_zero/*.db
+data/agent_zero/*.db-journal
+data/agent_zero/*.db-wal
+data/agent_zero/*.db-shm
+data/agent_zero/*.bak
+data/agent_zero/runtime.json
+data/agent_zero/workspace/
+data/agent_zero/uploads/
+data/agent_zero/file_checkpoints/
+data/agent_zero/skills/_npm/
+data/agent_zero/skills/_npx/
+data/agent_zero/mcp/node_modules/
+data/pids/
+logs/
+
+# 本地编辑器 / 工具 / 系统
+.openchamber/
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# 桌面端构建产物
+build/
+dist/
+desktop/Atlas.iconset/
+data/agent_zero/backups/
+data/agent_zero/*.corrupt-*
+.atlas/

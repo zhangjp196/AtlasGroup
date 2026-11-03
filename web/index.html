@@ -1,0 +1,1255 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#0d0d0e" />
+  <title>AtlasX</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/assets/vendor/codemirror/codemirror.css" />
+  <link rel="stylesheet" href="/assets/app.css?v=3.3.7-1" />
+</head>
+<body>
+  <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.3a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.7 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.7 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.7h.09A1.7 1.7 0 0 0 10.09 3.14V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.1 4.7a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.3 9v.09a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z"/></symbol>
+    <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z"/><path d="M12 11.5v5M9.5 14h5"/></symbol>
+    <symbol id="i-vcs" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="6" r="2"/><path d="M6 8v8M18 6v4a4 4 0 0 1-4 4H6"/></symbol>
+    <symbol id="i-flow" viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="4" rx="1.2"/><rect x="3" y="16" width="6" height="4" rx="1.2"/><rect x="15" y="10" width="6" height="4" rx="1.2"/><path d="M9 6l6 4M9 18l6-4"/></symbol>
+    <symbol id="i-bp" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2.5"/><path d="M9 4v16M3.5 11H20.5"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7Z"/><path d="M14 3v4h4"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13M10 11v5M14 11v5"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></symbol>
+    <symbol id="i-collapse-all" viewBox="0 0 24 24"><path d="m7 9 5-5 5 5"/><path d="m7 20 5-5 5 5"/><path d="M12 4v6M12 20v-6"/></symbol>
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M4 20 12 4l8 16"/><path d="M8.8 13.2h6.4"/><path d="M12 1.6v1.6"/></symbol>
+    <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z"/><path d="M19 16.5 19.7 18.3 21.5 19l-1.8.7L19 21.5l-.7-1.8L16.5 19l1.8-.7Z"/></symbol>
+    <symbol id="i-tidy" viewBox="0 0 24 24"><path d="M4 5h16l-6 7.2V19l-4 2v-8.8Z"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3M20 5v6h-6"/></symbol>
+    <symbol id="i-panel-left" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 2.6 20h18.8Z"/><path d="M12 9.5v4.5M12 17.5v.5"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-cache" viewBox="0 0 24 24"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="M3 12l9 5 9-5M3 16.5l9 5 9-5"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m5 7 4 5-4 5M12 17h7"/></symbol>
+    <symbol id="i-brain" viewBox="0 0 24 24"><path d="M9.5 4.5A3 3 0 0 0 4 6.4a3 3 0 0 0-1 5.7 3.2 3.2 0 0 0 2.2 5.3 3 3 0 0 0 5.8-1V7.5a3 3 0 0 0-1.5-3Z"/><path d="M14.5 4.5A3 3 0 0 1 20 6.4a3 3 0 0 1 1 5.7 3.2 3.2 0 0 1-2.2 5.3 3 3 0 0 1-5.8-1V7.5a3 3 0 0 1 1.5-3Z"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3.5 19.5c0-2.8 2.4-4.8 5.5-4.8s5.5 2 5.5 4.8"/><circle cx="17" cy="9" r="2.4"/><path d="M15.6 14.9c2.7.3 4.4 2.1 4.4 4.6"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.5M4 12h.5M4 18h.5"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 2v3M14 2v3M10 19v3M14 19v3M2 10h3M2 14h3M19 10h3M19 14h3"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 7-5 5 5 5M16 7l5 5-5 5"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10h14V9M9 13h6"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16Z"/><path d="m14 6 4 4"/></symbol>
+    <symbol id="i-wrap" viewBox="0 0 24 24"><path d="M4 6h16M4 12h9a3 3 0 0 1-3 3H4M4 18h16"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3.2 7.6-7 9-3.8-1.4-7-4.5-7-9V6Z"/><path d="m9 12 2.2 2.2L15 10"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v6M15 3v6M7 9h10v4a5 5 0 0 1-10 0Z"/><path d="M12 18v3"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 4h7v16H4Z"/><path d="M13 4h7v16h-7Z"/><path d="M6 8h3M15 8h3"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M4 9a8 8 0 1 1 3 6.5"/><path d="M4 4v5h5"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V5M7 10l5-5 5 5M5 20h14"/></symbol>
+    <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="M20.5 11.5 12 20a6 6 0 0 1-8.5-8.5l8-8a4 4 0 0 1 5.7 5.7l-8 8a2 2 0 0 1-2.8-2.8l7.3-7.3"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 18 5-5 4 4 3-3 4 4"/></symbol>
+  </svg>
+
+  <div class="boot-splash" id="bootSplash" aria-hidden="true">
+    <div class="boot-splash-mark"><svg><use href="#i-logo"/></svg></div>
+    <div class="boot-splash-name">AtlasX</div>
+  </div>
+
+  <div class="app" id="app">
+    <div class="mobile-scrim" id="mobileScrim" hidden></div>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><svg><use href="#i-logo"/></svg></div>
+        <div class="brand-text">
+          <strong>AtlasX</strong>
+        </div>
+        <button class="icon-btn sidebar-toggle" id="sidebarToggle" title="Collapse sidebar" aria-label="Collapse sidebar" data-i18n-title="sidebar.collapse" data-i18n-aria-label="sidebar.collapse">
+          <svg><use href="#i-panel-left"/></svg>
+        </button>
+        <button class="icon-btn sidebar-close" id="sidebarClose" title="Close sidebar" aria-label="Close sidebar" data-i18n-title="sidebar.close" data-i18n-aria-label="sidebar.close">
+          <svg><use href="#i-x"/></svg>
+        </button>
+      </div>
+
+      <div class="sidebar-rail" id="sidebarRail">
+        <button type="button" class="rail-btn" data-sidebar-action="new" title="New conversation" data-i18n-title="newConversation" aria-label="New conversation"><svg><use href="#i-plus"/></svg></button>
+        <button type="button" class="rail-btn" data-sidebar-action="search" title="Search" data-i18n-title="search.placeholder" aria-label="Search"><svg><use href="#i-search"/></svg></button>
+        <button type="button" class="rail-btn" data-sidebar-action="workspace" title="Workspace files" data-i18n-title="nav.workspace" aria-label="Workspace files"><svg><use href="#i-folder"/></svg></button>
+        <button type="button" class="rail-btn" data-sidebar-action="memory" title="Memory" data-i18n-title="mem.title" aria-label="Memory"><svg><use href="#i-brain"/></svg></button>
+      </div>
+
+      <div class="sidebar-top">
+        <button class="new-chat" id="newChatBtn">
+          <svg><use href="#i-plus"/></svg>
+          <span data-i18n="newConversation">New conversation</span>
+          <kbd>⌘N</kbd>
+        </button>
+      </div>
+
+      <div class="side-tabs" id="sideTabs" role="tablist">
+        <button type="button" class="side-tab" role="tab" data-side-tab="chat" aria-selected="true"><svg><use href="#i-message"/></svg><span data-i18n="chatSection.title">Chat</span></button>
+        <button type="button" class="side-tab" role="tab" data-side-tab="workspace" aria-selected="false"><svg><use href="#i-folder"/></svg><span data-i18n="workspace.title">Workspace</span></button>
+      </div>
+
+      <div class="side-pane" id="sideChatPane" data-side-pane="chat">
+        <div class="search-box conv-search">
+          <svg><use href="#i-search"/></svg>
+          <input id="searchInput" type="search" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off" spellcheck="false" data-i18n-placeholder="search.placeholder" data-i18n-aria-label="search.placeholder" />
+        </div>
+
+        <div class="chat-box" id="chatBox">
+          <div class="ws-list-head chat-head">
+            <span class="side-head-title"><span data-i18n="conv.recent">Recent</span></span>
+            <div class="side-head-tools">
+              <div class="ws-list-actions">
+                <button class="icon-btn" id="chatRefresh" title="Refresh" data-i18n-title="workspace.refresh" data-i18n-aria-label="workspace.refresh" aria-label="Refresh"><svg><use href="#i-refresh"/></svg></button>
+                <button class="icon-btn" id="chatAddBtn" title="New chat conversation" data-i18n-title="conv.newChat" data-i18n-aria-label="conv.newChat" aria-label="New chat conversation"><svg><use href="#i-plus"/></svg></button>
+                <button class="icon-btn danger-hover" id="chatClearBtn" title="Delete all conversations" data-i18n-title="chat.clear" data-i18n-aria-label="chat.clear" aria-label="Delete all conversations"><svg><use href="#i-trash"/></svg></button>
+              </div>
+            </div>
+          </div>
+          <div class="chat-list" id="chatList"></div>
+        </div>
+      </div>
+
+      <div class="side-pane" id="sideWsPane" data-side-pane="workspace" hidden>
+        <div class="ws-list-head">
+          <span class="side-head-title"><svg><use href="#i-folder"/></svg><span data-i18n="workspace.title">Workspace</span></span>
+          <div class="side-head-tools">
+            <button class="icon-btn ws-collapse-all" id="wsCollapseAllBtn" title="Collapse all workspaces" data-i18n-title="workspace.collapseAll" data-i18n-aria-label="workspace.collapseAll" aria-label="Collapse all workspaces"><svg><use href="#i-collapse-all"/></svg></button>
+            <div class="ws-list-actions">
+              <button class="icon-btn" id="wsListRefresh" title="Refresh" data-i18n-title="workspace.refresh" data-i18n-aria-label="workspace.refresh" aria-label="Refresh"><svg><use href="#i-refresh"/></svg></button>
+              <button class="icon-btn" id="wsListAdd" title="Add workspace" data-i18n-title="workspace.add" data-i18n-aria-label="workspace.add" aria-label="Add workspace"><svg><use href="#i-folder-plus"/></svg></button>
+              <button class="icon-btn" id="wsAddConvBtn" title="New conversation in workspace" data-i18n-title="conv.newInWorkspace" data-i18n-aria-label="conv.newInWorkspace" aria-label="New conversation in workspace"><svg><use href="#i-plus"/></svg></button>
+            </div>
+          </div>
+        </div>
+        <div class="search-box ws-filter">
+          <svg><use href="#i-search"/></svg>
+          <input id="wsFilterInput" type="search" placeholder="Filter workspaces" aria-label="Filter workspaces" autocomplete="off" spellcheck="false" data-i18n-placeholder="workspace.filter" data-i18n-aria-label="workspace.filter" />
+        </div>
+        <div class="ws-groups" id="wsGroups"></div>
+        <div class="ws-groups-pager" id="wsGroupsPager" hidden>
+          <button type="button" class="pager-btn" id="wsGroupsPrev" title="Previous page" data-i18n-title="conv.prev"><svg><use href="#i-chevron-left"/></svg></button>
+          <span class="pager-info" id="wsGroupsPageInfo"></span>
+          <button type="button" class="pager-btn" id="wsGroupsNext" title="Next page" data-i18n-title="conv.next"><svg><use href="#i-chevron-right"/></svg></button>
+        </div>
+      </div>
+
+      <!-- 进程面板已移到对话区（悬浮在左上角），不再占用左侧栏。 -->
+
+      <div class="active-runs" id="activeRuns" hidden>
+        <div class="active-runs-header">
+          <span data-i18n="activeRuns.title">Active runs</span>
+          <span class="active-runs-count" id="activeRunsCount"></span>
+          <button class="icon-btn section-collapse" id="runsSectionToggle" data-section-collapse="runs" title="Collapse" data-i18n-title="dock.collapse" data-i18n-aria-label="dock.collapse" aria-label="Collapse active runs"><svg><use href="#i-chevron-down"/></svg></button>
+        </div>
+        <div class="active-runs-list" id="activeRunsList"></div>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="status-chip" id="runtimeChip" title="Runtime status" data-i18n-title="runtime.title">
+          <span class="dot" id="runtimeDot"></span>
+          <span id="runtimeText">Connecting…</span>
+        </button>
+        <button class="lang-btn" id="langBtn" title="Switch language" aria-label="Switch language" data-i18n-title="language.switchTitle" data-i18n-aria-label="language.switchTitle">
+          <span id="langBtnText">中</span>
+        </button>
+        <button class="icon-btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme" data-i18n-title="theme.toggle" data-i18n-aria-label="theme.toggle">
+          <svg class="theme-dark-icon"><use href="#i-sun"/></svg>
+          <svg class="theme-light-icon"><use href="#i-moon"/></svg>
+        </button>
+        <button class="icon-btn" data-action="settings" title="Settings" aria-label="Settings" data-i18n-title="nav.settings" data-i18n-aria-label="nav.settings">
+          <svg><use href="#i-settings"/></svg>
+        </button>
+      </div>
+      <div class="sidebar-resizer" id="sidebarResizer" title="Drag to resize sidebar" data-i18n-title="dock.drag" aria-hidden="true"></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn mobile-only" id="sidebarOpen" title="Open sidebar" aria-label="Open sidebar" data-i18n-title="sidebar.open" data-i18n-aria-label="sidebar.open">
+          <svg><use href="#i-panel-left"/></svg>
+        </button>
+        <div class="topbar-title">
+          <h1 id="chatTitle" data-i18n="chat.new">New conversation</h1>
+          <span id="chatSubtitle">AtlasX</span>
+        </div>
+        <button class="icon-btn conv-info-btn" id="convInfoBtn" title="Conversation info" data-i18n-title="conv.info" aria-label="Conversation info" data-i18n-aria-label="conv.info"><svg><use href="#i-users"/></svg></button>
+        <div class="topbar-actions">
+          <span class="run-state" id="runState" hidden><span class="pulse"></span><span id="runStateText" data-i18n="runState.working">Working</span></span>
+          <button class="icon-btn has-count" id="topTodoBtn" title="Task list" data-i18n-title="todo.title" data-i18n-aria-label="todo.title" aria-label="Task list" aria-pressed="false"><svg><use href="#i-list"/></svg><span class="icon-count" id="topTodoCount" hidden></span></button>
+          <button class="icon-btn danger-hover" id="deleteChatBtn" title="Delete conversation" aria-label="Delete conversation" data-i18n-title="chat.delete" data-i18n-aria-label="chat.delete" hidden>
+            <svg><use href="#i-trash"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="chat-shell" id="chatShell">
+        <!-- 对话区左上角的浮动面板列（不占正文宽度）：进程在上、任务清单在下。
+             - 进程：收纳正在跑的 shell / 后台工具 / 子代理，不含「对话运行」本身；
+               没有进程时整块 hidden，全部跑完自动消失。点行查看详情，行尾按钮
+               单独停止该进程（不影响当前会话）。
+             - 任务清单：常驻入口在顶栏 #topTodoBtn（对话内的「任务」卡片也能打开），
+               面板只由用户点开 / 点关。 -->
+        <div class="chat-floats" id="chatFloats">
+          <aside class="process-panel" id="processPanel" hidden aria-label="进程" data-i18n-aria-label="process.title">
+            <div class="process-head">
+              <span class="process-title"><svg><use href="#i-terminal"/></svg><span data-i18n="process.title">进程</span></span>
+              <span class="active-runs-count" id="processCount"></span>
+              <span class="process-spacer"></span>
+              <button class="icon-btn section-collapse" id="processSectionToggle" title="Collapse" data-i18n-title="dock.collapse" data-i18n-aria-label="dock.collapse" aria-label="Collapse processes"><svg><use href="#i-chevron-down"/></svg></button>
+            </div>
+            <div class="process-list" id="processList"></div>
+          </aside>
+
+          <section class="todo-panel" id="todoPanel" hidden aria-label="任务清单" data-i18n-aria-label="todo.title">
+            <div class="todo-head">
+              <span class="todo-panel-title"><svg><use href="#i-list"/></svg><span data-i18n="todo.title">Task list</span></span>
+              <span class="active-runs-count todo-summary" id="todoSummary"></span>
+              <span class="todo-spacer"></span>
+              <button class="icon-btn section-collapse" id="todoSectionToggle" title="Collapse" data-i18n-title="dock.collapse" data-i18n-aria-label="dock.collapse" aria-label="Collapse tasks"><svg><use href="#i-chevron-down"/></svg></button>
+              <button class="icon-btn" id="todoDrawerClose" title="Close" data-i18n-title="close" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+            </div>
+            <div class="todo-panel-body">
+              <form class="todo-add" id="todoAddForm">
+                <input class="input" id="todoAddInput" maxlength="500" placeholder="Add a task…" data-i18n-placeholder="todo.placeholder" spellcheck="false" />
+                <button class="btn small primary" type="submit" data-i18n="todo.add">Add</button>
+              </form>
+              <div class="todo-list" id="todoList"></div>
+              <div class="todo-foot"><span id="todoFoot"></span></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="chat-column">
+          <div class="chat-scroll" id="chatScroll">
+        <div class="conv-outline" id="convOutline" hidden>
+          <div class="conv-outline-panel">
+            <section class="conv-outline-card" id="convOutlineCard" aria-label="Context outline" data-i18n-aria-label="outline.title">
+              <header class="conv-outline-head">
+                <span class="conv-outline-title"><svg><use href="#i-list"/></svg><span data-i18n="outline.title">Context</span></span>
+                <span class="conv-outline-count" id="convOutlineCount"></span>
+                <button type="button" class="icon-btn conv-outline-collapse" data-outline-close title="Collapse context outline" aria-label="Collapse context outline" data-i18n-title="outline.collapse" data-i18n-aria-label="outline.collapse">
+                  <svg><use href="#i-chevron-right"/></svg>
+                </button>
+              </header>
+              <div class="conv-outline-list" id="convOutlineList"></div>
+            </section>
+            <div class="conv-outline-rail">
+              <button type="button" class="conv-outline-rail-toggle" data-outline-open title="Expand context outline" aria-label="Expand context outline" data-i18n-title="outline.expand" data-i18n-aria-label="outline.expand">
+                <svg><use href="#i-chevron-left"/></svg>
+              </button>
+              <div class="conv-outline-ticks" id="convOutlineTicks"></div>
+            </div>
+          </div>
+        </div>
+        <div class="chat-inner" id="chatInner"></div>
+        <div class="scroll-quick" id="scrollQuick" hidden>
+          <button type="button" class="icon-btn scroll-quick-btn" id="scrollTopBtn" title="Scroll to top" aria-label="Scroll to top" data-i18n-title="scroll.top" data-i18n-aria-label="scroll.top">
+            <svg><use href="#i-chevron-up"/></svg>
+          </button>
+          <button type="button" class="icon-btn scroll-quick-btn" id="scrollBottomBtn" title="Scroll to bottom" aria-label="Scroll to bottom" data-i18n-title="scroll.bottom" data-i18n-aria-label="scroll.bottom">
+            <svg><use href="#i-chevron-down"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="composer-area">
+        <div class="composer-inner">
+          <div class="activity" id="activityLine" hidden>
+            <span class="activity-dot"></span>
+            <span id="activityText" data-i18n="activity.working">Working…</span>
+            <span class="activity-stats" id="activityStats" hidden></span>
+          </div>
+          <div class="subagent-bar" id="subagentBar" hidden></div>
+          <div class="approval-bar" id="approvalBar" hidden>
+            <div class="approval-bar-main">
+              <span class="approval-risk" id="approvalRisk"><svg><use href="#i-alert"/></svg><span id="approvalRiskText">—</span></span>
+              <span class="approval-desc" id="approvalDesc"></span>
+              <span class="approval-count" id="approvalCount"></span>
+              <button class="approval-jump" id="approvalJump" type="button" title="Jump to the request" data-i18n-title="approval.jump"><svg><use href="#i-eye"/></svg></button>
+            </div>
+            <div class="approval-actions">
+              <button class="btn small ghost" id="approvalDenyBtn" type="button" data-approval-action="deny" data-i18n="approval.deny">Deny</button>
+              <button class="btn small" id="approvalOnceBtn" type="button" data-approval-action="approve_once" data-i18n="approval.once">Allow once</button>
+              <button class="btn small" id="approvalSessionBtn" type="button" data-approval-action="approve_session" data-i18n="approval.session">Allow in this conversation</button>
+              <button class="btn small primary" id="approvalAlwaysBtn" type="button" data-approval-action="approve_always" data-i18n="approval.always">Always allow</button>
+            </div>
+          </div>
+          <div class="goal-bar" id="goalBar" hidden>
+            <span class="goal-pulse" aria-hidden="true"></span>
+            <div class="goal-main">
+              <span class="goal-tag" data-i18n="goal.label">Goal</span>
+              <span class="goal-text" id="goalText"></span>
+              <span class="goal-note" id="goalNote" hidden></span>
+            </div>
+            <div class="goal-meta">
+              <span class="goal-stat" id="goalRuns"></span>
+              <span class="goal-stat" id="goalTokens"></span>
+              <label class="goal-budget" title="Token budget (0 = unlimited)" data-i18n-title="goal.budgetTitle">
+                <span data-i18n="goal.budget">Budget</span>
+                <input type="number" min="0" step="1000" id="goalBudgetInput" class="goal-budget-input" placeholder="∞" />
+              </label>
+            </div>
+            <button type="button" class="icon-btn goal-end-btn" id="goalEndBtn" title="End goal" data-i18n-title="goal.end" aria-label="End goal"><svg><use href="#i-stop"/></svg></button>
+            <button type="button" class="icon-btn goal-dismiss-btn" id="goalDismissBtn" title="Dismiss" data-i18n-title="goal.dismiss" aria-label="Dismiss" hidden><svg><use href="#i-x"/></svg></button>
+          </div>
+          <div class="composer" id="composerBox">
+            <div class="composer-refs" id="composerRefs" hidden></div>
+            <div class="composer-attachments" id="composerAttachments" hidden></div>
+            <div class="slash-menu" id="slashMenu" role="listbox" aria-label="Slash commands" hidden></div>
+            <div class="slash-menu mention-menu" id="mentionMenu" role="listbox" aria-label="Mention a member" hidden></div>
+            <textarea id="promptInput" rows="1" placeholder="Message AtlasX…" aria-label="Message AtlasX…" spellcheck="false" data-i18n-placeholder="prompt.placeholder" data-i18n-aria-label="prompt.placeholder"></textarea>
+            <div class="composer-toolbar">
+              <div class="composer-left">
+                <button type="button" class="icon-btn mode-goal-btn" id="goalModeBtn" title="Goal mode" aria-label="Goal mode" aria-pressed="false" data-i18n-title="mode.goalTitle" data-i18n-aria-label="mode.goalTitle"><svg><use href="#i-target"/></svg></button>
+                <span class="composer-select-wrap perm-select-wrap" title="Permission mode" data-i18n-title="perm.title">
+                  <select class="composer-select perm-select" id="permSelect" aria-label="Permission mode" data-i18n-aria-label="perm.label">
+                    <option value="once" data-i18n="perm.once">Ask</option>
+                    <option value="auto" data-i18n="perm.auto">Auto</option>
+                    <option value="always" data-i18n="perm.always">Allow</option>
+                  </select>
+                  <svg><use href="#i-chevron-down"/></svg>
+                </span>
+                <button type="button" class="icon-btn attach-btn" id="attachBtn" title="Attach image or document" aria-label="Attach image or document" data-i18n-title="attach.title" data-i18n-aria-label="attach.title"><svg><use href="#i-paperclip"/></svg></button>
+                <input type="file" id="attachInput" multiple hidden />
+              </div>
+              <div class="composer-right">
+                <button type="button" class="context-chip" id="contextChip" hidden>
+                  <svg class="ctx-ring" viewBox="0 0 20 20" aria-hidden="true">
+                    <circle class="ctx-bg" cx="10" cy="10" r="7"></circle>
+                    <circle class="ctx-progress" cx="10" cy="10" r="7"></circle>
+                  </svg>
+                  <span class="ctx-pct">0k</span>
+                </button>
+                <span class="thinking-anchor">
+                  <button type="button" class="thinking-chip" id="thinkingChip" title="Thinking level" aria-label="Thinking level" aria-haspopup="true" aria-controls="thinkingMenu" aria-expanded="false" hidden><svg><use href="#i-brain"/></svg><span id="thinkingChipText">Default</span></button>
+                  <div class="thinking-menu" id="thinkingMenu" hidden></div>
+                </span>
+                <button type="button" class="model-chip" id="modelChip" title="Current model" aria-label="Current model" aria-haspopup="listbox" aria-controls="modelMenu" aria-expanded="false">—</button>
+                <button class="send-btn" id="sendBtn" title="Send · Enter" aria-label="Send" data-i18n-title="send.title" data-i18n-aria-label="send.aria">
+                  <svg><use href="#i-arrow-up"/></svg>
+                </button>
+                <button class="stop-btn" id="stopBtn" title="Stop run" aria-label="Stop run" data-i18n-title="stop.title" data-i18n-aria-label="stop.aria" hidden>
+                  <svg><use href="#i-stop"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="model-menu" id="modelMenu" role="listbox" aria-label="Models" data-i18n-aria-label="settings.models" hidden></div>
+          </div>
+          <div class="queue-strip" id="queueStrip" hidden>
+            <div class="queue-strip-head">
+              <span class="queue-strip-title"><svg><use href="#i-list"/></svg><span data-i18n="queue.title">Queue</span></span>
+              <span class="queue-strip-count" id="queueCount"></span>
+              <button type="button" class="icon-btn queue-toggle" id="queueToggle" title="Collapse" data-i18n-title="dock.collapse" aria-label="Collapse queue"><svg><use href="#i-chevron-down"/></svg></button>
+            </div>
+            <div class="queue-items" id="queueItems"></div>
+          </div>
+          <div class="composer-hint">
+            <span data-i18n-html="composer.hint"><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line</span>
+            <span class="usage-hint" id="usageHint" hidden></span>
+            <span class="long-text-hint" id="longTextHint" hidden></span>
+            <span id="workspaceHint" data-i18n="composer.local">local</span>
+          </div>
+        </div>
+      </div>
+        <!-- 会话内问答抽屉：从对话区底部升起，不遮挡/不弹模态框；按会话独立。 -->
+        <div class="ask-drawer" id="askDrawer" hidden aria-live="polite"></div>
+      </div>
+      </div>
+    </main>
+
+    <aside class="dock" id="dock" hidden>
+      <div class="dock-resizer" id="dockResizer" title="Drag to resize" aria-hidden="true"></div>
+
+      <nav class="dock-tabs" id="dockTabs" aria-label="Dock panels" hidden>
+        <div class="dock-tab-strip" id="dockTabStrip" role="tablist"></div>
+        <div class="dock-tabs-tools">
+          <button type="button" class="icon-btn dock-collapse-btn" data-dock-collapse title="Collapse panel" data-i18n-title="dock.collapse" aria-label="Collapse panel" data-i18n-aria-label="dock.collapse"><svg><use href="#i-chevron-right"/></svg></button>
+        </div>
+      </nav>
+
+      <div class="dock-rail" id="dockRail" hidden>
+        <span class="dock-rail-active" id="dockRailActive" aria-hidden="true"></span>
+        <button type="button" class="dock-rail-btn dock-rail-expand" id="dockExpand" title="Expand panel" data-i18n-title="dock.expand" aria-label="Expand panel" data-i18n-aria-label="dock.expand"><svg><use href="#i-chevron-left"/></svg></button>
+      </div>
+
+      <div class="dock-panels" id="dockPanels">
+        <section class="dock-panel" id="panel-workspace" data-panel="workspace" hidden>
+          <header class="dock-panel-head">
+            <span class="dock-panel-title"><svg><use href="#i-folder"/></svg><span id="drawerWorkspaceName">Workspace</span></span>
+            <span class="dock-panel-sub mono" id="workspacePath">/</span>
+            <div class="dock-panel-actions">
+              <button class="icon-btn" id="wsRefresh" title="Refresh" data-i18n-title="workspace.refresh"><svg><use href="#i-refresh"/></svg></button>
+              <button class="icon-btn" id="wsUp" title="Parent folder" data-i18n-title="workspace.parent"><svg><use href="#i-chevron-left"/></svg></button>
+              <button class="icon-btn dock-panel-close" id="wsClose" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+            </div>
+          </header>
+          <div class="dock-panel-body">
+            <div class="dock-panel-list" id="wsList"></div>
+            <div class="dock-panel-foot"><span id="wsFooter">—</span></div>
+          </div>
+        </section>
+
+        <section class="dock-panel dock-panel-wide" id="panel-viewer" data-panel="viewer" hidden>
+          <header class="dock-panel-head">
+                        <span class="dock-panel-title mono" id="viewerName">file</span>
+            <span class="dock-panel-sub mono" id="viewerMeta">—</span>
+            <div class="seg viewer-mode-seg" id="viewerModeSeg" hidden role="group" aria-label="Viewer mode" data-i18n-aria-label="preview.modeLabel">
+              <button type="button" data-view-mode="render" class="active" data-i18n="preview.modePreview">Preview</button>
+              <button type="button" data-view-mode="code" data-i18n="preview.modeCode">Code</button>
+            </div>
+            <div class="dock-panel-actions">
+              <button class="icon-btn viewer-files-btn" id="viewerFilesBtn" title="File list" data-i18n-title="preview.files"><svg><use href="#i-folder"/></svg></button>
+              <button class="icon-btn" id="viewerWrapBtn" title="Word wrap" data-i18n-title="preview.wrap" aria-pressed="false"><svg><use href="#i-wrap"/></svg></button>
+              <button class="icon-btn" id="viewerCopyBtn" title="Copy" data-i18n-title="preview.copy"><svg><use href="#i-copy"/></svg></button>
+              <a class="icon-btn" id="viewerDownload" title="Download" download data-i18n-title="download"><svg><use href="#i-download"/></svg></a>
+              <button class="icon-btn dock-panel-close" id="viewerClose" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+            </div>
+          </header>
+          <div class="dock-panel-body viewer-body">
+            <div class="viewer-render" id="viewerRender" hidden></div>
+            <div class="viewer-code" id="viewerCode" hidden></div>
+          </div>
+          <div class="dock-panel-foot viewer-foot">
+            <span id="viewerLang" class="mono">—</span>
+            <span id="viewerStatus" class="mono"></span>
+            <span id="viewerPos" class="mono">Ln 1, Col 1</span>
+          </div>
+        </section>
+
+        <section class="dock-panel" id="panel-vcs" data-panel="vcs" hidden>
+          <header class="dock-panel-head">
+                        <span class="dock-panel-title"><svg><use href="#i-vcs"/></svg><span data-i18n="vcs.title">Version control</span></span>
+            <span class="dock-panel-sub" id="vcsSubtitle"></span>
+            <div class="dock-panel-actions">
+              <button class="icon-btn" id="vcsRefresh" title="Refresh" data-i18n-title="vcs.refresh"><svg><use href="#i-refresh"/></svg></button>
+              <button class="icon-btn dock-panel-close" id="vcsDrawerClose" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+            </div>
+          </header>
+          <div class="dock-panel-body">
+            <div class="vcs-tabs" role="tablist">
+              <button type="button" class="vcs-tab" data-vcs-tab="status" aria-pressed="true"><span data-i18n="vcs.tabStatus">Changes</span><span class="vcs-tab-count" id="vcsCountStatus"></span></button>
+              <button type="button" class="vcs-tab" data-vcs-tab="log" aria-pressed="false"><span data-i18n="vcs.tabLog">History</span><span class="vcs-tab-count" id="vcsCountLog"></span></button>
+              <button type="button" class="vcs-tab" data-vcs-tab="branches" aria-pressed="false"><span data-i18n="vcs.tabBranches">Branches</span><span class="vcs-tab-count" id="vcsCountBranches"></span></button>
+              <button type="button" class="vcs-tab" data-vcs-tab="remotes" aria-pressed="false"><span data-i18n="vcs.tabRemotes">Remotes</span><span class="vcs-tab-count" id="vcsCountRemotes"></span></button>
+            </div>
+            <div class="dock-panel-list vcs-content" id="vcsContent"></div>
+          </div>
+        </section>
+
+        <section class="dock-panel dock-panel-wide" id="panel-mem" data-panel="mem" hidden>
+          <header class="dock-panel-head">
+                        <span class="dock-panel-title"><svg class="mem-title-icon"><use href="#i-brain"/></svg><span id="memTitle"><span data-i18n="mem.title">Memory</span></span></span>
+            <div class="dock-panel-actions">
+              <button class="icon-btn" id="memRebuildBtn" title="Rebuild" data-i18n-title="mem.rebuild"><svg><use href="#i-spark"/></svg></button>
+              <button class="icon-btn" id="memTidyBtn" title="Tidy up" data-i18n-title="mem.tidy"><svg><use href="#i-tidy"/></svg></button>
+              <button class="icon-btn danger-hover" id="memClearBtn" title="Clear all" data-i18n-title="mem.clear"><svg><use href="#i-trash"/></svg></button>
+              <button class="icon-btn" id="memExportBtn" title="Export" data-i18n-title="mem.export"><svg><use href="#i-download"/></svg></button>
+              <button class="icon-btn" id="memRefresh" title="Refresh" data-i18n-title="workspace.refresh"><svg><use href="#i-refresh"/></svg></button>
+              <button class="icon-btn dock-panel-close" id="memDrawerClose" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+            </div>
+          </header>
+          <div class="dock-panel-body mem-body">
+            <div class="mem-topbar">
+              <div class="mem-toolbar">
+                <div class="seg mem-view-seg" id="memViewSeg" role="group" aria-label="Memory view">
+                  <button type="button" data-mem-view="list" aria-pressed="true" data-i18n="mem.viewList">List</button>
+                  <button type="button" data-mem-view="graph" aria-pressed="false" data-i18n="mem.viewGraph">Graph</button>
+                </div>
+              </div>
+              <div class="mem-summary" id="memSummary"></div>
+            </div>
+            <div class="mem-main">
+              <div class="dock-panel-list mem-content" id="memContent"></div>
+              <div class="mem-graph-pane" id="memGraphPane" hidden>
+                <div class="mem-graph-controls" id="memGraphSideControls"></div>
+                <div class="mem-graph-body" id="memGraphSideBody"></div>
+              </div>
+            </div>
+            <aside class="mem-side">
+              <div class="mem-graph-info" id="memGraphSideInfo" hidden></div>
+              <div class="mem-stats" id="memStatsPanel"></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="dock-panel" id="panel-codegraph" data-panel="codegraph" hidden>
+          <header class="dock-panel-head">
+            <span class="dock-panel-title"><svg><use href="#i-code"/></svg><span data-i18n="codegraph.title">CodeGraph</span></span>
+            <span class="dock-panel-sub" id="codegraphSubtitle"></span>
+            <div class="dock-panel-actions">
+              <button class="icon-btn" id="codegraphInitBtn" title="Initialize" data-i18n-title="codegraph.init"><svg><use href="#i-spark"/></svg></button>
+              <button class="icon-btn" id="codegraphUpdateBtn" title="Update" data-i18n-title="codegraph.update"><svg><use href="#i-refresh"/></svg></button>
+              <button class="icon-btn" id="codegraphRebuildBtn" title="Rebuild" data-i18n-title="codegraph.rebuild"><svg><use href="#i-tidy"/></svg></button>
+              <button class="icon-btn dock-panel-close" id="codegraphClose" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+            </div>
+          </header>
+          <div class="dock-panel-body cg-body">
+            <div class="cg-top">
+              <div class="mem-summary cg-summary" id="codegraphSummary"></div>
+              <div class="cg-toolbar">
+                <div class="search-box cg-search">
+                  <svg><use href="#i-search"/></svg>
+                  <input id="codegraphSearchInput" type="search" placeholder="Search files or symbols" data-i18n-placeholder="codegraph.searchPlaceholder" autocomplete="off" />
+                </div>
+                <div class="seg cg-view-seg" id="codegraphViewSeg" role="group" aria-label="CodeGraph view">
+                  <button type="button" data-codegraph-view="tree" aria-pressed="true" data-i18n="codegraph.viewTree">Directory</button>
+                  <button type="button" data-codegraph-view="flat" aria-pressed="false" data-i18n="codegraph.viewFlat">Flat</button>
+                </div>
+              </div>
+            </div>
+            <div class="codegraph-list" id="codegraphList"></div>
+          </div>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+  <div class="side-drawer-backdrop" id="convDrawerBackdrop" hidden></div>
+  <aside class="side-drawer" id="convDrawer" hidden role="dialog" aria-modal="true" aria-labelledby="convDrawerTitle">
+    <header class="side-drawer-head">
+      <h2 id="convDrawerTitle" data-i18n="conv.info">Conversation info</h2>
+      <button class="icon-btn" id="convDrawerClose" title="Close" data-i18n-title="close" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+    </header>
+    <div class="side-drawer-body" id="convDrawerBody"></div>
+  </aside>
+
+  <div class="modal-backdrop" id="settingsModal" data-backdrop-close="false" hidden>
+    <div class="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="settingsTitle" data-i18n="nav.settings">Settings</h2>
+          <p data-i18n="settings.subtitle">Changes are saved locally.</p>
+        </div>
+        <button class="icon-btn" data-close="settingsModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body settings-body">
+        <nav class="settings-tabs" id="settingsTabs" role="tablist" aria-label="Settings sections" data-i18n-aria-label="settings.sections">
+          <button class="settings-tab" type="button" role="tab" id="settingsTab-workspaces" data-settings-tab="workspaces" aria-selected="true" aria-controls="settingsPanel-workspaces"><svg><use href="#i-folder"/></svg><span data-i18n="settings.workspaces">Workspaces</span><span class="tab-count" id="tabCount-workspaces" hidden>0</span></button>
+          <button class="settings-tab" type="button" role="tab" id="settingsTab-models" data-settings-tab="models" aria-selected="false" aria-controls="settingsPanel-models"><svg><use href="#i-cpu"/></svg><span data-i18n="settings.models">Models</span><span class="tab-count" id="tabCount-models" hidden>0</span></button>
+          <button class="settings-tab" type="button" role="tab" id="settingsTab-usage" data-settings-tab="usage" aria-selected="false" aria-controls="settingsPanel-usage"><svg><use href="#i-cpu"/></svg><span data-i18n="settings.usage">Usage</span></button>
+          <button class="settings-tab" type="button" role="tab" id="settingsTab-mcp" data-settings-tab="mcp" aria-selected="false" aria-controls="settingsPanel-mcp"><svg><use href="#i-plug"/></svg><span data-i18n="settings.mcp">MCP servers</span><span class="tab-count" id="tabCount-mcp" hidden>0</span></button>
+          <button class="settings-tab" type="button" role="tab" id="settingsTab-skills" data-settings-tab="skills" aria-selected="false" aria-controls="settingsPanel-skills"><svg><use href="#i-book"/></svg><span data-i18n="settings.skills">Skills</span><span class="tab-count" id="tabCount-skills" hidden>0</span></button>
+          <button class="settings-tab" type="button" role="tab" id="settingsTab-extensions" data-settings-tab="extensions" aria-selected="false" aria-controls="settingsPanel-extensions"><svg><use href="#i-terminal"/></svg><span data-i18n="settings.extensions">Commands &amp; hooks</span><span class="tab-count" id="tabCount-commands" hidden>0</span></button>
+          <button class="settings-tab" type="button" role="tab" id="settingsTab-appearance" data-settings-tab="appearance" aria-selected="false" aria-controls="settingsPanel-appearance"><svg><use href="#i-sun"/></svg><span data-i18n="settings.appearance">Appearance</span></button>
+          <button class="settings-tab" type="button" role="tab" id="settingsTab-tools" data-settings-tab="tools" aria-selected="false" aria-controls="settingsPanel-tools"><svg><use href="#i-code"/></svg><span data-i18n="settings.tools">Tools</span><span class="tab-count" id="tabCount-tools">—</span></button>
+          <button class="settings-tab" type="button" role="tab" id="settingsTab-runtime" data-settings-tab="runtime" aria-selected="false" aria-controls="settingsPanel-runtime"><svg><use href="#i-terminal"/></svg><span data-i18n="settings.runtime">Runtime</span></button>
+        </nav>
+        <div class="settings-panels">
+        <section class="form-section settings-panel" id="settingsPanel-workspaces" data-settings-panel="workspaces" role="tabpanel" aria-labelledby="settingsTab-workspaces">
+          <h3><svg><use href="#i-folder"/></svg> <span data-i18n="settings.workspaces">Workspaces</span></h3>
+          <div class="settings-ws-list" id="settingsWorkspaceList"></div>
+          <div class="model-add-row">
+            <button class="btn small ghost" type="button" id="settingsAddWorkspaceBtn">
+              <svg><use href="#i-plus"/></svg>
+              <span data-i18n="workspace.add">Add workspace</span>
+            </button>
+          </div>
+          <div class="settings-archived" id="archivedWorkspaceBox" hidden>
+            <h4><svg><use href="#i-archive"/></svg><span data-i18n="settings.archivedWorkspaces">Archived</span></h4>
+            <div class="settings-ws-list" id="archivedWorkspaceList"></div>
+          </div>
+          <p class="field-note" data-i18n="settings.workspacesNote">Each workspace keeps its own conversations and points at a local folder. Archiving hides it without deleting conversations or files.</p>
+        </section>
+
+        <section class="form-section settings-panel" id="settingsPanel-models" data-settings-panel="models" role="tabpanel" aria-labelledby="settingsTab-models" hidden>
+          <h3><svg><use href="#i-cpu"/></svg> <span data-i18n="settings.models">Models</span></h3>
+          <div class="models-workspace">
+            <section class="models-pane models-pane-subscriptions" aria-labelledby="modelsPaneSubscriptionsTitle">
+              <header class="models-pane-head">
+                <div class="models-pane-title">
+                  <svg><use href="#i-cache"/></svg>
+                  <span id="modelsPaneSubscriptionsTitle" data-i18n="settings.subscriptions">Subscriptions</span>
+                  <span class="tab-count" id="tabCount-subscriptions" hidden>0</span>
+                </div>
+                <div class="models-pane-actions">
+                  <button class="btn small ghost" type="button" id="platformPickerBtn">
+                    <svg><use href="#i-plus"/></svg><span data-i18n="platform.add">Add platform</span>
+                  </button>
+                </div>
+              </header>
+              <div class="search-box settings-filter models-pane-filter">
+                <svg><use href="#i-search"/></svg>
+                <input id="subscriptionFilterInput" type="search" placeholder="Filter subscriptions" data-i18n-placeholder="settings.filterSubscriptions" autocomplete="off" />
+              </div>
+              <div class="subscription-list models-pane-list" id="subscriptionList"></div>
+            </section>
+
+            <section class="models-pane models-pane-models" aria-labelledby="modelsPaneModelsTitle">
+              <header class="models-pane-head">
+                <div class="models-pane-title">
+                  <svg><use href="#i-cpu"/></svg>
+                  <span id="modelsPaneModelsTitle" data-i18n="settings.models">Models</span>
+                  <span class="models-pane-context" id="modelsPaneContext" hidden></span>
+                </div>
+                <div class="models-pane-actions">
+                  <button class="btn small ghost" type="button" id="discoverModelsBtn">
+                    <svg><use href="#i-refresh"/></svg>
+                    <span data-i18n="settings.discover">Fetch models</span>
+                  </button>
+                  <button class="btn small ghost" type="button" id="addModelBtn">
+                    <svg><use href="#i-plus"/></svg>
+                    <span data-i18n="settings.addModel">Add model</span>
+                  </button>
+                </div>
+              </header>
+              <div class="search-box settings-filter models-pane-filter">
+                <svg><use href="#i-search"/></svg>
+                <input id="modelFilterInput" type="search" placeholder="Filter models" data-i18n-placeholder="settings.filterModels" autocomplete="off" />
+              </div>
+              <div class="model-list models-pane-list" id="modelList"></div>
+            </section>
+          </div>
+          <datalist id="modelOptions"></datalist>
+          <p class="field-note" data-i18n="settings.modelsWorkspaceNote">Left: subscriptions (right-click to edit or delete). Right: models of the selected subscription; the first one is selected by default.</p>
+        </section>
+
+        <section class="form-section settings-panel" id="settingsPanel-usage" data-settings-panel="usage" role="tabpanel" aria-labelledby="settingsTab-usage" hidden>
+          <h3><svg><use href="#i-cpu"/></svg> <span data-i18n="settings.usage">Usage</span></h3>
+          <div class="usage-stats-toolbar">
+            <div class="seg" id="usagePeriodSeg" role="group" aria-label="Usage period">
+              <button type="button" data-usage-period="1d" class="active" data-i18n="usage.period1d">1 day</button>
+              <button type="button" data-usage-period="7d" data-i18n="usage.period7d">7 days</button>
+              <button type="button" data-usage-period="30d" data-i18n="usage.period30d">30 days</button>
+              <button type="button" data-usage-period="all" data-i18n="usage.periodAll">All</button>
+            </div>
+            <button class="btn small ghost" type="button" id="usageRefreshBtn" data-i18n="usage.refresh">Refresh</button>
+          </div>
+          <div class="usage-stats-body" id="usageStatsBody">
+            <div class="model-loading"><span class="spinner"></span> <span data-i18n="usage.loading">Loading usage…</span></div>
+          </div>
+        </section>
+
+        <section class="form-section settings-panel" id="settingsPanel-mcp" data-settings-panel="mcp" role="tabpanel" aria-labelledby="settingsTab-mcp" hidden>
+          <h3><svg><use href="#i-plug"/></svg> <span data-i18n="settings.mcp">MCP servers</span></h3>
+          <div class="mcp-list" id="mcpList"></div>
+          <div class="panel-actions">
+            <button class="btn small" type="button" id="addMcpBtn"><svg><use href="#i-plus"/></svg><span data-i18n="mcp.addServer">Add MCP server</span></button>
+            <button class="btn small ghost" type="button" id="mcpExportBtn"><svg><use href="#i-download"/></svg><span data-i18n="mcp.export">Export</span></button>
+            <button class="btn small ghost" type="button" id="mcpImportBtn"><svg><use href="#i-upload"/></svg><span data-i18n="mcp.import">Import</span></button>
+            <input type="file" id="mcpImportFile" accept=".json" hidden />
+          </div>
+          <p class="field-note" data-i18n="mcp.panelNote">stdio servers run a local npm package or command; http/sse servers point at a remote URL.</p>
+        </section>
+
+        <section class="form-section settings-panel" id="settingsPanel-skills" data-settings-panel="skills" role="tabpanel" aria-labelledby="settingsTab-skills" hidden>
+          <h3><svg><use href="#i-book"/></svg> <span data-i18n="settings.skills">Skills</span></h3>
+          <div class="skill-list" id="skillList"></div>
+          <div class="panel-actions">
+            <button class="btn small" type="button" id="addSkillBtn"><svg><use href="#i-plus"/></svg><span data-i18n="skill.add">Add skill</span></button>
+          </div>
+          <p class="field-note" data-i18n="skill.panelNote">Write a SKILL.md, upload .md / .zip, install an npm package, or pull skills with npx skills add &lt;owner/repo&gt;.</p>
+        </section>
+
+        <section class="form-section settings-panel" id="settingsPanel-extensions" data-settings-panel="extensions" role="tabpanel" aria-labelledby="settingsTab-extensions" hidden>
+          <h3><svg><use href="#i-terminal"/></svg> <span data-i18n="settings.extensions">Commands &amp; hooks</span></h3>
+          <p class="field-note" data-i18n="ext.note">Slash commands are Markdown files in .atlas/commands (Claude Code’s .claude/commands also works). Hooks run local shell commands around tools and runs; they are the user’s own scripts and never replace permission approvals.</p>
+
+          <h4><svg><use href="#i-code"/></svg> <span data-i18n="ext.commands">Slash commands</span></h4>
+          <div class="mcp-list" id="slashCommandList"></div>
+          <div class="panel-actions">
+            <button class="btn small" type="button" id="addSlashCommandBtn"><svg><use href="#i-plus"/></svg><span data-i18n="ext.addCommand">New command</span></button>
+            <button class="btn small ghost" type="button" id="refreshExtensionsBtn"><svg><use href="#i-refresh"/></svg><span data-i18n="ext.refresh">Refresh</span></button>
+          </div>
+          <div class="ext-form" id="slashCommandForm" hidden>
+            <div class="appearance-fields">
+              <label class="field"><span data-i18n="ext.name">Name</span><input class="input" id="slashCommandName" placeholder="review" autocomplete="off" /></label>
+              <label class="field"><span data-i18n="ext.argumentHint">Argument hint</span><input class="input" id="slashCommandHint" placeholder="[path]" autocomplete="off" /></label>
+            </div>
+            <label class="field"><span data-i18n="ext.description">Description</span><input class="input" id="slashCommandDesc" placeholder="Review the current diff" autocomplete="off" /></label>
+            <label class="field"><span data-i18n="ext.body">Prompt body</span><textarea class="input" id="slashCommandBody" rows="6" placeholder="Review the diff and list problems. Arguments: $ARGUMENTS"></textarea></label>
+            <div class="panel-actions">
+              <button class="btn small primary" type="button" id="slashCommandSaveBtn" data-i18n="ext.save">Save</button>
+              <button class="btn small ghost" type="button" id="slashCommandCancelBtn" data-i18n="ext.cancel">Cancel</button>
+            </div>
+          </div>
+          <p class="field-note mono ext-path" id="slashCommandPaths"></p>
+
+          <h4><svg><use href="#i-plug"/></svg> <span data-i18n="ext.hooks">Hooks</span></h4>
+          <div class="mcp-list" id="hookList"></div>
+          <div class="panel-actions">
+            <button class="btn small" type="button" id="addHookBtn"><svg><use href="#i-plus"/></svg><span data-i18n="ext.addHook">New hook</span></button>
+            <button class="btn small ghost" type="button" id="hookTemplateBtn"><span data-i18n="ext.hookTemplate">Create hooks.json</span></button>
+          </div>
+          <div class="ext-form" id="hookForm" hidden>
+            <div class="appearance-fields">
+              <label class="field"><span data-i18n="ext.event">Event</span>
+                <select class="input" id="hookEvent">
+                  <option value="PreToolUse">PreToolUse</option>
+                  <option value="PostToolUse">PostToolUse</option>
+                  <option value="UserPromptSubmit">UserPromptSubmit</option>
+                  <option value="Stop">Stop</option>
+                </select>
+              </label>
+              <label class="field"><span data-i18n="ext.matcher">Tool matcher (regex)</span><input class="input" id="hookMatcher" placeholder="shell|fs" autocomplete="off" /></label>
+            </div>
+            <label class="field"><span data-i18n="ext.command">Shell command</span><input class="input" id="hookCommand" placeholder="python3 .atlas/hooks/guard.py" autocomplete="off" /></label>
+            <label class="field"><span data-i18n="ext.timeout">Timeout (s)</span><input class="input" type="number" id="hookTimeout" min="1" max="120" step="1" value="10" /></label>
+            <div class="panel-actions">
+              <button class="btn small primary" type="button" id="hookSaveBtn" data-i18n="ext.save">Save</button>
+              <button class="btn small ghost" type="button" id="hookCancelBtn" data-i18n="ext.cancel">Cancel</button>
+            </div>
+          </div>
+          <p class="field-note mono ext-path" id="hookPaths"></p>
+        </section>
+
+        <section class="form-section settings-panel" id="settingsPanel-appearance" data-settings-panel="appearance" role="tabpanel" aria-labelledby="settingsTab-appearance" hidden>
+          <h3><svg><use href="#i-sun"/></svg> <span data-i18n="settings.appearance">Appearance</span></h3>
+          <div class="theme-grid" id="themeGrid"></div>
+          <div class="theme-schedule">
+            <div class="seg theme-schedule-seg" id="themeScheduleSeg" role="group" aria-label="Theme schedule" data-i18n-aria-label="appearance.schedule">
+              <button type="button" data-schedule-mode="manual" class="active" data-i18n="appearance.scheduleManual">Manual</button>
+              <button type="button" data-schedule-mode="daynight" data-i18n="appearance.scheduleDayNight">Day / night</button>
+              <button type="button" data-schedule-mode="rotate" data-i18n="appearance.scheduleRotate">Rotate</button>
+            </div>
+            <div class="theme-schedule-fields" id="themeDayNightFields" hidden>
+              <label class="field"><span data-i18n="appearance.dayTheme">Day theme</span><select class="input" id="themeDayTheme"></select></label>
+              <label class="field"><span data-i18n="appearance.nightTheme">Night theme</span><select class="input" id="themeNightTheme"></select></label>
+            </div>
+            <div class="theme-schedule-fields" id="themeRotateFields" hidden>
+              <label class="field"><span data-i18n="appearance.rotateEvery">Rotate every</span><select class="input" id="themeRotateInterval">
+                <option value="10">10 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+                <option value="120">120 min</option>
+              </select></label>
+            </div>
+            <p class="field-note" id="themeScheduleNote"></p>
+          </div>
+          <h4 data-i18n="appearance.details">Interface details</h4>
+          <div class="appearance-fields">
+            <label class="field"><span data-i18n="appearance.sidebarWidth">Sidebar width</span><input class="input" type="number" id="uiSidebarW" min="180" max="420" step="4" /></label>
+            <label class="field"><span data-i18n="appearance.dockWidth">Dock width</span><input class="input" type="number" id="uiDockW" min="220" max="1280" step="4" /></label>
+          </div>
+          <div class="appearance-fields appearance-toggles">
+            <label class="field checkbox-field"><span data-i18n="appearance.sidebarCollapsed">Collapsed sidebar</span><input type="checkbox" id="uiSidebarCollapsed" /></label>
+            <label class="field checkbox-field"><span data-i18n="appearance.queueBar">Queue bar expanded</span><input type="checkbox" id="uiQueueBar" /></label>
+            <label class="field checkbox-field"><span data-i18n="appearance.viewerWrap">Wrap lines in viewer</span><input type="checkbox" id="uiViewerWrap" /></label>
+          </div>
+          <h4><svg><use href="#i-globe"/></svg> <span data-i18n="language.title">Language</span></h4>
+          <div class="seg lang-seg" id="langSeg" role="group" aria-label="Language" data-i18n-aria-label="language.title">
+            <button type="button" data-lang-mode="system">System</button>
+            <button type="button" data-lang-mode="zh">中文</button>
+            <button type="button" data-lang-mode="en">English</button>
+          </div>
+          <p class="field-note" data-i18n="language.note">The default follows your browser language. You can switch at any time.</p>
+          <div class="panel-actions">
+            <button class="btn small ghost" type="button" id="resetLayoutBtn"><svg><use href="#i-refresh"/></svg><span data-i18n="appearance.resetLayout">Reset layout</span></button>
+          </div>
+          <p class="field-note" data-i18n-html="appearance.layoutNote">Drag a panel's grip to reorder, drag the dock edge to resize, and collapse panels with the chevron. Layout is saved in this browser.</p>
+        </section>
+
+        <section class="form-section settings-panel" id="settingsPanel-tools" data-settings-panel="tools" role="tabpanel" aria-labelledby="settingsTab-tools" hidden>
+          <h3><svg><use href="#i-code"/></svg> <span data-i18n="settings.tools">Tools</span></h3>
+          <p class="field-note" data-i18n="tools.note">The model calls tool packs: one function per pack, with an op choosing the action. Concrete tools are used for execution, permissions and previews.</p>
+          <p class="field-note tool-chat-only-note" id="toolChatOnlyNote" data-i18n="tools.chatOnly" hidden>A chat-only workspace has no project folder: shell and file tools run in a managed folder; only the workspace tool is unavailable.</p>
+          <div class="tool-pack-grid" id="toolPackGrid"></div>
+          <h4 data-i18n="tools.standalone">Standalone tools</h4>
+          <div class="tool-standalone-grid" id="toolStandaloneGrid"></div>
+        </section>
+
+        <section class="form-section settings-panel" id="settingsPanel-runtime" data-settings-panel="runtime" role="tabpanel" aria-labelledby="settingsTab-runtime" hidden>
+          <h3><svg><use href="#i-terminal"/></svg> <span data-i18n="settings.runtime">Runtime</span></h3>
+          <div class="about-grid">
+            <div><span data-i18n="settings.service">Service</span><strong id="aboutService">—</strong></div>
+            <div><span data-i18n="settings.address">Address</span><strong id="aboutUrl" class="mono">—</strong></div>
+            <div><span data-i18n="settings.config">Config</span><strong id="aboutConfig" class="mono">—</strong></div>
+          </div>
+          <h4 data-i18n="settings.codegraph">CodeGraph</h4>
+          <div class="about-grid">
+            <div><span data-i18n="settings.codegraphFiles">Files</span><strong id="aboutCodegraphFiles">—</strong></div>
+            <div><span data-i18n="settings.codegraphSymbols">Symbols</span><strong id="aboutCodegraphSymbols">—</strong></div>
+            <div><span data-i18n="settings.codegraphDeps">Dependencies</span><strong id="aboutCodegraphDeps">—</strong></div>
+          </div>
+          <p class="field-note" id="aboutCodegraphNote" data-i18n="settings.codegraphNote">CodeGraph is optional: the model decides when to use it. The index initializes automatically and updates incrementally after file changes.</p>
+          <div class="panel-actions">
+            <button class="btn small ghost" type="button" id="codegraphRefreshBtn">
+              <svg><use href="#i-refresh"/></svg>
+              <span data-i18n="settings.codegraphRefresh">Rebuild index</span>
+            </button>
+          </div>
+
+          <h4 data-i18n="diag.title">Diagnostics</h4>
+          <div class="about-grid">
+            <div><span data-i18n="diag.success">24h success</span><strong id="diagSuccess">—</strong></div>
+            <div><span data-i18n="diag.runs">Runs</span><strong id="diagRuns">—</strong></div>
+            <div><span data-i18n="diag.p95">P95 duration</span><strong id="diagP95">—</strong></div>
+            <div><span data-i18n="diag.failed">Failed</span><strong id="diagFailed">—</strong></div>
+            <div><span data-i18n="diag.queue">Queue / running</span><strong id="diagQueue">—</strong></div>
+            <div><span data-i18n="diag.backup">Latest backup</span><strong id="diagBackup">—</strong></div>
+            <div><span data-i18n="diag.health">Health</span><strong id="diagHealth">—</strong></div>
+          </div>
+          <p class="field-note" id="diagErrors" hidden></p>
+          <div class="panel-actions">
+            <button class="btn small ghost" type="button" id="diagExportBtn">
+              <svg><use href="#i-download"/></svg>
+              <span data-i18n="diag.export">Export diagnostics</span>
+            </button>
+            <button class="btn small ghost" type="button" id="diagBackupBtn">
+              <svg><use href="#i-archive"/></svg>
+              <span data-i18n="diag.backupNow">Back up now</span>
+            </button>
+          </div>
+        </section>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="save-note" id="settingsNote"></span>
+        <div class="modal-buttons">
+          <button class="btn" data-close="settingsModal" data-i18n="cancel">Cancel</button>
+          <button class="btn primary" id="saveSettingsBtn" data-i18n="saveChanges">Save changes</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="newChatModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="newChatTitle" style="max-width:440px">
+      <header class="modal-head">
+        <div>
+          <h2 id="newChatTitle" data-i18n="newChat.title">New conversation</h2>
+          <p data-i18n="newChat.subtitle">Start a single chat, or create / join a group.</p>
+        </div>
+        <button class="icon-btn" type="button" data-close="newChatModal" title="Close" data-i18n-title="close" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+      </header>
+      <div class="modal-body new-chat-body">
+        <div class="seg" id="newChatKind" role="group">
+          <button type="button" data-new-chat-kind="single" aria-pressed="true" data-i18n="newChat.single">Single chat</button>
+          <button type="button" data-new-chat-kind="group" aria-pressed="false" data-i18n="newChat.group">Group chat</button>
+        </div>
+        <div id="newChatGroupBox" hidden>
+          <label class="field">
+            <span data-i18n="newChat.existingGroup">Join a group</span>
+            <select class="input" id="newChatTeam"></select>
+          </label>
+          <label class="field">
+            <span data-i18n="newChat.newGroup">Or create a new group</span>
+            <input class="input" id="newChatNewTeamName" maxlength="120" placeholder="Group name" data-i18n-placeholder="newChat.groupName" spellcheck="false" />
+          </label>
+          <small data-i18n="newChat.groupHint">Leave the name empty to join the selected group; fill it to create a new one.</small>
+        </div>
+        <p class="save-note" id="newChatNote"></p>
+      </div>
+      <footer class="modal-foot">
+        <button class="btn" type="button" data-close="newChatModal" data-i18n="cancel">Cancel</button>
+        <button class="btn primary" type="button" id="newChatCreate" data-i18n="newChat.create">Create</button>
+      </footer>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="convPickerModal" hidden>
+    <div class="modal conv-picker-modal" role="dialog" aria-modal="true" aria-labelledby="convPickerTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="convPickerTitle" data-i18n="conv.all">All conversations</h2>
+          <p id="convPickerSubtitle"></p>
+        </div>
+        <div class="modal-buttons">
+          <button class="btn small ghost" type="button" id="convPickerArchived" aria-pressed="false" data-i18n="conv.showArchived">Show archived</button>
+          <button class="icon-btn" data-close="convPickerModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="conv-picker-list" id="convPickerList"></div>
+      </div>
+      <div class="modal-foot">
+        <span class="save-note" id="convPickerInfo"></span>
+        <div class="modal-buttons">
+          <button class="btn small" type="button" id="convPickerPrev" data-i18n="conv.prev">Previous</button>
+          <button class="btn small" type="button" id="convPickerNext" data-i18n="conv.next">Next</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="processDetailModal" hidden>
+    <div class="modal process-modal" role="dialog" aria-modal="true" aria-labelledby="processDetailTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="processDetailTitle" data-i18n="process.details">Process details</h2>
+          <p id="processDetailSub"></p>
+        </div>
+        <button class="icon-btn" data-close="processDetailModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body process-detail-body" id="processDetailBody"></div>
+      <div class="modal-foot">
+        <span class="save-note" id="processDetailNote"></span>
+        <div class="modal-buttons">
+          <button class="btn small ghost" type="button" id="processDetailStop" data-i18n="process.detailStop" hidden>Stop process</button>
+          <button class="btn small" type="button" data-close="processDetailModal" data-i18n="close">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="renameModal" hidden>
+    <div class="modal rename-modal" role="dialog" aria-modal="true" aria-labelledby="renameTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="renameTitle" data-i18n="chat.renameTitle">Rename conversation</h2>
+          <p data-i18n="chat.titleHint">Save a custom title, or let AI generate a concise one.</p>
+        </div>
+        <button class="icon-btn" data-close="renameModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <label class="field">
+          <span data-i18n="chat.titleField">Title</span>
+          <input class="input" id="renameInput" maxlength="200" placeholder="Conversation title" data-i18n-placeholder="chat.titlePlaceholder" spellcheck="false" />
+        </label>
+        <div class="save-note" id="renameNote" hidden></div>
+      </div>
+      <div class="modal-foot">
+        <div class="modal-buttons">
+          <button class="btn small ghost" type="button" id="renameRegenerate" data-i18n="chat.regenerateTitle">Regenerate with AI</button>
+          <button class="btn small" type="button" data-close="renameModal" data-i18n="cancel">Cancel</button>
+          <button class="btn small primary" type="button" id="renameSave" data-i18n="save">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="rewindModal" data-backdrop-close="false" hidden>
+    <div class="modal rewind-modal" role="dialog" aria-modal="true" aria-labelledby="rewindTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="rewindTitle" data-i18n="rewind.title">Rewind to checkpoint</h2>
+          <p data-i18n="rewind.subtitle">Restore the workspace files and/or remove this message and everything after it.</p>
+        </div>
+        <button class="icon-btn" data-close="rewindModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="rewind-target" id="rewindTarget"></div>
+        <div class="rewind-diff" id="rewindDiff"></div>
+        <label class="rewind-option">
+          <input type="checkbox" id="rewindFiles" checked />
+          <span>
+            <strong data-i18n="rewind.filesOption">Restore workspace files</strong>
+            <small id="rewindFilesNote"></small>
+          </span>
+        </label>
+        <label class="rewind-option" id="rewindDeleteRow">
+          <input type="checkbox" id="rewindDeleteAdded" checked />
+          <span>
+            <strong data-i18n="rewind.deleteAdded">Delete files created after this checkpoint</strong>
+            <small id="rewindDeleteNote"></small>
+          </span>
+        </label>
+        <label class="rewind-option">
+          <input type="checkbox" id="rewindConv" checked />
+          <span>
+            <strong data-i18n="rewind.convOption">Remove this message and later turns</strong>
+            <small id="rewindConvNote"></small>
+          </span>
+        </label>
+        <p class="field-note" id="rewindNote"></p>
+      </div>
+      <div class="modal-foot">
+        <div class="modal-buttons">
+          <button class="btn small" type="button" data-close="rewindModal" data-i18n="cancel">Cancel</button>
+          <button class="btn small primary" type="button" id="rewindConfirm" data-i18n="rewind.action">Rewind</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="addWorkspaceModal" data-backdrop-close="false" hidden>
+    <div class="modal add-workspace-modal" role="dialog" aria-modal="true" aria-labelledby="addWorkspaceTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="addWorkspaceTitle" data-i18n="workspace.addTitle">Add workspace</h2>
+          <p data-i18n="workspace.addSubtitle">Choose a local folder. Conversations and files stay bound to this workspace.</p>
+        </div>
+        <button class="icon-btn" data-close="addWorkspaceModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <label class="field">
+          <span data-i18n="workspace.name">Name</span>
+          <input class="input" id="addWorkspaceName" maxlength="120" placeholder="Workspace" data-i18n-placeholder="workspace.namePlaceholder" spellcheck="false" />
+        </label>
+        <div class="field">
+          <span data-i18n="workspace.folder">Folder</span>
+          <div class="folder-path-row">
+            <button class="btn small ghost" type="button" id="folderPickerUp" title="Parent folder" data-i18n-title="workspace.parentFolder"><svg><use href="#i-chevron-left"/></svg></button>
+            <input class="input mono" id="folderPickerPath" spellcheck="false" autocomplete="off" />
+            <button class="btn small" type="button" id="folderPickerGo" data-i18n="workspace.go">Go</button>
+            <button class="btn small ghost" type="button" id="folderPickerNative" hidden title="Choose in Finder" data-i18n-title="workspace.chooseNative" aria-label="Choose in Finder" data-i18n-aria-label="workspace.chooseNative"><svg><use href="#i-folder"/></svg></button>
+          </div>
+          <div class="folder-picker" id="folderPickerList"></div>
+          <p class="field-note" id="folderPickerNote"></p>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="save-note" id="addWorkspaceNote"></span>
+        <div class="modal-buttons">
+          <button class="btn" data-close="addWorkspaceModal" data-i18n="cancel">Cancel</button>
+          <button class="btn primary" id="createWorkspaceBtn" data-i18n="workspace.useFolder">Use this folder</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="addMcpModal" data-backdrop-close="false" hidden>
+    <div class="modal add-modal" role="dialog" aria-modal="true" aria-labelledby="addMcpTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="addMcpTitle" data-i18n="mcp.addTitle">Add MCP server</h2>
+          <p data-i18n="mcp.addSubtitle">stdio runs a local npm package or command; http/sse connects to a remote endpoint.</p>
+        </div>
+        <button class="icon-btn" data-close="addMcpModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body add-modal-body">
+        <label class="field">
+          <span data-i18n="mcp.name">Name</span>
+          <input class="input" id="mcpName" type="text" placeholder="filesystem" spellcheck="false" />
+        </label>
+        <div class="seg add-seg" id="mcpTypeSeg" role="group" aria-label="MCP type">
+          <button type="button" data-mcp-type="stdio" class="active" data-i18n="mcp.typeStdio">stdio · local</button>
+          <button type="button" data-mcp-type="http" data-i18n="mcp.typeHttp">http / sse · remote</button>
+        </div>
+        <div id="mcpStdioFields">
+          <label class="field">
+            <span data-i18n="mcp.package">npm package</span>
+            <input class="input mono" id="mcpPackage" type="text" placeholder="@modelcontextprotocol/server-filesystem" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span data-i18n="mcp.installCommand">Install command (optional)</span>
+            <input class="input mono" id="mcpInstallCommand" type="text" placeholder="/opt/homebrew/bin/npm install &lt;pkg&gt;  ·  brew install node" spellcheck="false" />
+            <small data-i18n="mcp.installCommandNote">The app does not inherit your terminal PATH. If npm is missing, put a full command or absolute path here.</small>
+          </label>
+          <label class="field">
+            <span data-i18n="mcp.command">command (instead of npm)</span>
+            <input class="input mono" id="mcpCommand" type="text" placeholder="/opt/homebrew/bin/node /path/server.js" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span data-i18n="mcp.args">Arguments</span>
+            <input class="input mono" id="mcpArgs" type="text" placeholder="/absolute/path  (space separated)" spellcheck="false" />
+          </label>
+        </div>
+        <div id="mcpHttpFields" hidden>
+          <label class="field">
+            <span data-i18n="mcp.url">URL</span>
+            <input class="input mono" id="mcpUrl" type="text" placeholder="https://…/mcp" spellcheck="false" />
+          </label>
+        </div>
+        <p class="field-note" data-i18n="mcp.addNote">Installed packages land under data/agent_zero/mcp. Tools show up as mcp__server__tool.</p>
+      </div>
+      <div class="modal-foot">
+        <span class="save-note" id="mcpAddNote"></span>
+        <div class="modal-buttons">
+          <button class="btn" type="button" data-close="addMcpModal" data-i18n="cancel">Cancel</button>
+          <button class="btn small" type="button" id="mcpInstallBtn" data-i18n="mcp.install">Install &amp; add</button>
+          <button class="btn primary" type="button" id="mcpAddBtn" data-i18n="mcp.add">Add</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="platformPickerModal" hidden>
+    <div class="modal platform-picker-modal" role="dialog" aria-modal="true" aria-labelledby="platformPickerTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="platformPickerTitle" data-i18n="platform.title">Platform presets</h2>
+          <p data-i18n="platform.subtitle">Official APIs, aggregators, and self-hosted / local gateways.</p>
+        </div>
+        <button class="icon-btn" data-close="platformPickerModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body platform-picker-body">
+        <div class="search-box platform-search">
+          <svg><use href="#i-search"/></svg>
+          <input id="platformSearchInput" type="search" placeholder="Search platforms" data-i18n-placeholder="platform.search" autocomplete="off" />
+        </div>
+        <div class="platform-groups" id="platformGroups"></div>
+      </div>
+      <div class="modal-foot">
+        <span class="field-note" data-i18n="platform.note">Local gateway presets use the usual default ports. Adjust the Base URL after adding.</span>
+        <div class="modal-buttons">
+          <button class="btn" type="button" data-close="platformPickerModal" data-i18n="close">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="subscriptionModal" data-backdrop-close="false" hidden>
+    <div class="modal subscription-modal" role="dialog" aria-modal="true" aria-labelledby="subscriptionModalTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="subscriptionModalTitle" data-i18n="settings.addSubscription">Add subscription</h2>
+          <p data-i18n="settings.subscriptionModalHint">One account: an OpenAI Base URL, an optional Anthropic Base URL, and an API key. Its models are managed on the right.</p>
+        </div>
+        <button class="icon-btn" data-close="subscriptionModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <label class="field">
+          <span data-i18n="settings.subscriptionName">Subscription name</span>
+          <input class="input" id="subscriptionModalName" maxlength="120" placeholder="Subscription name" data-i18n-placeholder="settings.subscriptionName" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span data-i18n="settings.baseUrl">OpenAI Base URL</span>
+          <input class="input mono" id="subscriptionModalBaseUrl" type="url" maxlength="500" placeholder="https://api.openai.com/v1" spellcheck="false" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span data-i18n="settings.anthropicBaseUrl">Anthropic Base URL</span>
+          <input class="input mono" id="subscriptionModalAnthropicBaseUrl" type="url" maxlength="500" placeholder="https://api.anthropic.com" spellcheck="false" autocomplete="off" />
+          <small data-i18n="settings.anthropicBaseUrlNote">Only for models using the Anthropic Messages protocol. Leave empty to use the OpenAI Base URL above.</small>
+        </label>
+        <label class="field" id="subscriptionModalKeyField">
+          <span data-i18n="settings.apiKey">API key</span>
+          <input class="input mono" id="subscriptionModalApiKey" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+          <small data-i18n="settings.apiKeyKeep">Leave empty or unchanged to keep the current key.</small>
+        </label>
+        <div class="field-note subscription-modal-key-state" id="subscriptionModalKeyState" hidden></div>
+        <p class="field-note subscription-modal-note" id="subscriptionModalNote" hidden></p>
+        <div class="channel-quota" id="subscriptionModalQuota" data-channel-quota hidden></div>
+      </div>
+      <div class="modal-foot">
+        <span class="save-note" id="subscriptionModalStatus"></span>
+        <div class="modal-buttons">
+          <button class="btn" type="button" id="subscriptionModalClose" data-close="subscriptionModal" data-i18n="cancel">Cancel</button>
+          <button class="btn primary" type="button" id="subscriptionModalSave" data-i18n="settings.saveSubscription">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="discoverModal" hidden>
+    <div class="modal discover-modal" role="dialog" aria-modal="true" aria-labelledby="discoverModalTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="discoverModalTitle" data-i18n="settings.discover">Fetch models</h2>
+          <p id="discoverModalSubtitle" class="discover-subtitle"></p>
+        </div>
+        <button class="icon-btn" data-close="discoverModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="model-discover-list discover-modal-list" id="discoverList"></div>
+      </div>
+      <div class="modal-foot">
+        <span class="field-note" data-i18n="settings.discoverNote">Models you add are attached to the selected subscription.</span>
+        <div class="modal-buttons">
+          <button class="btn" type="button" data-close="discoverModal" data-i18n="close">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="addSkillModal" data-backdrop-close="false" hidden>
+    <div class="modal add-modal" role="dialog" aria-modal="true" aria-labelledby="addSkillTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="addSkillTitle" data-i18n="skill.addTitle">Add skill</h2>
+          <p data-i18n="skill.addSubtitle">Write a SKILL.md, upload one, or install from npm / npx skills.</p>
+        </div>
+        <button class="icon-btn" data-close="addSkillModal" title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-body add-modal-body">
+        <div class="seg add-seg" id="skillSrcSeg" role="group" aria-label="Skill source">
+          <button type="button" data-skill-src="manual" class="active" data-i18n="skill.srcManual">Write</button>
+          <button type="button" data-skill-src="upload" data-i18n="skill.srcUpload">Upload</button>
+          <button type="button" data-skill-src="npm" data-i18n="skill.srcNpm">npm</button>
+          <button type="button" data-skill-src="npx" data-i18n="skill.srcNpx">npx skills</button>
+        </div>
+
+        <div class="skill-src-panel" id="skillSrcManual">
+          <label class="field">
+            <span data-i18n="skill.name">Name</span>
+            <input class="input" id="skillName" type="text" placeholder="pdf-report" />
+          </label>
+          <label class="field">
+            <span data-i18n="skill.description">Description</span>
+            <input class="input" id="skillDescription" type="text" placeholder="What this skill does" />
+          </label>
+          <label class="field">
+            <span data-i18n="skill.content">SKILL.md</span>
+            <textarea class="input" id="skillContent" rows="6" placeholder="## Steps …"></textarea>
+          </label>
+        </div>
+
+        <div class="skill-src-panel" id="skillSrcUpload" hidden>
+          <div class="upload-drop" id="skillUploadDrop">
+            <svg><use href="#i-upload"/></svg>
+            <span data-i18n="skill.uploadHint">Pick a .md file or a .zip with SKILL.md plus extra files</span>
+            <input type="file" id="skillUploadFile" accept=".md,.zip,text/markdown" hidden />
+          </div>
+          <p class="field-note" data-i18n="skill.uploadNote">The skill name comes from the frontmatter or the first heading.</p>
+        </div>
+
+        <div class="skill-src-panel" id="skillSrcNpm" hidden>
+          <label class="field">
+            <span data-i18n="skill.npmPackage">npm package</span>
+            <input class="input mono" id="skillNpmPackage" type="text" placeholder="my-skill-package" spellcheck="false" />
+          </label>
+          <p class="field-note" data-i18n="skill.npmNote">The package must contain a SKILL.md.</p>
+        </div>
+
+        <div class="skill-src-panel" id="skillSrcNpx" hidden>
+          <label class="field">
+            <span data-i18n="skill.npxSource">Source</span>
+            <input class="input mono" id="skillNpxSource" type="text" placeholder="vercel-labs/agent-skills" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span data-i18n="skill.npxSkills">Skills (optional)</span>
+            <input class="input mono" id="skillNpxSkills" type="text" placeholder="web-design-guidelines, pr-review" spellcheck="false" />
+          </label>
+          <div class="skill-add-actions">
+            <button class="btn small ghost" type="button" id="skillNpxListBtn"><svg><use href="#i-search"/></svg><span data-i18n="skill.npxList">List skills in source</span></button>
+            <button class="btn small ghost" type="button" id="skillNpxSearchBtn"><svg><use href="#i-search"/></svg><span data-i18n="skill.npxSearch">Search registry</span></button>
+          </div>
+          <div class="npx-result" id="skillNpxResult" hidden></div>
+          <p class="field-note" data-i18n="skill.npxNote">Runs npx skills add &lt;owner/repo&gt; into this app’s skill library only — other agents’ folders are untouched.</p>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="save-note" id="skillAddNote"></span>
+        <div class="modal-buttons">
+          <button class="btn" type="button" data-close="addSkillModal" data-i18n="cancel">Cancel</button>
+          <button class="btn primary" type="button" id="skillActionBtn" data-i18n="skill.save">Save skill</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="confirmModal" data-backdrop-close="false" hidden>
+    <div class="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="confirmTitle">Confirm</h2>
+          <p id="confirmMessage"></p>
+        </div>
+        <button class="icon-btn" type="button" data-confirm-cancel title="Close" data-i18n-title="close"><svg><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal-foot">
+        <span class="save-note"></span>
+        <div class="modal-buttons">
+          <button class="btn" type="button" data-confirm-cancel data-i18n="cancel">Cancel</button>
+          <button class="btn primary" type="button" id="confirmOkBtn">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="/assets/app.js?v=3.3.7-1" defer></script>
+</body>
+</html>

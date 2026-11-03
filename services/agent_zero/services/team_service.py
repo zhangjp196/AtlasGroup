@@ -1,0 +1,619 @@
+"""Agent 团队（工作区级）= IM 里的「群」。
+
+团队既可以由模型通过 `team_manage` 动态创建，也可以由界面通过
+`routes/team_routes.py` 管理。对话绑定团队后按 `mode` 执行：
+
+- ``orchestrate``（默认）：主持角色单角色运行，成员通过 `delegate(target=team)`
+  被委派子任务；
+- ``roundtable``：主持与成员各自应答（`_group_reply_stream`），`@成员` 点名；
+- ``single``：团队只作角色预设，指定角色直接跑。
+
+旧的工作区群组（`workspaces.host_role_id` / `member_role_ids`）不再是聊天路由依据。
+V3 起只承认显式绑定到会话的团队；`ensure_team_for_conversation` 仅作为
+旧数据兼容工具保留，不再在对话时自动调用（否则单聊会被归一成「默认群聊」）。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import text
+
+from services.agent_zero.database import get_session_local
+from services.agent_zero.stores import zero_store
+
+logger = logging.getLogger(__name__)
+
+_MAX_MEMBERS = 12
+# 团队协作模式与圆桌上限（1..12）；默认 4，与旧的 GROUP_MAX_SPEAKERS 对齐。
+MODES = ("orchestrate", "roundtable", "single")
+DEFAULT_MODE = "orchestrate"
+DEFAULT_SPEAKERS = 4
+MAX_SPEAKERS_LIMIT = 12
+
+
+def normalize_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in MODES else DEFAULT_MODE
+
+
+def normalize_speakers(value: Any) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SPEAKERS
+    return max(1, min(n, MAX_SPEAKERS_LIMIT))
+
+
+def _q(name: str) -> str:
+    return zero_store._q(name)
+
+
+def _json_list(val: Any) -> List[Any]:
+    """JSON 列经 raw SQL 返回为字符串——解析回列表。"""
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return val if isinstance(val, list) else []
+
+
+def _role_brief(role: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not role:
+        return None
+    envelope = role.get("envelope") if isinstance(role.get("envelope"), dict) else {}
+    tools = envelope.get("tools") if isinstance(envelope.get("tools"), list) else []
+    return {
+        "id": role.get("id"),
+        "name": str(role.get("name") or role.get("id") or ""),
+        "expertise": str(role.get("expertise") or "")[:600],
+        "avatar": role.get("avatar") or "",
+        "tools": [str(t) for t in tools][:40],
+        "model_code": str(role.get("model_code") or ""),
+    }
+
+
+def _envelope_with(envelope: Any) -> Dict[str, Any]:
+    """以默认包络为底，合并调用方显式给出的工具子集 / 策略。
+
+    只有**已知工具 code** 会被收进包络（拼错的工具名不会变成死配置）；
+    没给 ``tools`` 时保持默认全集，避免老团队创建路径突然收窄能力。
+    """
+    base = dict(zero_store.DEFAULT_ENVELOPE)
+    if not isinstance(envelope, dict):
+        return base
+    raw_tools = envelope.get("tools")
+    if isinstance(raw_tools, list) and raw_tools:
+        try:
+            from services.agent_zero.tools import registry as _registry
+
+            known = set(_registry.known_codes())
+            tools = [_registry.canonical(str(t)) for t in raw_tools if str(t).strip()]
+            tools = [t for t in dict.fromkeys(tools) if t in known]
+        except Exception:
+            tools = [str(t) for t in raw_tools if str(t).strip()]
+        if tools:
+            base["tools"] = tools
+    for key in ("data_scope", "network", "egress_allowlist", "write_paths", "db",
+                "models", "principles"):
+        if key in envelope and envelope.get(key) is not None:
+            base[key] = envelope[key]
+    return base
+
+
+def _ensure_role(ws_id: str, role_id: str, name: str, expertise: str,
+                 envelope: Any = None, model_code: Any = None) -> Dict[str, Any]:
+    """创建/更新团队成员角色：默认能力包络，可按角色收窄工具 / 指定模型。"""
+    model = str(model_code or "").strip() or None
+    return zero_store.upsert_role({
+        "id": role_id,
+        "group_id": ws_id,
+        "name": name or role_id,
+        "persona": "",
+        "expertise": expertise[:600],
+        "envelope": _envelope_with(envelope),
+        "model_code": model,
+    })
+
+
+def _team_public(team: Dict[str, Any]) -> Dict[str, Any]:
+    leader = _role_brief(zero_store.get_role(str(team.get("leader_role_id") or "")))
+    if not leader:
+        leader = {"id": None, "name": "主持", "expertise": "", "avatar": ""}
+    members = []
+    for rid in _json_list(team.get("member_role_ids")):
+        b = _role_brief(zero_store.get_role(str(rid)))
+        if b:
+            members.append(b)
+    return {
+        "id": team.get("id"),
+        "workspace_id": team.get("workspace_id"),
+        "name": team.get("name") or "",
+        "description": team.get("description") or "",
+        "mode": normalize_mode(team.get("mode")),
+        "max_speakers": normalize_speakers(team.get("max_speakers")),
+        "leader": leader,
+        "members": members,
+        "created_at": str(team.get("created_at") or ""),
+        "updated_at": str(team.get("updated_at") or ""),
+    }
+
+
+_MODE_NOTICE = {"orchestrate": "主持编排", "roundtable": "圆桌", "single": "单角"}
+
+
+def _notice(conv_ids: List[str], text: str) -> None:
+    """给相关会话写一条 IM 系统消息（失败不影响主流程）。"""
+    text = str(text or "").strip()
+    if not text:
+        return
+    try:
+        from services.agent_zero.task_layer import conversation
+
+        for cid in conv_ids:
+            if cid:
+                conversation.append_system_message(str(cid), text)
+    except Exception:
+        logger.debug("团队系统消息写入失败（忽略）", exc_info=True)
+
+
+def bound_conversation_ids(team_id: str) -> List[str]:
+    rows = None
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT id FROM {_q('conversations')} WHERE team_id = :tid"),
+            {"tid": team_id},
+        ).all()
+    return [str(r[0]) for r in (rows or [])]
+
+
+def _fetch_team(team_id: str) -> Optional[Dict[str, Any]]:
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        row = db.execute(
+            text(f"SELECT * FROM {_q('agent_teams')} WHERE id = :id"),
+            {"id": team_id},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def list_teams(ws_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """团队列表。``ws_id`` 为空 = 全部（V3：群组独立于工作区）。
+
+    workspace_id 列只保留为历史来源，不再参与可见性 / 权限判断。
+    """
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        if ws_id:
+            rows = db.execute(
+                text(f"SELECT * FROM {_q('agent_teams')} WHERE workspace_id = :ws "
+                     f"ORDER BY created_at DESC"),
+                {"ws": ws_id},
+            ).mappings().all()
+        else:
+            rows = db.execute(
+                text(f"SELECT * FROM {_q('agent_teams')} ORDER BY created_at DESC"),
+            ).mappings().all()
+    return [_team_public(dict(r)) for r in rows]
+
+
+def get_team(team_id: str) -> Optional[Dict[str, Any]]:
+    row = _fetch_team(team_id)
+    return _team_public(row) if row else None
+
+
+def _role_referenced_elsewhere(role_id: str, team_id: Optional[str]) -> bool:
+    """角色是否还被别的团队 / 会话 / 工作区引用（删除前必须检查）。
+
+    共享角色是合法用法：删一个团队不能把另一个团队还在用的角色删掉。
+    """
+    rid = str(role_id or "").strip()
+    if not rid:
+        return False
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT id, leader_role_id, member_role_ids FROM {_q('agent_teams')}"),
+        ).mappings().all()
+        for row in rows:
+            if team_id and str(row["id"]) == str(team_id):
+                continue
+            if str(row["leader_role_id"] or "") == rid:
+                return True
+            if rid in [str(x) for x in _json_list(row["member_role_ids"])]:
+                return True
+        conv = db.execute(
+            text(f"SELECT 1 FROM {_q('conversations')} WHERE role_id = :rid LIMIT 1"),
+            {"rid": rid},
+        ).first()
+        if conv:
+            return True
+        ws = db.execute(
+            text(f"SELECT 1 FROM {_q('workspaces')} WHERE host_role_id = :rid LIMIT 1"),
+            {"rid": rid},
+        ).first()
+        if ws:
+            return True
+    return False
+
+
+def _sync_roles(ws_id: str, leader: Dict[str, Any],
+                members: List[Dict[str, Any]],
+                old_member_ids: List[str], old_leader_id: Optional[str],
+                team_id: Optional[str] = None) -> tuple:
+    """确保 leader/member 角色存在；删除旧团队角色中不再使用的。"""
+    def _resolve(spec: Dict[str, Any], prefix: str) -> str:
+        rid = str(spec.get("id") or "").strip()
+        if not rid:
+            rid = zero_store.new_id(prefix)
+        env = spec.get("envelope")
+        if not isinstance(env, dict) and isinstance(spec.get("tools"), list):
+            env = {"tools": spec.get("tools")}
+        _ensure_role(ws_id, rid, str(spec.get("name") or "").strip()[:128],
+                     str(spec.get("expertise") or "").strip(),
+                     envelope=env,
+                     model_code=spec.get("model_code") or spec.get("model"))
+        return rid
+
+    leader_id = _resolve(leader or {}, "teamrole")
+    member_ids = [_resolve(m, "teamrole") for m in (members or [])][: _MAX_MEMBERS]
+    stale = set(old_member_ids) | ({old_leader_id} if old_leader_id else set())
+    stale -= {leader_id} | set(member_ids)
+    for rid in stale:
+        if (rid and rid != zero_store.DEFAULT_ROLE_ID
+                and not _role_referenced_elsewhere(rid, team_id)):
+            zero_store.delete_role(rid)
+    return leader_id, member_ids
+
+
+def create_team(ws_id: str, name: str, description: str = "",
+                leader: Optional[Dict[str, Any]] = None,
+                members: Optional[List[Dict[str, Any]]] = None,
+                mode: Any = None,
+                max_speakers: Any = None,
+                team_id: Optional[str] = None) -> Dict[str, Any]:
+    name = str(name or "").strip()[:120]
+    if not name:
+        raise ValueError("团队名称不能为空")
+    # V3：群组不再必须属于某个工作区；workspace_id 仅作为历史来源保存。
+    ws_id = str(ws_id or "").strip() or zero_store.DEFAULT_WORKSPACE_ID
+    if not zero_store.get_workspace(ws_id):
+        raise ValueError(f"工作区不存在: {ws_id}")
+    team_id = str(team_id or "").strip() or zero_store.new_id("team")
+    leader_id, member_ids = _sync_roles(ws_id, leader or {"name": "主持"},
+                                        members or [], [], None)
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"INSERT INTO {_q('agent_teams')} "
+                 f"(id, workspace_id, name, description, mode, max_speakers, "
+                 f"leader_role_id, member_role_ids) "
+                 f"VALUES (:id, :ws, :name, :desc, :mode, :speakers, :leader, :members)"),
+            {"id": team_id, "ws": ws_id, "name": name,
+             "desc": str(description or "").strip()[:1000],
+             "mode": normalize_mode(mode), "speakers": normalize_speakers(max_speakers),
+             "leader": leader_id, "members": zero_store._json(member_ids)},
+        )
+        db.commit()
+    zero_store.append_audit("local", "team_create",
+                            args={"workspace_id": ws_id, "team_id": team_id,
+                                  "name": name, "members": len(member_ids)})
+    return get_team(team_id) or {}
+
+
+def update_team(team_id: str, name: Optional[str] = None,
+                description: Optional[str] = None,
+                leader: Optional[Dict[str, Any]] = None,
+                members: Optional[List[Dict[str, Any]]] = None,
+                mode: Any = None,
+                max_speakers: Any = None) -> Dict[str, Any]:
+    row = _fetch_team(team_id)
+    if not row:
+        raise ValueError(f"团队不存在: {team_id}")
+    ws_id = str(row.get("workspace_id") or "")
+    leader_id = str(row.get("leader_role_id") or "")
+    member_ids = [str(x) for x in _json_list(row.get("member_role_ids"))]
+    if name is not None:
+        name = str(name).strip()[:120]
+        if not name:
+            raise ValueError("团队名称不能为空")
+    if leader is not None or members is not None:
+        leader_id, member_ids = _sync_roles(
+            ws_id,
+            leader if leader is not None else _role_brief(zero_store.get_role(leader_id)) or {"id": leader_id, "name": "主持", "expertise": ""},
+            members if members is not None else [
+                _role_brief(zero_store.get_role(mid)) or {"id": mid} for mid in member_ids
+            ],
+            member_ids, leader_id or None, team_id=team_id)
+    old_name = str(row.get("name") or "")
+    old_mode = normalize_mode(row.get("mode"))
+    old_member_ids = [str(x) for x in _json_list(row.get("member_role_ids"))]
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"UPDATE {_q('agent_teams')} SET "
+                 f"name = COALESCE(:name, name), "
+                 f"description = COALESCE(:desc, description), "
+                 f"mode = CASE WHEN :mode IS NULL THEN mode ELSE :mode END, "
+                 f"max_speakers = CASE WHEN :speakers IS NULL THEN max_speakers "
+                 f"ELSE :speakers END, "
+                 f"leader_role_id = :leader, "
+                 f"member_role_ids = :members, "
+                 f"updated_at = datetime('now','localtime') "
+                 f"WHERE id = :id"),
+            {"id": team_id, "name": name, "desc": description,
+             "mode": normalize_mode(mode) if mode is not None else None,
+             "speakers": normalize_speakers(max_speakers) if max_speakers is not None else None,
+             "leader": leader_id, "members": zero_store._json(member_ids)},
+        )
+        db.commit()
+    # IM 系统消息：只对绑定该群的会话发；一次 update 可能同时改多项。
+    conv_ids = bound_conversation_ids(team_id)
+    if conv_ids:
+        new_name = str(name if name is not None else old_name)
+        added = [str(x) for x in member_ids if str(x) not in old_member_ids]
+        removed = [str(x) for x in old_member_ids if str(x) not in member_ids]
+        for rid in added:
+            role = zero_store.get_role(rid)
+            _notice(conv_ids, f"「{(role or {}).get('name') or rid}」加入了群聊")
+        for rid in removed:
+            role = zero_store.get_role(rid)
+            _notice(conv_ids, f"「{(role or {}).get('name') or rid}」退出了群聊")
+        new_mode = normalize_mode(mode) if mode is not None else old_mode
+        if new_mode != old_mode:
+            _notice(conv_ids, f"协作模式切换为「{_MODE_NOTICE[new_mode]}」")
+        if name is not None and new_name != old_name:
+            _notice(conv_ids, f"群名改为「{new_name}」")
+    return get_team(team_id) or {}
+
+
+def delete_team(team_id: str) -> bool:
+    row = _fetch_team(team_id)
+    if not row:
+        return False
+    bound = bound_conversation_ids(team_id)
+    team_name = str(row.get("name") or team_id)
+    # 删除团队成员角色（先清对话绑定，FK 无关但保持整洁）
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"UPDATE {_q('conversations')} SET team_id = NULL WHERE team_id = :id"),
+            {"id": team_id},
+        )
+        db.commit()
+    ids = [str(x) for x in _json_list(row.get("member_role_ids"))]
+    leader_id = str(row.get("leader_role_id") or "")
+    if leader_id and leader_id != zero_store.DEFAULT_ROLE_ID:
+        ids.append(leader_id)
+    for rid in ids:
+        if (rid and rid != zero_store.DEFAULT_ROLE_ID
+                and not _role_referenced_elsewhere(rid, team_id)):
+            zero_store.delete_role(rid)
+    with SessionLocal() as db:
+        db.execute(text(f"DELETE FROM {_q('agent_teams')} WHERE id = :id"),
+                   {"id": team_id})
+        db.commit()
+    _notice(bound, f"群聊「{team_name}」已解散，你已回到单聊")
+    return True
+
+
+def bind_team(conv_id: str, team_id: Optional[str],
+              *, notice: Optional[str] = None) -> Dict[str, Any]:
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"UPDATE {_q('conversations')} SET team_id = :tid, "
+                 f"updated_at = datetime('now','localtime') WHERE id = :id"),
+            {"tid": team_id or None, "id": conv_id},
+        )
+        db.commit()
+    if notice:
+        _notice([conv_id], notice)
+    elif team_id:
+        team = get_team(team_id)
+        _notice([conv_id], f"你已加入群聊「{(team or {}).get('name') or team_id}」")
+    return {"bound": bool(team_id), "team_id": team_id}
+
+
+def team_for_conv(conv: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    tid = str(conv.get("team_id") or "").strip()
+    if not tid:
+        return None
+    team = get_team(tid)
+    if not team:
+        return None
+    # 只有主持、没有成员 = 不是群聊。旧版本可能把这种「默认团队」绑到单聊上；
+    # 这里统一按单聊处理，避免单聊被显示成「默认群聊」或出现主持口吻。
+    if not (team.get("members") or []):
+        return None
+    # V3：群组独立，不要求与会话同工作区（workspace_id 仅历史来源）。
+    return team
+
+
+_MODE_HINTS = {
+    "orchestrate": (
+        "执行方式：把适合某成员的专业子任务用 `delegate(target=team, member_id, goal)` "
+        "委派给该成员（member_id 取上面列表中的 id）；成员结论返回后你负责整合、"
+        "校验与最终汇报，不要只转述。"
+    ),
+    "roundtable": (
+        "执行方式：这是圆桌群聊——你与成员会各自应答；用户用 `@成员名` 点名时由该成员回复。"
+        "只说你自己的判断，不要替成员转发或编造他们的结论。"
+    ),
+    "single": (
+        "执行方式：团队只作角色预设，本轮只有你在应答；不需要委派成员。"
+    ),
+}
+
+
+def roster_text(team: Dict[str, Any],
+                role: Optional[Dict[str, Any]] = None) -> str:
+    """团队名单 → 注入系统提示的正文（含模式、成员工具子集与模型）。
+
+    ``role`` 用来区分视角：主持看到完整名单与编排职责；成员只看到自己是谁、
+    以及「圆桌里等 @ / 编排里等委派」的行为约束——否则成员也会被提示成主持。
+    """
+    mode = normalize_mode(team.get("mode"))
+    leader_id = str(((team.get("leader") or {}).get("id")) or "")
+    mine = str((role or {}).get("id") or "")
+    if mine and leader_id and mine != leader_id:
+        name = str((role or {}).get("name") or mine)
+        lines = [f"你是团队「{team['name']}」的成员「{name}」。"]
+        expertise = str((role or {}).get("expertise") or "").strip()
+        if expertise:
+            lines.append(f"你的专长：{expertise}")
+        if mode == "roundtable":
+            lines.append(
+                "协作模式：`roundtable`（圆桌群聊）——只有用户 `@你` 时才需要回应；"
+                "只讲你自己的判断，不要替主持或其它成员发言。")
+        else:
+            lines.append(
+                "协作模式：`orchestrate`（主持编排）——你只处理主持委派给你的子任务；"
+                "没有委派时不要主动发言。")
+        return "\n".join(lines)
+    lines = [f"你是团队「{team['name']}」的**主持**，负责编排与收尾。"]
+    if team.get("description"):
+        lines.append(f"团队目标：{team['description']}")
+    lines.append(f"协作模式：`{mode}`（{_MODE_HINTS[mode]}）")
+    for m in team.get("members") or []:
+        bits = []
+        exp = str(m.get("expertise") or "").strip()
+        if exp:
+            bits.append(f"专长：{exp}")
+        tools = [str(t) for t in (m.get("tools") or []) if str(t).strip()]
+        if tools:
+            shown = "、".join(tools[:8]) + ("…" if len(tools) > 8 else "")
+            bits.append(f"工具：{shown}")
+        model = str(m.get("model_code") or "").strip()
+        if model:
+            bits.append(f"模型：{model}")
+        suffix = f"（{'；'.join(bits)}）" if bits else ""
+        lines.append(f"- 成员「{m['name']}」{suffix}")
+    if not team.get("members"):
+        lines.append("- （暂无成员）")
+    return "\n".join(lines)
+
+
+def default_team_id(ws_id: str) -> str:
+    """旧工作区群组归一后的默认团队 id（确定性，便于幂等）。"""
+    return f"team-default-{ws_id}"
+
+
+def ensure_workspace_team(ws_id: str, *, bind_conversation: Optional[str] = None
+                          ) -> Optional[Dict[str, Any]]:
+    """把旧的工作区群组（host + members）归一成一个默认团队，幂等。
+
+    - 只认工作区里**已存在**的角色；工作区没有群组信号时返回 None；
+    - 已存在默认团队时直接复用（不覆盖用户后来改过的名字 / 模式 / 成员）；
+    - ``bind_conversation``：会话还没有 team_id 时顺手绑上。
+    """
+    ws_id = str(ws_id or "").strip()
+    if not ws_id:
+        return None
+    tid = default_team_id(ws_id)
+    existing = get_team(tid)
+    if existing:
+        if bind_conversation:
+            _bind_if_empty(bind_conversation, tid)
+        return existing
+    ws = zero_store.get_workspace(ws_id)
+    if not ws:
+        return None
+    host = str(ws.get("host_role_id") or "").strip()
+    member_ids = [str(x) for x in _json_list(ws.get("member_role_ids")) if str(x).strip()]
+    leader_id = host if host and zero_store.get_role(host) else zero_store.DEFAULT_ROLE_ID
+    if not zero_store.get_role(leader_id):
+        return None
+    members = [rid for rid in dict.fromkeys(member_ids)
+               if rid != leader_id and zero_store.get_role(rid)]
+    # V3：工作区只是文件容器。「主持 + 至少一个成员」才算旧群组的群聊信号。
+    # 只有默认角色（新添加的文件夹工作区 / 默认工作区）不建默认群聊——
+    # 否则一条单聊会被归一成「默认群聊」。
+    if not members:
+        return None
+    name = str(ws.get("name") or "").strip()
+    if not name or name in ("Workspace", "工作区", "默认工作区"):
+        name = "默认群聊"
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"INSERT INTO {_q('agent_teams')} "
+                 f"(id, workspace_id, name, description, mode, max_speakers, "
+                 f"leader_role_id, member_role_ids) "
+                 f"VALUES (:id, :ws, :name, :desc, :mode, :speakers, :leader, :members) "
+                 f"ON CONFLICT (id) DO NOTHING"),
+            {"id": tid, "ws": ws_id, "name": name[:120],
+             "desc": "由旧工作区群组自动归一（host + member_role_ids）",
+             "mode": DEFAULT_MODE, "speakers": DEFAULT_SPEAKERS,
+             "leader": leader_id, "members": zero_store._json(members)},
+        )
+        db.commit()
+    team = get_team(tid)
+    if team and bind_conversation:
+        _bind_if_empty(bind_conversation, tid)
+    return team
+
+
+def _bind_if_empty(conv_id: str, team_id: str) -> None:
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"UPDATE {_q('conversations')} SET team_id = :tid, "
+                 f"updated_at = datetime('now','localtime') "
+                 f"WHERE id = :id AND (team_id IS NULL OR team_id = '')"),
+            {"tid": team_id, "id": conv_id},
+        )
+        db.commit()
+
+
+def ensure_team_for_conversation(conv: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """会话的有效团队：已绑定直接用；没绑定则按工作区群组惰性归一并绑定。"""
+    team = team_for_conv(conv)
+    if team:
+        return team
+    if str(conv.get("team_id") or "").strip():
+        return None  # 绑了一个不存在的团队：不自动改绑，避免静默串群
+    team = ensure_workspace_team(str(conv.get("workspace_id") or ""),
+                                 bind_conversation=str(conv.get("id") or ""))
+    if team:
+        conv["team_id"] = team["id"]
+    return team
+
+
+def cleanup_phantom_default_teams() -> int:
+    """清掉旧版本按工作区自动归一的「默认群聊」。
+
+    旧行为把 `workspaces.host_role_id / member_role_ids` 惰性归一成
+    `team-default-<ws>` 团队并绑到会话上，于是**一条单聊也变成了群聊**
+    （标题变成「默认群聊」、输入框出现 `@成员`、系统提示里写着「你是主持」）。
+    V3 里只有用户显式建的群组才算群聊：`team-default-*` 是旧版自动产物，
+    全部解绑并删除；用户自建群组的 id 不是这个前缀，不受影响。幂等。
+    """
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT id FROM {_q('agent_teams')} WHERE id LIKE :pat"),
+            {"pat": "team-default-%"},
+        ).fetchall()
+        legacy = [str(r[0]) for r in rows]
+        if not legacy:
+            return 0
+        marks = ",".join(f":t{i}" for i in range(len(legacy)))
+        params = {f"t{i}": tid for i, tid in enumerate(legacy)}
+        db.execute(
+            text(f"UPDATE {_q('conversations')} SET team_id = NULL, "
+                 f"updated_at = datetime('now','localtime') "
+                 f"WHERE team_id IN ({marks})"),
+            params,
+        )
+        db.execute(
+            text(f"DELETE FROM {_q('agent_teams')} WHERE id IN ({marks})"),
+            params,
+        )
+        db.commit()
+    return len(legacy)
