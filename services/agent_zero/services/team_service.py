@@ -133,11 +133,29 @@ def _team_public(team: Dict[str, Any]) -> Dict[str, Any]:
     if not leader:
         leader = {"id": None, "name": "主持", "expertise": "", "avatar": "",
                   "title": "", "department_id": "", "department": ""}
+    # 成员按 id / 名字去重，并排除主持：旧数据可能把主持也写进 member_role_ids，
+    # 直接回给前端会显示成两个同名成员。
+    leader_id = str(leader.get("id") or "")
+    leader_name = str(leader.get("name") or "").strip().lower()
     members = []
+    seen_ids: set = set()
+    seen_names: set = set()
     for rid in _json_list(team.get("member_role_ids")):
         b = _role_brief(zero_store.get_role(str(rid)), paths)
-        if b:
-            members.append(b)
+        if not b:
+            continue
+        mid = str(b.get("id") or "")
+        name = str(b.get("name") or "").strip().lower()
+        if not mid or mid in seen_ids:
+            continue
+        if leader_id and mid == leader_id:
+            continue
+        if name and (name == leader_name or name in seen_names):
+            continue
+        seen_ids.add(mid)
+        if name:
+            seen_names.add(name)
+        members.append(b)
     return {
         "id": team.get("id"),
         "workspace_id": team.get("workspace_id"),
@@ -271,7 +289,28 @@ def _sync_roles(ws_id: str, leader: Dict[str, Any],
         return rid
 
     leader_id = _resolve(leader or {}, "teamrole")
-    member_ids = [_resolve(m, "teamrole") for m in (members or [])][: _MAX_MEMBERS]
+    # 成员去重：同一个 id 或同名角色只保留一个，且不能和主持重复。
+    # 旧前端可能把主持也勾成成员，或对同一角色重复点「邀请」；这里统一收口。
+    member_ids = []
+    seen_ids: set = set()
+    seen_names: set = set()
+    for spec in (members or []):
+        spec = spec if isinstance(spec, dict) else {}
+        sid = str(spec.get("id") or "").strip()
+        sname = str(spec.get("name") or "").strip().lower()
+        if sid and (sid == leader_id or sid in seen_ids):
+            continue
+        if sname and sname in seen_names:
+            continue
+        rid = _resolve(spec, "teamrole")
+        if rid == leader_id or rid in seen_ids:
+            continue
+        seen_ids.add(rid)
+        if sname:
+            seen_names.add(sname)
+        member_ids.append(rid)
+        if len(member_ids) >= _MAX_MEMBERS:
+            break
     stale = set(old_member_ids) | ({old_leader_id} if old_leader_id else set())
     stale -= {leader_id} | set(member_ids)
     for rid in stale:

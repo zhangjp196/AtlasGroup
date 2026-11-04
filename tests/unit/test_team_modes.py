@@ -278,6 +278,31 @@ def test_shared_role_survives_team_delete(app_env):
     assert zero_store.get_role(rid) is None          # 没人用了才删
 
 
+def test_group_members_dedupe_by_id_and_name(app_env):
+    """邀请 / 保存群成员时：主持不能重复、同 id / 同名成员只保留一个。"""
+    ws = _init(app_env)
+    team = ts.create_team(
+        ws, "去重群",
+        leader={"name": "主持"},
+        members=[
+            {"name": "后端", "expertise": "API"},
+            {"name": "后端", "expertise": "重复"},
+            {"id": "default", "name": "主持"},
+        ],
+    )
+    assert team["leader"]["name"] == "主持"
+    assert [m["name"] for m in team["members"]] == ["后端"]
+
+    updated = ts.update_team(team["id"], members=[
+        {"id": team["members"][0]["id"], "name": "后端"},
+        {"name": "后端"},
+        {"name": "测试"},
+        {"name": "测试"},
+    ])
+    assert [m["name"] for m in updated["members"]] == ["后端", "测试"]
+
+
+
 def test_system_message_is_display_only(app_env):
     ws = _init(app_env)
     conv = conversation.create_conversation(ws, "local")

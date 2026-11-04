@@ -4552,6 +4552,10 @@
     };
   }
 
+  function roleNameKey(name) {
+    return String(name || '').trim().toLowerCase();
+  }
+
   function openWorkspaceDetail(wsId) {
     const ws = S.workspaces.find((w) => w.id === wsId);
     if (!ws) { toast('工作区不存在', 'bad'); return; }
@@ -4705,8 +4709,11 @@
     if (leader && leader.id) all.push({ ...leader, isLeader: true });
     members.forEach((m) => { if (m && m.id && m.id !== (leader && leader.id)) all.push({ ...m, isLeader: false }); });
     const used = new Set(all.map((m) => m.id));
+    const usedNames = new Set(all.map((m) => roleNameKey(m.name)).filter(Boolean));
     const q = String(groupDraft.search || '').trim().toLowerCase();
+    // 邀请列表排除已在群里的成员：id 相同或名字相同都算已加入，避免同名角色重复出现。
     const available = S.roles.filter((r) => r && r.id && !used.has(r.id)
+      && !usedNames.has(roleNameKey(r.name))
       && (!q || `${r.name || ''} ${r.expertise || ''} ${r.id}`.toLowerCase().includes(q)));
     const memberRows = all.length ? all.map((m) => `<div class="group-member" data-gm-row="${h(m.id)}">
       ${av(m.name, 'round', m.avatar)}
@@ -4776,14 +4783,30 @@
     const team = S.teams.find((t) => t.id === teamId);
     if (!team) { toast('群组不存在', 'bad'); return; }
     groupDrawerTeam = team;
+    const leader = team.leader ? groupRoleBrief(team.leader) : null;
+    // 成员按 id / 名字去重，并排除主持（旧数据可能把主持也写进 members）。
+    const leaderId = leader && leader.id;
+    const leaderName = roleNameKey(leader && leader.name);
+    const seenIds = new Set();
+    const seenNames = new Set();
+    const members = (team.members || [])
+      .map(groupRoleBrief)
+      .filter((m) => {
+        const key = roleNameKey(m.name);
+        if (!m.id || m.id === leaderId || (key && key === leaderName)) return false;
+        if (seenIds.has(m.id) || (key && seenNames.has(key))) return false;
+        seenIds.add(m.id);
+        if (key) seenNames.add(key);
+        return true;
+      });
     groupDraft = {
       name: team.name || '',
       avatar: team.avatar || '',
       description: team.description || '',
       mode: team.mode || 'orchestrate',
       max_speakers: Number(team.max_speakers) || 4,
-      leader: team.leader ? groupRoleBrief(team.leader) : null,
-      members: (team.members || []).map(groupRoleBrief),
+      leader,
+      members,
       search: '',
     };
     renderGroupDrawer();
@@ -4794,14 +4817,29 @@
     syncGroupDraft();
     const name = String(groupDraft.name || '').trim();
     if (!name) { toast('群名不能为空', 'bad'); return; }
+    const leader = groupDraft.leader ? groupRoleBrief(groupDraft.leader) : null;
+    const leaderId = leader && leader.id;
+    const leaderName = roleNameKey(leader && leader.name);
+    const seenIds = new Set();
+    const seenNames = new Set();
+    const members = (groupDraft.members || [])
+      .map(groupRoleBrief)
+      .filter((m) => {
+        const key = roleNameKey(m.name);
+        if (!m.id || m.id === leaderId || (key && key === leaderName)) return false;
+        if (seenIds.has(m.id) || (key && seenNames.has(key))) return false;
+        seenIds.add(m.id);
+        if (key) seenNames.add(key);
+        return true;
+      });
     const payload = {
       name,
       avatar: String(groupDraft.avatar || ''),
       description: String(groupDraft.description || '').trim(),
       mode: groupDraft.mode,
       max_speakers: groupDraft.max_speakers,
-      leader: groupDraft.leader ? groupRoleBrief(groupDraft.leader) : null,
-      members: (groupDraft.members || []).map(groupRoleBrief),
+      leader,
+      members,
     };
     const btn = $('#groupSaveBtn');
     if (btn) btn.disabled = true;
@@ -5483,7 +5521,12 @@
         if (groupDraft.members.length >= 12) { toast('群成员已达上限', 'bad'); return; }
         const role = S.roles.find((r) => r.id === invite.dataset.gmInvite);
         if (!role) return;
-        if (groupDraft.members.some((m) => m.id === role.id) || (groupDraft.leader && groupDraft.leader.id === role.id)) return;
+        const key = roleNameKey(role.name);
+        const leader = groupDraft.leader;
+        if ((groupDraft.members || []).some((m) => m.id === role.id
+              || (key && roleNameKey(m.name) === key))
+            || (leader && (leader.id === role.id
+              || (key && roleNameKey(leader.name) === key)))) return;
         groupDraft.members.push(groupRoleBrief(role));
         renderGroupDrawer();
         return;
