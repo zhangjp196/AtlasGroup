@@ -40,6 +40,7 @@ def _json(x: Any) -> str:
 
 def create_run(conversation_id: str, user: str, *,
                role_id: Optional[str] = None,
+               target_role_id: Optional[str] = None,
                content: Optional[str] = None,
                mentions: Optional[List[str]] = None,
                mode: str = "chat",
@@ -72,10 +73,12 @@ def create_run(conversation_id: str, user: str, *,
             pos = int(queue_pos)
         db.execute(
             text(f"INSERT INTO {_q('conversation_runs')} "
-                 f"(id, conversation_id, role_id, status, mode, auto_execute, content, mentions, "
-                 f" cursor, queue_pos, queued_msg_id, thinking_level, created_by) "
-                 f"VALUES (:id, :cid, :rid, :status, :mode, :auto_execute, :content, :mentions, 0, :pos, :qmid, :thinking, :by)"),
+                 f"(id, conversation_id, role_id, target_role_id, status, mode, auto_execute, "
+                 f" content, mentions, cursor, queue_pos, queued_msg_id, thinking_level, created_by) "
+                 f"VALUES (:id, :cid, :rid, :trid, :status, :mode, :auto_execute, :content, "
+                 f" :mentions, 0, :pos, :qmid, :thinking, :by)"),
             {"id": run_id, "cid": conversation_id, "rid": role_id,
+             "trid": (str(target_role_id).strip() or None) if target_role_id else None,
              "status": STATUS_QUEUED, "mode": mode, "auto_execute": bool(auto_execute), "content": content,
              "mentions": _json(mentions) if mentions is not None else None,
              "pos": pos, "qmid": queued_msg_id,
@@ -85,7 +88,8 @@ def create_run(conversation_id: str, user: str, *,
         db.commit()
     append_audit(user, "conversation_run_create",
                  args={"run_id": run_id, "conversation_id": conversation_id,
-                       "role_id": role_id, "mode": mode, "auto_execute": bool(auto_execute),
+                       "role_id": role_id, "target_role_id": target_role_id or "",
+                       "mode": mode, "auto_execute": bool(auto_execute),
                        "queue_pos": pos,
                        "mentions": list(mentions or []),
                        "thinking_level": thinking_level or "",

@@ -217,6 +217,33 @@ def test_delegate_tools_cannot_widen_member_envelope(app_env):
     assert conversation._narrow_role_tools(member, []) is member
 
 
+def test_call_team_dispatches_background_member_run(app_env):
+    """主持 call_team = 在群里 @ 成员，成员作为独立后台 run 执行，不再阻塞主持。"""
+    import asyncio
+    import json
+
+    from services.agent_zero.task_layer import run_service
+
+    ws = _init(app_env)
+    team = ts.create_team(ws, "后台群", leader={"name": "主持"},
+                          members=[{"name": "后端", "expertise": "API"}])
+    conv = conversation.create_conversation(ws, "local", team_id=team["id"])
+    member = team["members"][0]
+    out = json.loads(asyncio.run(conversation._exec_call_team(
+        conv, "local", zero_store.get_role(team["leader"]["id"]),
+        {"member_name": member["name"], "goal": "整理 API 文档"}, 0)))
+    assert out["status"] == "dispatched"
+    run = run_service.get_run(out["run_id"])
+    assert run["target_role_id"] == member["id"]
+    assert run["status"] in ("queued", "running")
+
+    messages = conversation.list_messages(conv["id"])
+    mention = next(m for m in messages if m.get("kind") == "team_mention")
+    assert member["name"] in mention["content"]
+    assert "整理 API 文档" in mention["content"]
+    assert mention["queued"] is True
+
+
 def test_team_manage_tool_creates_with_mode(app_env):
     """模型侧入口与 REST 写同一份数据：mode / max_speakers 都要落库并绑定会话。"""
     import json
@@ -271,6 +298,95 @@ def test_mentions_are_stored_on_run(app_env):
                                  content="@后端 看下接口", mentions=["后端"])
     got = run_service.get_run(run["id"])
     assert got["mentions"] == ["后端"]
+
+
+# ── 点名直连：用户 / 角色 @ 谁，就由谁答 ────────────────────────────────
+
+def test_mention_targets_resolve_id_name_and_text():
+    roles = [{"id": "h", "name": "主持"},
+             {"id": "m1", "name": "后端"},
+             {"id": "m2", "name": "测试"}]
+    # 显式 mentions 优先：传 id 或名字都能命中
+    assert [r["id"] for r in conversation._mention_targets(["m1"], "", roles)] == ["m1"]
+    assert [r["id"] for r in conversation._mention_targets(["后端"], "", roles)] == ["m1"]
+    # 正文兜底；多个点名保持出现顺序
+    assert [r["id"] for r in conversation._mention_targets(
+        None, "@后端 和 @测试 一起看", roles)] == ["m1", "m2"]
+    # 没有点名就是空，由调用方决定默认主持
+    assert conversation._mention_targets(None, "看下接口", roles) == []
+
+
+def test_direct_mention_overrides_orchestrate_route(app_env):
+    """orchestrate（默认模式）下用户 @成员：直接交给成员，不经过主持。"""
+    ws = _init(app_env)
+    team = ts.create_team(ws, "编排群", mode="orchestrate",
+                          leader={"name": "主持"},
+                          members=[{"name": "后端", "expertise": "API"}])
+    use_group, _leader, members, addressed = conversation._team_reply_plan(
+        team, None, "@后端 看下接口")
+    assert use_group is True
+    assert [r["id"] for r in addressed] == [members[0]["id"]]
+
+    # 没点名时 orchestrate 仍由主持单角色运行
+    no_mention, _leader, _members, addressed = conversation._team_reply_plan(
+        team, None, "看下接口")
+    assert no_mention is False and addressed == []
+
+
+def _fake_role_stream(monkeypatch, replies):
+    spoken = []
+
+    async def fake_stream(conv, user, role, sink, **kwargs):
+        spoken.append(role["id"])
+        sink["text"] = replies.get(role["id"], "")
+        if False:      # pragma: no cover - 让它成为异步生成器
+            yield {}
+
+    monkeypatch.setattr(conversation, "_stream_role", fake_stream)
+    monkeypatch.setattr(conversation, "_persist_assistant", lambda *a, **k: "msg")
+    monkeypatch.setattr(conversation, "_capture_run_memory", lambda *a, **k: None)
+    monkeypatch.setattr(conversation.zero_store, "append_audit", lambda *a, **k: None)
+    return spoken
+
+
+def test_group_reply_mention_answers_member_not_host(monkeypatch):
+    import asyncio
+
+    spoken = _fake_role_stream(monkeypatch, {"m1": "收到"})
+    host = {"id": "h", "name": "主持"}
+    member = {"id": "m1", "name": "后端"}
+
+    async def collect():
+        return [e async for e in conversation._group_reply_stream(
+            {"id": "conv1"}, "local", "@后端 看下接口", ["后端"], host, [member])]
+
+    events = asyncio.run(collect())
+    assert spoken == ["m1"]
+    done = [e for e in events if e.get("done")]
+    assert [e["role_id"] for e in done] == ["m1"]
+
+
+def test_group_reply_chains_mentions_from_any_role(monkeypatch):
+    """任何角色回复里 @成员，都由该成员直接接话，不需要主持转述。"""
+    import asyncio
+
+    spoken = _fake_role_stream(monkeypatch, {
+        "m1": "@主持 记一下，@测试 补用例",
+        "h": "好",
+        "m2": "用例补好了",
+    })
+    host = {"id": "h", "name": "主持"}
+    members = [{"id": "m1", "name": "后端"}, {"id": "m2", "name": "测试"}]
+
+    async def collect():
+        return [e async for e in conversation._group_reply_stream(
+            {"id": "conv1"}, "local", "@后端 看下接口", None, host, members,
+            max_speakers=4)]
+
+    events = asyncio.run(collect())
+    assert spoken == ["m1", "h", "m2"]
+    done = [e for e in events if e.get("done")]
+    assert [e["role_id"] for e in done] == ["m1", "h", "m2"]
 
 
 # ── 旧库升级 ────────────────────────────────────────────────────────────

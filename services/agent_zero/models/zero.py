@@ -58,11 +58,34 @@ class Workspace(Base):
     )
 
 
+class Department(Base):
+    """部门：可多级嵌套的组织单元，角色按部门归档。
+
+    `parent_id` 为空表示根部门；角色可以不属于任何部门（`roles.department_id`
+    为空），界面归入「未安排」。部门只影响管理与展示，不改变角色能力。
+    """
+
+    __tablename__ = "departments"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    avatar: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    created_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+
+
 class Role(Base):
     """角色：一个可执行的人格—— persona / expertise / 能力包络 / 模型档案。
 
     工作区里的默认角色 id 是 `default`（由 ensure_defaults 管理）。
     group_id 是角色所属空间（历史命名，等价于其它表的 workspace_id）。
+    `name` 是「谁」（人名 / 称呼），`title` 是「岗位」；`department_id` 为空表示
+    未安排部门。
     """
 
     __tablename__ = "roles"
@@ -70,6 +93,8 @@ class Role(Base):
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     group_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    department_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     persona: Mapped[str | None] = mapped_column(Text, nullable=True)
     expertise: Mapped[str | None] = mapped_column(Text, nullable=True)
     avatar: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -104,6 +129,7 @@ class AgentTeam(Base):
         Text, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    avatar: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 协作模式：orchestrate（主持编排）/ roundtable（多角色圆桌）/ single（单角）
     mode: Mapped[str] = mapped_column(
@@ -196,6 +222,8 @@ class ConversationRun(Base):
         Text, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
     )
     role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 后台成员任务：该 run 只让指定群成员执行（由主持 call_team / @ 触发）。
+    target_role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
     mode: Mapped[str] = mapped_column(
         Text, nullable=False, default="chat", server_default=text("'chat'")
@@ -467,11 +495,16 @@ class Goal(Base):
 
 
 class Skill(Base):
-    """技能（SKILL.md + 附属文件）：索引在 sqlite，内容在 data/agent_zero/skills。"""
+    """技能（SKILL.md + 附属文件）：索引在 sqlite，内容在 data/agent_zero/skills。
+
+    `role_id` 为空 = 全局技能（所有角色可见）；非空 = 该角色的专属技能，
+    只对拥有它的角色可见，其他角色既看不到也读取不到。
+    """
 
     __tablename__ = "skills"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
+    role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     path: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -484,6 +517,54 @@ class Skill(Base):
     )
     updated_at: Mapped[object] = mapped_column(
         DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+
+
+class WorkItem(Base):
+    """Superagent 工单：一件需要人/代理推进的工作，而不是一段聊天。
+
+    一个工单有自己的来源、授权动作、隔离会话与运行；状态自动跟随 run 收敛为
+    inbox / working / needs_attention / done / closed。界面只突出 needs_attention。
+    """
+
+    __tablename__ = "work_items"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    source: Mapped[str] = mapped_column(
+        Text, nullable=False, default="manual", server_default=text("'manual'")
+    )
+    source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="inbox", server_default=text("'inbox'")
+    )
+    priority: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    workspace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attention_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+    updated_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+    started_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('inbox','working','needs_attention','done','closed')",
+            name="ck_work_items_status",
+        ),
     )
 
 
@@ -500,6 +581,7 @@ ENSURE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_gdag_edges_to ON gdag_edges(to_id)",
     "CREATE INDEX IF NOT EXISTS idx_conv_runs_conv ON conversation_runs(conversation_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_conv_runs_status ON conversation_runs(status)",
+    "CREATE INDEX IF NOT EXISTS idx_conv_runs_target ON conversation_runs(target_role_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_conversations_archived ON conversations(workspace_id, archived, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_workspaces_archived ON workspaces(archived)",
@@ -507,7 +589,13 @@ ENSURE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_approvals_conv ON tool_approvals(conversation_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_grants_conv ON permission_grants(conversation_id, tool)",
     "CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name)",
+    "CREATE INDEX IF NOT EXISTS idx_skills_role ON skills(role_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_teams_ws ON agent_teams(workspace_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_roles_department ON roles(department_id)",
+    "CREATE INDEX IF NOT EXISTS idx_departments_parent ON departments(parent_id, sort)",
     "CREATE INDEX IF NOT EXISTS idx_todos_conv ON todo_items(conversation_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_goals_conv ON goals(conversation_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_work_items_status ON work_items(status, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_work_items_conv ON work_items(conversation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_work_items_run ON work_items(run_id)",
 )

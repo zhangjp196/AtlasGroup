@@ -276,9 +276,9 @@ def _archive_legacy_database() -> bool:
 def init_database() -> None:
     """按 v3 基线建表（幂等），补旧库缺失列，并做版本守卫。"""
     from services.agent_zero.models.zero import (  # noqa: F401
-        Workspace, Role, Conversation, ConversationRun, ConversationRunEvent,
+        Workspace, Department, Role, Conversation, ConversationRun, ConversationRunEvent,
         GdagNode, GdagEdge, AuditLog, AppSetting, AgentTeam,
-        TodoItem, Goal,
+        TodoItem, Goal, WorkItem,
         ENSURE_INDEXES,
     )
 

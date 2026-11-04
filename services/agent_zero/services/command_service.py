@@ -76,6 +76,15 @@ BUILTIN_COMMANDS: Dict[str, Dict[str, str]] = {
             "审查范围：$ARGUMENTS"
         ),
     },
+    "plan": {
+        "description": "先列出可执行计划，再按计划推进",
+        "argument_hint": "[任务说明]",
+        "body": (
+            "请先为下面的任务列出可执行计划：用 `todo_write` 写清步骤、验证方式和风险，"
+            "然后直接按计划开始推进；每完成一步就更新清单，不要只给计划不动手。"
+            "如果任务还需要澄清，只问最关键的一个问题。\n\n任务：$ARGUMENTS"
+        ),
+    },
     "test": {
         "description": "运行测试并修复失败，直到通过",
         "argument_hint": "[测试命令或路径]",

@@ -20,11 +20,20 @@ function check(name, cond, extra) {
 
 function makeSandbox(initial = {}) {
   const store = new Map(Object.entries(initial));
+  const cookieStore = new Map();
   const meta = { content: '' };
   const root = { dataset: {}, style: {} };
   const document = {
     documentElement: root,
     querySelector(sel) { return sel === 'meta[name="theme-color"]' ? meta : null; },
+    get cookie() {
+      return [...cookieStore.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
+    },
+    set cookie(value) {
+      const first = String(value).split(';')[0];
+      const idx = first.indexOf('=');
+      if (idx > 0) cookieStore.set(first.slice(0, idx), first.slice(idx + 1));
+    },
   };
   const sandbox = {
     document,
@@ -108,6 +117,18 @@ const at = (hours, minutes = 0) => new Date(2026, 0, 1, hours, minutes);
   check('非法主题回落到深色', T.apply('nope') === 'dark');
 }
 
+// ── 5b. cookie 兜底：桌面端换端口后 localStorage 按 origin 丢失 ─────────
+{
+  const { T, store } = makeSandbox();
+  check('初始没有已保存主题', T.hasSaved() === false);
+  T.writePrefs('ocean', { mode: 'daynight', day: 'light', night: 'dark', dayStart: '08:00', nightStart: '20:00' });
+  store.delete('az-theme');
+  store.delete('az-theme-schedule');
+  check('换端口后从 cookie 读回主题', T.readTheme() === 'ocean');
+  check('换端口后从 cookie 读回定时设置', T.readSchedule().dayStart === '08:00');
+  check('有 cookie 也算已保存', T.hasSaved() === true);
+}
+
 // ── 6. 旧版设置缺少起止时间时自动补默认值 ─────────────────────────────
 {
   const { T } = makeSandbox({ 'az-theme-schedule': JSON.stringify({ mode: 'daynight', day: 'light', night: 'dark' }) });
@@ -127,6 +148,10 @@ const at = (hours, minutes = 0) => new Date(2026, 0, 1, hours, minutes);
   check('V3 支持浅色变量', V3_CSS.includes('html[data-theme="light"]'));
   check('V3 启动定时主题', V3_JS.includes('function startThemeSchedule(') && V3_JS.includes('startThemeSchedule();'));
   check('V3 接收设置页主题变化', V3_JS.includes("data.type !== 'atlasx:theme'"));
+  check('V3 主题变化同步服务器', V3_JS.includes('/app/theme') && V3_JS.includes('function syncThemeToServer(')
+    && V3_JS.includes('hasSaved'));
+  check('设置页写主题也走共用核心（含 cookie）', fs.readFileSync(path.join(ROOT, 'web/assets/app.js'), 'utf8')
+    .includes('AtlasTheme.writePrefs'));
   check('设置页加载共用主题核心', V2_HTML.includes('/assets/theme.js'));
   check('设置页可配置昼夜起止', V2_HTML.includes('id="themeDayStart"') && V2_HTML.includes('id="themeNightStart"'));
 }

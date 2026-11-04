@@ -56,8 +56,8 @@ check('Hook 匹配器有快捷选项', HTML.includes('data-hook-matcher-value="*
 // ── V3 角色编辑：工具勾选 + 模型下拉，不再手写逗号列表 ────────────────
 check('V3 角色工具改成勾选面板', V3_JS.includes('function ensureToolCatalog(')
   && V3_JS.includes('function roleToolPickerHtml(') && V3_JS.includes('data-role-tool='));
-check('V3 角色模型改成下拉', V3_JS.includes('<select class="input" id="rModel">')
-  && V3_JS.includes('跟随全局'));
+check('V3 角色模型改成下拉，默认未指定', V3_JS.includes('<select class="input" id="rModel">')
+  && V3_JS.includes('未指定（使用默认）'));
 check('V3 工具选择器有搜索 / 全选 / 清空', V3_JS.includes('id="rToolSearch"')
   && V3_JS.includes('data-tools-all') && V3_JS.includes('data-tools-none'));
 check('V3 工具选择器样式', V3_CSS.includes('.tool-picker') && V3_CSS.includes('.tool-choice'));

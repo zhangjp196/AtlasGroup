@@ -62,14 +62,20 @@ def _json_list(val: Any) -> List[Any]:
     return val if isinstance(val, list) else []
 
 
-def _role_brief(role: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _role_brief(role: Optional[Dict[str, Any]],
+                paths: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
     if not role:
         return None
     envelope = role.get("envelope") if isinstance(role.get("envelope"), dict) else {}
     tools = envelope.get("tools") if isinstance(envelope.get("tools"), list) else []
+    dept_id = str(role.get("department_id") or "")
+    paths = paths if paths is not None else zero_store.department_paths()
     return {
         "id": role.get("id"),
         "name": str(role.get("name") or role.get("id") or ""),
+        "title": str(role.get("title") or ""),
+        "department_id": dept_id,
+        "department": paths.get(dept_id, ""),
         "expertise": str(role.get("expertise") or "")[:600],
         "avatar": role.get("avatar") or "",
         "tools": [str(t) for t in tools][:40],
@@ -121,18 +127,22 @@ def _ensure_role(ws_id: str, role_id: str, name: str, expertise: str,
 
 
 def _team_public(team: Dict[str, Any]) -> Dict[str, Any]:
-    leader = _role_brief(zero_store.get_role(str(team.get("leader_role_id") or "")))
+    paths = zero_store.department_paths()
+    leader = _role_brief(zero_store.get_role(str(team.get("leader_role_id") or "")),
+                         paths)
     if not leader:
-        leader = {"id": None, "name": "主持", "expertise": "", "avatar": ""}
+        leader = {"id": None, "name": "主持", "expertise": "", "avatar": "",
+                  "title": "", "department_id": "", "department": ""}
     members = []
     for rid in _json_list(team.get("member_role_ids")):
-        b = _role_brief(zero_store.get_role(str(rid)))
+        b = _role_brief(zero_store.get_role(str(rid)), paths)
         if b:
             members.append(b)
     return {
         "id": team.get("id"),
         "workspace_id": team.get("workspace_id"),
         "name": team.get("name") or "",
+        "avatar": str(team.get("avatar") or ""),
         "description": team.get("description") or "",
         "mode": normalize_mode(team.get("mode")),
         "max_speakers": normalize_speakers(team.get("max_speakers")),
@@ -276,7 +286,8 @@ def create_team(ws_id: str, name: str, description: str = "",
                 members: Optional[List[Dict[str, Any]]] = None,
                 mode: Any = None,
                 max_speakers: Any = None,
-                team_id: Optional[str] = None) -> Dict[str, Any]:
+                team_id: Optional[str] = None,
+                avatar: Optional[str] = None) -> Dict[str, Any]:
     name = str(name or "").strip()[:120]
     if not name:
         raise ValueError("团队名称不能为空")
@@ -291,10 +302,12 @@ def create_team(ws_id: str, name: str, description: str = "",
     with SessionLocal() as db:
         db.execute(
             text(f"INSERT INTO {_q('agent_teams')} "
-                 f"(id, workspace_id, name, description, mode, max_speakers, "
+                 f"(id, workspace_id, name, avatar, description, mode, max_speakers, "
                  f"leader_role_id, member_role_ids) "
-                 f"VALUES (:id, :ws, :name, :desc, :mode, :speakers, :leader, :members)"),
+                 f"VALUES (:id, :ws, :name, :avatar, :desc, :mode, :speakers, "
+                 f":leader, :members)"),
             {"id": team_id, "ws": ws_id, "name": name,
+             "avatar": str(avatar or "").strip() or None,
              "desc": str(description or "").strip()[:1000],
              "mode": normalize_mode(mode), "speakers": normalize_speakers(max_speakers),
              "leader": leader_id, "members": zero_store._json(member_ids)},
@@ -311,7 +324,8 @@ def update_team(team_id: str, name: Optional[str] = None,
                 leader: Optional[Dict[str, Any]] = None,
                 members: Optional[List[Dict[str, Any]]] = None,
                 mode: Any = None,
-                max_speakers: Any = None) -> Dict[str, Any]:
+                max_speakers: Any = None,
+                avatar: Optional[str] = None) -> Dict[str, Any]:
     row = _fetch_team(team_id)
     if not row:
         raise ValueError(f"团队不存在: {team_id}")
@@ -338,6 +352,8 @@ def update_team(team_id: str, name: Optional[str] = None,
         db.execute(
             text(f"UPDATE {_q('agent_teams')} SET "
                  f"name = COALESCE(:name, name), "
+                 f"avatar = CASE WHEN :avatar IS NULL THEN avatar "
+                 f"ELSE NULLIF(:avatar, '') END, "
                  f"description = COALESCE(:desc, description), "
                  f"mode = CASE WHEN :mode IS NULL THEN mode ELSE :mode END, "
                  f"max_speakers = CASE WHEN :speakers IS NULL THEN max_speakers "
@@ -346,7 +362,7 @@ def update_team(team_id: str, name: Optional[str] = None,
                  f"member_role_ids = :members, "
                  f"updated_at = datetime('now','localtime') "
                  f"WHERE id = :id"),
-            {"id": team_id, "name": name, "desc": description,
+            {"id": team_id, "name": name, "avatar": avatar, "desc": description,
              "mode": normalize_mode(mode) if mode is not None else None,
              "speakers": normalize_speakers(max_speakers) if max_speakers is not None else None,
              "leader": leader_id, "members": zero_store._json(member_ids)},
@@ -464,24 +480,44 @@ def roster_text(team: Dict[str, Any],
     if mine and leader_id and mine != leader_id:
         name = str((role or {}).get("name") or mine)
         lines = [f"你是团队「{team['name']}」的成员「{name}」。"]
+        title = str((role or {}).get("title") or "").strip()
+        department = str((role or {}).get("department")
+                         or zero_store.department_path((role or {}).get("department_id"))
+                         or "").strip()
+        if title:
+            lines.append(f"你的岗位：{title}")
+        if department:
+            lines.append(f"你所属部门：{department}")
         expertise = str((role or {}).get("expertise") or "").strip()
         if expertise:
             lines.append(f"你的专长：{expertise}")
         if mode == "roundtable":
             lines.append(
-                "协作模式：`roundtable`（圆桌群聊）——只有用户 `@你` 时才需要回应；"
+                "协作模式：`roundtable`（圆桌群聊）——用户或其它角色 `@你` 时由你直接回应；"
                 "只讲你自己的判断，不要替主持或其它成员发言。")
         else:
             lines.append(
-                "协作模式：`orchestrate`（主持编排）——你只处理主持委派给你的子任务；"
-                "没有委派时不要主动发言。")
+                "协作模式：`orchestrate`（主持编排）——你处理主持委派给你的子任务；"
+                "用户或其它角色 `@你` 时直接回应，不要转给主持；"
+                "没有委派或点名时不要主动发言。")
         return "\n".join(lines)
     lines = [f"你是团队「{team['name']}」的**主持**，负责编排与收尾。"]
+    leader = team.get("leader") or {}
+    if str(leader.get("title") or "").strip():
+        lines.append(f"你的岗位：{str(leader.get('title')).strip()}")
+    if str(leader.get("department") or "").strip():
+        lines.append(f"你所属部门：{str(leader.get('department')).strip()}")
     if team.get("description"):
         lines.append(f"团队目标：{team['description']}")
     lines.append(f"协作模式：`{mode}`（{_MODE_HINTS[mode]}）")
     for m in team.get("members") or []:
         bits = []
+        title = str(m.get("title") or "").strip()
+        if title:
+            bits.append(f"岗位：{title}")
+        department = str(m.get("department") or "").strip()
+        if department:
+            bits.append(f"部门：{department}")
         exp = str(m.get("expertise") or "").strip()
         if exp:
             bits.append(f"专长：{exp}")

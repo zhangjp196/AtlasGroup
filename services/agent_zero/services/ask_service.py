@@ -108,7 +108,7 @@ def pending_for(conv_id: str) -> List[Dict[str, Any]]:
 
 
 def pending_all() -> List[Dict[str, Any]]:
-    """跨会话的待回答问题（全局 Agent 面板 / 通知角标用）。"""
+    """跨会话的待回答问题（Superagent 面板 / 通知角标用）。"""
     out: List[Dict[str, Any]] = []
     for slot in _pending.values():
         if slot["event"].is_set():

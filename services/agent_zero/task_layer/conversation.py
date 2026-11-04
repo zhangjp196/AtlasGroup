@@ -41,6 +41,16 @@ def create_conversation(workspace_id: str, user: str,
     if role_id:
         # 角色入口 = 独立工作区（P0：记录 role_id，空间锚定到角色）
         pass
+    # 角色固定模型：新建会话没有显式模型时，继承角色自己的 model_code；
+    # 角色未指定（空）则继续走会话 / 全局默认。
+    if model_code is None and role_id:
+        try:
+            _role = zero_store.get_role(str(role_id)) or {}
+            _model = str(_role.get("model_code") or "").strip()
+            if _model:
+                model_code = _model
+        except Exception:
+            pass
     conv_id = zero_store.new_id("conv")
     from services.agent_zero.database import get_session_local
 
@@ -124,6 +134,43 @@ def append_system_message(conv_id: str, text: str) -> Optional[Dict[str, Any]]:
     })
     zero_store.touch_conversation(conv_id)
     return {"id": node_id, "stage": "exploration", "by": "system"}
+
+
+def append_mention_message(conv_id: str, role: Dict[str, Any],
+                           member: Dict[str, Any], goal: str) -> Optional[Dict[str, Any]]:
+    """主持 @ 群成员：写一条可回放的转交消息（助手侧），并返回节点 id。"""
+    conv = get_conversation(conv_id)
+    goal = str(goal or "").strip()
+    if not conv or not goal:
+        return None
+    from services.agent_zero.runtime.zero.gdag.store import GdagStore
+
+    node_id = zero_store.new_id("msg")
+    member_name = str(member.get("name") or member.get("id") or "成员")
+    GdagStore().upsert_node({
+        "id": node_id, "type": "fact", "camp": "default", "confidence": 0.5,
+        "props": {
+            "conversation_id": conv_id,
+            "workspace_id": conv.get("workspace_id"),
+            "role_id": role.get("id") or "",
+            "role_name": role.get("name") or "",
+            "role_avatar": role.get("avatar") or "",
+            "role_title": role.get("title") or "",
+            "role_department": (role.get("department")
+                                or zero_store.department_path(role.get("department_id"))),
+            "content": f"@{member_name} {goal}"[:4000],
+            "kind": "team_mention",
+            "mentions": [member.get("id") or ""],
+            "stage": "exploration",
+            # 作为“排队的用户消息”：成员 run 启动时才生效；
+            # 主持正在跑的这一轮不会把它当成用户干预抢走。
+            "by": "user",
+            "queued": 1,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        },
+    })
+    zero_store.touch_conversation(conv_id)
+    return {"id": node_id, "stage": "exploration", "by": "assistant"}
 
 
 def update_conversation_preferences(conv_id: str, *,
@@ -363,10 +410,11 @@ def send_message(conv_id: str, content: str, user: str,
     if not conv:
         raise ValueError(f"对话不存在: {conv_id}")
     content = (content or "").strip()
-    if not content:
-        raise ValueError("消息为空")
     ref_list = [str(r).strip() for r in (refs or []) if str(r).strip()]
     att_list = [a for a in (attachments or []) if isinstance(a, dict) and a.get("id")]
+    # 允许「只发图片 / 附件」：正文为空但有附件时，消息仍然成立。
+    if not content and not att_list and not ref_list:
+        raise ValueError("消息为空")
     camp = "default"  # P0：camp 由工作区关联推导，缺省 default
     from services.agent_zero.runtime.zero.gdag.store import GdagStore
 
@@ -506,6 +554,20 @@ def _team_route(team: Optional[Dict[str, Any]]) -> tuple:
     return "single", leader, members
 
 
+def _team_reply_plan(team: Optional[Dict[str, Any]],
+                     mentions: Optional[List[str]], content: str) -> tuple:
+    """团队 → (是否走多角色群聊, leader, members, 被点名角色)。
+
+    用户显式 @成员 时，任何模式都直接交给被点名的角色应答（``use_group=True``），
+    不先落到主持那里代转；圆桌仍按原逻辑走多角色，其余情况由主持单角色运行。
+    """
+    route, leader, members = _team_route(team)
+    all_roles = ([leader] if leader else []) + members
+    addressed = _mention_targets(mentions, content, all_roles)
+    use_group = bool(addressed) or (route == "roundtable" and bool(leader))
+    return use_group, leader, members, addressed
+
+
 def _roles_mentioned(text: str, roles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """文本中 @角色名 命中的角色（角色名含空格时按整名匹配）。
 
@@ -521,6 +583,27 @@ def _roles_mentioned(text: str, roles: List[Dict[str, Any]]) -> List[Dict[str, A
         if re.search(pattern, t):
             out.append(r)
     return out
+
+
+def _mention_targets(mentions: Optional[List[str]], content: str,
+                     roles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """解析显式点名：mentions（id 或名字）优先，其次正文里的 `@名字`。
+
+    返回的都是**被点名的角色本身**——调用方据此直接交给该角色应答，
+    不能再先转给主持代转（用户 @ 谁，就是谁答）。
+    """
+    all_roles = list(roles or [])
+    by_id = {str(r.get("id") or ""): r for r in all_roles}
+    by_name = {str(r.get("name") or "").strip(): r for r in all_roles}
+    targets: List[Dict[str, Any]] = []
+    for mid in (mentions or []):
+        token = str(mid or "").strip()
+        r = by_id.get(token) or by_name.get(token)
+        if r and r["id"] not in [t["id"] for t in targets]:
+            targets.append(r)
+    if not targets:
+        targets = _roles_mentioned(content, all_roles)
+    return targets
 
 
 def _persist_assistant(conv: Dict[str, Any], role: Dict[str, Any], content: str,
@@ -545,6 +628,10 @@ def _persist_assistant(conv: Dict[str, Any], role: Dict[str, Any], content: str,
             "workspace_id": conv["workspace_id"],
             "role_id": role.get("id"),
             "role_name": role.get("name"),
+            "role_avatar": role.get("avatar") or "",
+            "role_title": role.get("title") or "",
+            "role_department": (role.get("department")
+                                or zero_store.department_path(role.get("department_id"))),
             "content": content,
             "stage": "exploration",
             "by": "assistant",
@@ -582,6 +669,10 @@ def _persist_proposal(conv: Dict[str, Any], role: Dict[str, Any],
             "workspace_id": conv["workspace_id"],
             "role_id": role.get("id"),
             "role_name": role.get("name"),
+            "role_avatar": role.get("avatar") or "",
+            "role_title": role.get("title") or "",
+            "role_department": (role.get("department")
+                                or zero_store.department_path(role.get("department_id"))),
             "kind": "task_proposal",
             "goal": str(goal or "")[:2000],
             "reason": str(reason or "")[:1000],
@@ -712,6 +803,31 @@ def _chat_models(role: Dict[str, Any]) -> Optional[Dict[str, str]]:
     return models
 
 
+def chat_vision_for(conv: Dict[str, Any]) -> bool:
+    """该会话本轮实际使用的 loop 模型是否支持图片。
+
+    上传校验必须和真正跑对话时选模型的口径一致：会话级 ``model_code`` 优先，
+    其次角色固定模型，最后才是全局激活模型；否则「会话用视觉模型、全局不是」
+    会把图片挡在门外，反过来又会把图片塞给不支持视觉的模型。
+    """
+    from services.agent_zero.runtime.zero import llm as llm_mod
+
+    try:
+        role = zero_store.get_role(str((conv or {}).get("role_id") or "")) or {}
+    except Exception:
+        role = {}
+    models = _chat_models(role) or {"loop": "default", "fallback": "default"}
+    active_code = str((conv or {}).get("model_code") or "").strip() \
+        or llm_mod.get_active_model_code()
+    loop_code = str(models.get("loop") or "default")
+    if loop_code == "default":
+        loop_code = active_code or "default"
+    try:
+        return bool(llm_mod.model_supports_vision(loop_code or "default"))
+    except Exception:
+        return False
+
+
 # 行为准则 key → 注入系统提示的指令（与前端 views/agent_zero/principles.js 同源）。
 _PRINCIPLE_GUIDES = {
     "goal_clarity": "先对齐目标与验收标准，再动手；目标模糊时先澄清，不擅自假设。",
@@ -727,7 +843,8 @@ def _chat_system_prompt(role: Dict[str, Any], workspace_id: Optional[str] = None
                         conv_id: Optional[str] = None,
                         user_query: str = "",
                         team: Optional[Dict[str, Any]] = None,
-                        goal: Optional[Dict[str, Any]] = None) -> str:
+                        goal: Optional[Dict[str, Any]] = None,
+                        skills_role_id: Optional[str] = None) -> str:
     """探索态系统提示：稳定工作准则 + 本轮动态上下文。
 
     静态部分（工作方式 / 工具使用 / 文件与代码 / 验证 / 输出 / 安全）在
@@ -745,6 +862,8 @@ def _chat_system_prompt(role: Dict[str, Any], workspace_id: Optional[str] = None
     from services.agent_zero.task_layer import prompt_builder
 
     name = role.get("name") or role.get("id")
+    title = str(role.get("title") or "").strip()
+    department = zero_store.department_path(role.get("department_id"))
     env = role.get("envelope") or {}
     principles = [
         _PRINCIPLE_GUIDES[k]
@@ -817,7 +936,7 @@ def _chat_system_prompt(role: Dict[str, Any], workspace_id: Optional[str] = None
     try:
         from services.agent_zero.services import skill_service
 
-        skills_text = skill_service.skills_prompt()
+        skills_text = skill_service.skills_prompt(skills_role_id)
     except Exception:
         pass
 
@@ -836,6 +955,8 @@ def _chat_system_prompt(role: Dict[str, Any], workspace_id: Optional[str] = None
     return prompt_builder.build(prompt_builder.PromptContext(
         name=str(name or APP_NAME),
         now=time.strftime("%Y-%m-%d %H:%M:%S"),
+        title=title,
+        department=department,
         persona=str(role.get("persona") or "").strip(),
         expertise=str(role.get("expertise") or "").strip(),
         principles=principles,
@@ -876,6 +997,7 @@ _SEQ_CALLS_TOOLS = frozenset({
     "call_team",
     "delegate",
     "team_manage",
+    "department_manage",
     "role_manage",
     "app_manage",
     "ask_user",
@@ -1275,7 +1397,10 @@ def _forward_subagent_event(run_id: str, call_id: str, agent: str, goal: str,
     """
     if not run_id:
         return
-    payload: Dict[str, Any] = {"call_id": call_id, "agent": agent, "goal": goal}
+    payload: Dict[str, Any] = {
+        "call_id": call_id, "agent": agent, "goal": goal,
+        "ts": int(time.time() * 1000),
+    }
     now = time.monotonic()
     if "tool_call" in ev:
         payload.update(event="tool_call", tool=ev.get("tool_call") or {})
@@ -1435,10 +1560,15 @@ def _role_envelope(tools: Any) -> Dict[str, Any]:
 
 def _role_public(role: Dict[str, Any]) -> Dict[str, Any]:
     env = role.get("envelope") if isinstance(role.get("envelope"), dict) else {}
+    dept_id = str(role.get("department_id") or "")
     return {
         "id": role.get("id"), "name": role.get("name"),
+        "title": role.get("title") or "",
+        "department_id": dept_id,
+        "department": zero_store.department_path(dept_id) if dept_id else "",
         "expertise": role.get("expertise") or "",
         "persona": role.get("persona") or "",
+        "avatar": role.get("avatar") or "",
         "scope": role.get("scope") or "persistent",
         "source": role.get("source") or "user",
         "session_id": role.get("session_id") or "",
@@ -1448,7 +1578,7 @@ def _role_public(role: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _exec_app_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
-    """全局 Agent 专用：跨会话处理授权 / 通知 / 权限（代替用户管理 App）。"""
+    """工单助手 专用：跨会话处理授权 / 通知 / 权限（代替用户管理 App）。"""
     from services.agent_zero.services import ask_service, attention_service
     from services.agent_zero.task_layer import permissions, run_service
 
@@ -1563,6 +1693,45 @@ def _exec_app_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, An
     return {"error": f"非法 action: {action}"}
 
 
+def _exec_department_manage(args: Dict[str, Any]) -> Dict[str, Any]:
+    """组织部门工具：list / create / update / delete（多级，可移动）。"""
+    from services.agent_zero.services import department_service as _dsvc
+
+    a = args or {}
+    action = str(a.get("action") or "").strip().lower()
+    try:
+        if action == "list":
+            return {"departments": _dsvc.list_departments()}
+        if action == "create":
+            dept = _dsvc.create_department(
+                str(a.get("name") or ""),
+                parent_id=a.get("parent_id"),
+                sort=int(a.get("sort") or 0),
+                avatar=str(a.get("avatar") or ""),
+            )
+            return {"ok": True, "department": dept}
+        dept_id = str(a.get("department_id") or "").strip()
+        if action in ("update", "delete") and not dept_id:
+            return {"error": "缺少 department_id"}
+        if action == "update":
+            kwargs: Dict[str, Any] = {
+                "name": a.get("name"),
+                "sort": a.get("sort"),
+            }
+            if "parent_id" in a:
+                kwargs["parent_id"] = a.get("parent_id")
+            if "avatar" in a:
+                kwargs["avatar"] = a.get("avatar") or ""
+            dept = _dsvc.update_department(dept_id, **kwargs)
+            return {"ok": True, "department": dept}
+        if action == "delete":
+            out = _dsvc.delete_department(dept_id)
+            return {"ok": True, **out}
+    except _dsvc.DepartmentError as e:
+        return {"error": str(e)}
+    return {"error": f"非法 action: {action}"}
+
+
 def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
     """角色库工具：list / create / update / promote / delete。
 
@@ -1591,10 +1760,15 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
         scope = str(a.get("scope") or "temporary").strip()
         if scope not in ("temporary", "persistent"):
             return {"error": f"非法 scope: {scope}"}
+        dept_id = str(a.get("department_id") or "").strip()
+        if dept_id and not zero_store.get_department(dept_id):
+            return {"error": f"部门不存在: {dept_id}"}
         role = zero_store.upsert_role({
             "id": zero_store.new_id("role"),
             "group_id": None,
             "name": name,
+            "title": a.get("title") or "",
+            "department_id": dept_id,
             "persona": a.get("persona") or "",
             "expertise": a.get("expertise") or "",
             "envelope": _role_envelope(a.get("tools")),
@@ -1621,10 +1795,18 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
     if action in ("update", "promote", "delete") and not current:
         return {"error": f"角色不存在: {role_id}"}
     if action == "update":
+        dept_id = current.get("department_id")
+        if "department_id" in a:
+            dept_id = str(a.get("department_id") or "").strip()
+            if dept_id and not zero_store.get_department(dept_id):
+                return {"error": f"部门不存在: {dept_id}"}
         merged = {
             "id": role_id,
             "group_id": current.get("group_id"),
             "name": a.get("name") or current.get("name"),
+            "title": (a.get("title") if "title" in a and a.get("title") is not None
+                      else current.get("title")),
+            "department_id": dept_id,
             "persona": a.get("persona") if a.get("persona") is not None else current.get("persona"),
             "expertise": (a.get("expertise") if a.get("expertise") is not None
                           else current.get("expertise")),
@@ -1738,12 +1920,34 @@ async def _exec_call_team(conv: Dict[str, Any], user: str, role: Dict[str, Any],
     goal = str((args or {}).get("goal") or "").strip()
     if not goal:
         return json.dumps({"error": "缺少 goal"}, ensure_ascii=False)
-    return await _exec_call_agent(
-        conv, user, role,
-        {"role_id": child["id"], "goal": goal,
-         "context": str((args or {}).get("context") or ""),
-         "tools": (args or {}).get("tools")},
-        depth, call_id=call_id)
+    context = str((args or {}).get("context") or "").strip()
+    content = goal + (f"\n\n## 主持补充的上下文\n{context}" if context else "")
+
+    # 不再同步等待成员：主持在群里 @ 该成员，成员作为**独立后台 run**执行，
+    # 结果回到群聊。这样主持可以继续推进，长任务也不会卡住主持这一轮。
+    from services.agent_zero.task_layer import conv_worker, run_service
+
+    mention = append_mention_message(conv["id"], role, child, goal)
+    run = run_service.create_run(
+        conv["id"], user,
+        role_id=child["id"],
+        target_role_id=child["id"],
+        content=content,
+        mentions=[child["id"]],
+        mode="autonomous",
+        queued_msg_id=(mention or {}).get("id"),
+    )
+    try:
+        await conv_worker.request_run(run["id"])
+    except Exception:
+        logger.debug("后台成员 run 唤醒失败（worker 会轮询拾取）", exc_info=True)
+    return json.dumps({
+        "status": "dispatched",
+        "member": {"id": child.get("id"), "name": child.get("name")},
+        "run_id": run.get("id"),
+        "note": "已 @ 该成员，任务在后台自动执行；完成后结果会回到群聊，"
+                "不要停下来等它，继续推进你自己的工作。",
+    }, ensure_ascii=False)
 
 
 async def _exec_call_subagent(conv: Dict[str, Any], user: str, role: Dict[str, Any],
@@ -2084,9 +2288,10 @@ def _latest_user_prompt(conv_id: str, fallback: str = "") -> str:
                      f"AND props->>'stage' = 'exploration' "
                      f"AND COALESCE(props->>'by', '') <> 'assistant' "
                      f"AND COALESCE(props->>'kind', '') <> 'checkpoint' "
+                     f"AND COALESCE(props->>'kind', '') <> :clear_kind "
                      f"AND COALESCE(CAST(props->>'queued' AS INTEGER), 0) <> 1 "
                      f"ORDER BY created_at DESC, rowid DESC LIMIT 1"),
-                {"cid": conv_id},
+                {"cid": conv_id, "clear_kind": CLEAR_KIND},
             ).first()
         if not row:
             return fallback
@@ -2116,7 +2321,8 @@ def _history_messages(conv_id: str, limit: int = CHAT_HISTORY,
     from services.agent_zero.database import get_session_local
     from services.agent_zero.stores.zero_store import _q
 
-    checkpoint = latest_checkpoint(conv_id)
+    clear_rowid = clear_marker_rowid(conv_id)
+    checkpoint = latest_checkpoint(conv_id, after_rowid=clear_rowid)
     # 还有排队 run 等着的消息一律不进上下文：`queued` 标记可能已被认领 / 编辑 /
     # 异常路径清掉，只靠它过滤会让当前 run 提前看到「下一轮」的内容（等于替下一轮
     # 执行了一遍）。以 run 表为准兜底；显式「立即插入」（inject=1）的除外。
@@ -2131,10 +2337,13 @@ def _history_messages(conv_id: str, limit: int = CHAT_HISTORY,
                  f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
                  f"AND props->>'stage' = 'exploration' "
                  f"AND COALESCE(props->>'kind', '') <> 'checkpoint' "
+                 f"AND COALESCE(props->>'kind', '') <> :clear_kind "
+                 f"AND rowid > :clear_rowid "
                  f"AND COALESCE(props->>'by', '') <> 'system' "
                  f"AND COALESCE(CAST(props->>'queued' AS INTEGER), 0) <> 1 "
                  f"ORDER BY created_at DESC LIMIT :n"),
-            {"cid": conv_id, "n": max(1, int(limit))},
+            {"cid": conv_id, "n": max(1, int(limit)),
+             "clear_kind": CLEAR_KIND, "clear_rowid": clear_rowid},
         ).fetchall()
     from services.agent_zero.stores.zero_store import decode_row
 
@@ -2150,12 +2359,13 @@ def _history_messages(conv_id: str, limit: int = CHAT_HISTORY,
             content = str(props.get("prompt") or content).strip()
         trace = props.get("trace") or []
         interrupted = bool(props.get("interrupted"))
+        has_attachments = bool(props.get("attachments"))
         if not content:
             if interrupted and trace:
                 digest = _trace_digest(trace)
                 content = ("[上一轮输出被中断，已完成的过程如下，请不要重复这些步骤]\n"
                            + (digest or "（无可用步骤）"))
-            else:
+            elif not has_attachments:
                 continue
         elif interrupted:
             digest = _trace_digest(trace)
@@ -2215,8 +2425,11 @@ def _history_messages(conv_id: str, limit: int = CHAT_HISTORY,
 CHECKPOINT_KIND = "checkpoint"
 
 
-def latest_checkpoint(conv_id: str) -> Optional[Dict[str, Any]]:
-    """该会话最新的一条压缩检查点（没有返回 None）。"""
+def latest_checkpoint(conv_id: str, *, after_rowid: int = 0) -> Optional[Dict[str, Any]]:
+    """该会话最新的一条压缩检查点（没有返回 None）。
+
+    `after_rowid` 用于清空上下文后忽略旧的压缩检查点。
+    """
     from sqlalchemy import text
 
     from services.agent_zero.database import get_session_local
@@ -2228,8 +2441,10 @@ def latest_checkpoint(conv_id: str) -> Optional[Dict[str, Any]]:
             text(f"SELECT id, props, created_at FROM {_q('gdag_nodes')} "
                  f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
                  f"AND props->>'kind' = :kind "
+                 f"AND rowid > :after "
                  f"ORDER BY created_at DESC, rowid DESC LIMIT 1"),
-            {"cid": conv_id, "kind": CHECKPOINT_KIND},
+            {"cid": conv_id, "kind": CHECKPOINT_KIND,
+             "after": int(after_rowid or 0)},
         ).mappings().first()
     if not row:
         return None
@@ -2299,6 +2514,73 @@ def clear_checkpoints(conv_id: str, *, keep: Optional[str] = None) -> int:
         return int(result.rowcount or 0)
 
 
+CLEAR_KIND = "clear_context"
+
+
+def clear_marker_rowid(conv_id: str) -> int:
+    """最近一次「清空上下文」标记的 rowid；没有返回 0。"""
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+    from services.agent_zero.stores.zero_store import _q
+
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        row = db.execute(
+            text(f"SELECT rowid FROM {_q('gdag_nodes')} "
+                 f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
+                 f"AND props->>'kind' = :kind ORDER BY rowid DESC LIMIT 1"),
+            {"cid": conv_id, "kind": CLEAR_KIND},
+        ).first()
+    return int(row[0]) if row else 0
+
+
+def clear_context(conv_id: str) -> bool:
+    """清空一个会话的**模型上下文**（历史消息不删除，转录仍可回看）。
+
+    实现为一条 `clear_context` 标记节点：`_history_messages` / 干预读取只取
+    标记之后的节点；`list_messages` 会过滤掉标记本身。这样界面历史不变，
+    但下一轮模型不再看到清空前的上下文。
+    """
+    conv = get_conversation(conv_id)
+    if not conv:
+        return False
+    from services.agent_zero.runtime.zero.gdag.store import GdagStore
+
+    node_id = zero_store.new_id("clr")
+    GdagStore().upsert_node({
+        "id": node_id, "type": "fact", "camp": "default", "confidence": 0.5,
+        "props": {
+            "conversation_id": conv_id,
+            "workspace_id": conv.get("workspace_id"),
+            "kind": CLEAR_KIND,
+            "stage": "exploration",
+            "by": "system",
+            "content": "",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        },
+    })
+    zero_store.touch_conversation(conv_id)
+    return True
+
+
+def clear_all_contexts() -> int:
+    """清空所有会话的模型上下文（历史消息保留）。返回处理的会话数。"""
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+    from services.agent_zero.stores.zero_store import _q
+
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(text(f"SELECT id FROM {_q('conversations')}")).all()
+    count = 0
+    for row in rows:
+        if clear_context(str(row[0])):
+            count += 1
+    return count
+
+
 def persist_compaction_result(conv: Dict[str, Any], res: Dict[str, Any]) -> None:
     """把一次压缩的摘要落成检查点；prune（无摘要）与失败不落。"""
     try:
@@ -2356,6 +2638,7 @@ def _compress_done_event(res: Dict[str, Any], round_no: int,
 
 async def generate_reply_stream(conv_id: str, user: str, content: str = "",
                                 mentions: Optional[List[str]] = None,
+                                target_role_id: Optional[str] = None,
                                 autonomous: bool = False,
                                 auto_execute: bool = False,
                                 run_id: Optional[str] = None) -> AsyncIterator[Dict[str, Any]]:
@@ -2414,9 +2697,21 @@ async def generate_reply_stream(conv_id: str, user: str, content: str = "",
     except Exception as e:
         logger.debug("团队路由跳过（按单角色继续）: %s", e)
 
+    # 主持把子任务 @ 给某个群成员：这是一条只由该成员执行的后台 run。
+    target_id = str(target_role_id or "").strip()
+    if team and target_id:
+        role = zero_store.get_role(target_id) or {}
+        if role:
+            async for evt in _single_reply_stream(
+                    conv, user, role, autonomous=autonomous,
+                    auto_execute=auto_execute, run_id=run_id,
+                    extra_context=extra_context):
+                yield evt
+            return
     if team:
-        route, leader, members = _team_route(team)
-        if route == "roundtable" and leader:
+        use_group, leader, members, _addressed = _team_reply_plan(
+            team, mentions, content)
+        if use_group:
             async for evt in _group_reply_stream(
                     conv, user, content, mentions, leader, members,
                     autonomous=autonomous, auto_execute=auto_execute,
@@ -2464,9 +2759,12 @@ def _recent_exploration_rows(conv_id: str, limit: int = 30) -> List[Dict[str, An
                  f"AND props->>'stage' = 'exploration' "
                  f"AND COALESCE(props->>'kind', '') <> 'task_proposal' "
                  f"AND COALESCE(props->>'kind', '') <> 'checkpoint' "
+                 f"AND COALESCE(props->>'kind', '') <> :clear_kind "
+                 f"AND rowid > :clear_rowid "
                  f"AND COALESCE(CAST(props->>'queued' AS INTEGER), 0) <> 1 "
                  f"ORDER BY created_at DESC, id DESC LIMIT :n"),
-            {"cid": conv_id, "n": max(1, min(int(limit), 100))},
+            {"cid": conv_id, "n": max(1, min(int(limit), 100)),
+             "clear_kind": CLEAR_KIND, "clear_rowid": clear_marker_rowid(conv_id)},
         ).fetchall()
     from services.agent_zero.stores.zero_store import decode_row
 
@@ -3209,17 +3507,20 @@ async def _await_tool_approval(appr_id: str, run_id: Optional[str], name: str,
 
 GLOBAL_AGENT_ZONE = "global-agent"
 
-GLOBAL_AGENT_ADDON = """你是 AtlasX 的**全局 Agent**，独立于普通会话，代表用户管理整个 App。
+GLOBAL_AGENT_ADDON = """你是 AtlasX 的**工单助手**，独立于普通会话，代表用户管理整个 App。
 
 你的职责：
 - 查看并处理跨会话的工具授权：允许一次 / 本会话允许 / 始终允许 / 拒绝；
 - 回答其它会话里的待回答问题；
 - 标记会话已读、停止运行中的 run；
 - 调整会话权限档位或全局默认权限；
+- 管理组织：用 `department_manage` 新建 / 调整多级部门，用 `role_manage` 维护角色与岗位、
+  把角色归档到部门或改为「未安排」，用 `team_manage` 管理群组；
 - 当用户问「现在有什么要处理」时，先给一句摘要，再列出最关键的几项。
 
 工作方式：
-- 优先调用 `app_manage` 工具读取真实状态，不要凭记忆编造待授权 / 未读数量；
+- 优先调用 `app_manage` / `department_manage` / `role_manage` / `team_manage`
+  读取真实状态，不要凭记忆编造部门、角色、群组或待授权 / 未读数量；
 - 涉及删除、拒绝高风险操作、停止运行等破坏性动作时，先说明影响并确认；
 - 风险低、用户已明确要求的管理动作可以直接执行；
 - 回答要短，先结论后动作；执行后说明结果；
@@ -3228,7 +3529,7 @@ GLOBAL_AGENT_ADDON = """你是 AtlasX 的**全局 Agent**，独立于普通会�
 
 
 def _global_agent_addon() -> str:
-    """全局 Agent 的系统提示附加段：职责 + 当前 App 快照。"""
+    """工单助手 的系统提示附加段：职责 + 当前 App 快照。"""
     try:
         from services.agent_zero.services import attention_service
 
@@ -3263,7 +3564,7 @@ def _global_agent_addon() -> str:
                 + json.dumps(compact, ensure_ascii=False)
                 + "\n```")
     except Exception as e:
-        logger.debug("全局 Agent 快照失败: %s", e)
+        logger.debug("工单助手 快照失败: %s", e)
         return GLOBAL_AGENT_ADDON
 
 
@@ -3342,9 +3643,10 @@ async def _prepare_role_run(
     if is_global:
         from services.agent_zero.tools import registry as tool_reg
 
-        # 全局 Agent 只拿「管理 App」需要的工具，不继承默认角色的 shell / 文件能力。
+        # 工单助手 只拿「管理 App」需要的工具，不继承默认角色的 shell / 文件能力。
         specs = []
-        global_tools = ["app_manage", "ask_user", "role_manage", "team_manage"]
+        global_tools = ["app_manage", "ask_user", "department_manage",
+                        "role_manage", "team_manage"]
         for code in global_tools:
             tool = tool_reg.get_tool(code)
             if tool is not None:
@@ -3362,6 +3664,7 @@ async def _prepare_role_run(
     task_ctx: Dict[str, Any] = {
         "id": f"conv:{conv['id']}", "workspace_id": ws_id, "camp": camp,
         "submitter": user, "conversation_id": conv["id"],
+        "role_id": "" if is_global else str(role.get("id") or ""),
     }
     node: Dict[str, Any] = {"id": f"conv:{conv['id']}", "props": {"envelope": envelope}}
     loop = ToolDispatcher()
@@ -3381,7 +3684,8 @@ async def _prepare_role_run(
                        if m.get("role") == "user"), "")
     system_content = _chat_system_prompt(
         prompt_role, ws_id, autonomous=autonomous, auto_execute=auto_execute,
-        conv_id=conv["id"], user_query=user_query, team=team, goal=goal)
+        conv_id=conv["id"], user_query=user_query, team=team, goal=goal,
+        skills_role_id=None if is_global else str(role.get("id") or ""))
     if system_addon.strip():
         system_content = system_content + "\n\n" + system_addon.strip()
     messages: List[Dict[str, Any]] = [
@@ -4078,6 +4382,12 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                             waiting="team"):
                         yield _ping
                     result = await _await_subagent_result(_sub_task, name, run_id)
+                elif name in ("department_manage", "department_admin", "org_manage"):
+                    _open_text = None
+                    _org_out = _exec_department_manage(args)
+                    result = json.dumps(_org_out, ensure_ascii=False)
+                    if not _org_out.get("error"):
+                        yield {"org_update": _org_out}
                 elif name in ("role_manage", "role_admin"):
                     _open_text = None
                     _role_out = _exec_role_manage(conv, args)
@@ -4677,18 +4987,9 @@ async def _group_reply_stream(conv: Dict[str, Any], user: str, content: str,
     if not all_roles:
         yield {"error": "该群组暂无可用角色：请先加入成员角色。"}
         return
-    by_id = {r["id"]: r for r in all_roles}
 
     # 目标角色：显式 mentions(id 或名字) > 内容 @ 提及 > 主持（否则首个成员）
-    targets: List[Dict[str, Any]] = []
-    by_name = {str(r.get("name") or "").strip(): r for r in all_roles}
-    for mid in (mentions or []):
-        token = str(mid or "").strip()
-        r = by_id.get(token) or by_name.get(token)
-        if r and r["id"] not in [t["id"] for t in targets]:
-            targets.append(r)
-    if not targets:
-        targets = _roles_mentioned(content, all_roles)
+    targets = _mention_targets(mentions, content, all_roles)
     if not targets:
         targets = [host] if host else [members[0]]
 
@@ -4950,8 +5251,9 @@ def _last_message(db: Any, conv_id: str) -> str:
              f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
              f"AND props->>'stage' = 'exploration' "
              f"AND COALESCE(props->>'kind', '') <> 'checkpoint' "
+             f"AND COALESCE(props->>'kind', '') <> :clear_kind "
              f"ORDER BY created_at DESC, rowid DESC LIMIT 1"),
-        {"cid": conv_id},
+        {"cid": conv_id, "clear_kind": CLEAR_KIND},
     ).scalar()
     return str(row or "")[:120]
 
@@ -4964,8 +5266,9 @@ def _count_messages(db: Any, conv_id: str) -> int:
         text(f"SELECT COUNT(*) FROM {_q('gdag_nodes')} "
              f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
              f"AND props->>'stage' = 'exploration' "
-             f"AND COALESCE(props->>'kind', '') <> 'checkpoint'"),
-        {"cid": conv_id},
+             f"AND COALESCE(props->>'kind', '') <> 'checkpoint' "
+             f"AND COALESCE(props->>'kind', '') <> :clear_kind"),
+        {"cid": conv_id, "clear_kind": CLEAR_KIND},
     ).scalar()
     return int(n or 0)
 
@@ -5169,6 +5472,9 @@ def list_messages(conv_id: str, limit: int = 200) -> list:
             "by": props.get("by") or "",
             "role_id": props.get("role_id") or "",
             "role_name": props.get("role_name") or "",
+            "role_avatar": props.get("role_avatar") or "",
+            "role_title": props.get("role_title") or "",
+            "role_department": props.get("role_department") or "",
             "duration_ms": int(props.get("duration_ms") or 0),
             # 深度思考 + 工具调用情况：刷新后仍可回看（与流式一致）
             "reasoning": props.get("reasoning") or "",

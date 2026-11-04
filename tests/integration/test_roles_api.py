@@ -70,3 +70,18 @@ def test_temporary_role_requires_session(client):
 
 def test_default_role_cannot_be_deleted(client):
     assert client.delete(f"{API}/roles/default").status_code == 400
+
+
+def test_conversation_inherits_fixed_role_model(client):
+    role = client.post(f"{API}/roles", json={
+        "name": "固定模型角色", "model_code": "fast",
+        "tools": ["read_file"],
+    }).json()["data"]
+    conv = client.post(f"{API}/conversations", json={"role_id": role["id"]}).json()["data"]
+    assert conv["model_code"] == "fast"
+
+    # 会话显式选择的模型优先，不被角色模型覆盖。
+    forced = client.post(f"{API}/conversations", json={
+        "role_id": role["id"], "model_code": "another",
+    }).json()["data"]
+    assert forced["model_code"] == "another"

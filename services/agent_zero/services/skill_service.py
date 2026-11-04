@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 MAX_CONTENT_CHARS = 60_000
 MAX_UPLOAD_BYTES = 5_000_000
+# 每个角色最多 20 个专属技能；到上限后必须先合并（或删除）再新增。
+MAX_ROLE_SKILLS = 20
 
 
 def skills_root() -> Path:
@@ -50,18 +52,39 @@ def _safe_rel(name: str) -> str:
     return "/".join(parts)
 
 
-def list_skills(enabled_only: bool = False) -> List[Dict[str, Any]]:
+def list_skills(enabled_only: bool = False, role_id: Optional[str] = None,
+                include_global: bool = True) -> List[Dict[str, Any]]:
+    """技能列表。
+
+    - `role_id` 为空：管理员视图，返回全部技能；
+    - `role_id` 给定：返回该角色的专属技能（`include_global=True` 时再加上全局技能）。
+    角色之间互不可见彼此的专属技能。
+    """
+    clauses: List[str] = []
+    params: Dict[str, Any] = {}
+    if enabled_only:
+        clauses.append("enabled = 1")
+    rid = str(role_id or "").strip()
+    if rid:
+        if include_global:
+            clauses.append("(role_id IS NULL OR role_id = :rid)")
+            params["rid"] = rid
+        else:
+            clauses.append("role_id = :rid")
+            params["rid"] = rid
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         rows = db.execute(
-            text(f"SELECT * FROM {_q('skills')} "
-                 f"{'WHERE enabled = 1' if enabled_only else ''} "
-                 f"ORDER BY created_at DESC LIMIT 200"),
+            text(f"SELECT * FROM {_q('skills')} {where} "
+                 f"ORDER BY created_at DESC LIMIT 500"),
+            params,
         ).mappings().all()
     out = []
     for r in rows:
         out.append({
             "id": r["id"],
+            "role_id": str(r["role_id"] or ""),
             "name": r["name"],
             "description": r["description"] or "",
             "source": r["source"] or "local",
@@ -91,22 +114,49 @@ def get_skill(skill_id: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
-def find_skill(name_or_id: str) -> Optional[Dict[str, Any]]:
+def find_skill(name_or_id: str,
+               role_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     needle = (name_or_id or "").strip().lower()
     if not needle:
         return None
+    rid = str(role_id or "").strip()
+    scope = "(role_id IS NULL OR role_id = :rid)" if rid else "1 = 1"
+    order = "CASE WHEN role_id = :rid THEN 0 ELSE 1 END, " if rid else ""
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         row = db.execute(
-            text(f"SELECT * FROM {_q('skills')} WHERE id = :n "
-                 f"OR lower(name) = :n OR lower(name) = :s COLLATE NOCASE LIMIT 1"),
-            {"n": needle, "s": _slug(needle)},
+            text(f"SELECT * FROM {_q('skills')} WHERE {scope} AND (id = :n "
+                 f"OR lower(name) = :n OR lower(name) = :s COLLATE NOCASE) "
+                 f"ORDER BY {order}created_at DESC LIMIT 1"),
+            {"n": needle, "s": _slug(needle), "rid": rid},
         ).mappings().first()
     return dict(row) if row else None
 
 
+def _role_dir(role_id: str) -> str:
+    """角色专属技能目录（相对 skills_root，避免角色 id 里出现路径字符）。"""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(role_id or ""))[:80] or "role"
+    return f"roles/{safe}"
+
+
+def count_role_skills(role_id: str) -> int:
+    rid = str(role_id or "").strip()
+    if not rid:
+        return 0
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        row = db.execute(
+            text(f"SELECT COUNT(*) FROM {_q('skills')} WHERE role_id = :rid"),
+            {"rid": rid},
+        ).first()
+    return int(row[0]) if row else 0
+
+
 def create_skill(name: str, description: str, content: str,
-                 source: str = "local", extra_files: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                 source: str = "local", extra_files: Optional[Dict[str, Any]] = None,
+                 role_id: Optional[str] = None,
+                 enforce_limit: bool = True) -> Dict[str, Any]:
+    """创建技能。给了 `role_id` 就是该角色的专属技能（最多 20 个）。"""
     name = (name or "").strip()
     if not name:
         raise ValueError("技能名称不能为空")
@@ -116,31 +166,86 @@ def create_skill(name: str, description: str, content: str,
     if len(content) > MAX_CONTENT_CHARS:
         content = content[:MAX_CONTENT_CHARS]
 
+    rid = str(role_id or "").strip()
+    if rid:
+        if not zero_store.get_role(rid):
+            raise ValueError(f"角色不存在: {rid}")
+        current = count_role_skills(rid)
+        if enforce_limit and current >= MAX_ROLE_SKILLS:
+            raise ValueError(
+                f"该角色已有 {current} 个专属技能，达到上限 {MAX_ROLE_SKILLS} 个；"
+                f"请先用 merge_skills 合并，或删除不再需要的技能后再创建")
+
     sid = zero_store.new_id("skill")
-    rel = f"{_slug(name)}-{sid[6:]}"
+    rel = (f"{_role_dir(rid)}/{_slug(name)}-{sid[6:]}" if rid
+           else f"{_slug(name)}-{sid[6:]}")
     skill_dir = skills_root() / rel
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
     for fname, ftext in (extra_files or {}).items():
-        rel = _safe_rel(fname)
-        if rel:
-            target = skill_dir / rel
+        rel_file = _safe_rel(fname)
+        if rel_file:
+            target = skill_dir / rel_file
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(str(ftext), encoding="utf-8")
+            if isinstance(ftext, (bytes, bytearray)):
+                target.write_bytes(bytes(ftext))
+            else:
+                target.write_text(str(ftext), encoding="utf-8")
 
     SessionLocal = get_session_local()
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     with SessionLocal() as db:
         db.execute(
             text(f"INSERT INTO {_q('skills')} "
-                 f"(id, name, description, path, source, enabled, created_at, updated_at) "
-                 f"VALUES (:id, :n, :d, :p, :s, 1, :c, :u)"),
-            {"id": sid, "n": name[:120], "d": (description or "")[:500],
+                 f"(id, role_id, name, description, path, source, enabled, created_at, updated_at) "
+                 f"VALUES (:id, :rid, :n, :d, :p, :s, 1, :c, :u)"),
+            {"id": sid, "rid": rid or None, "n": name[:120],
+             "d": (description or "")[:500],
              "p": rel, "s": source, "c": now, "u": now},
         )
         db.commit()
-    zero_store.append_audit("local", "skill_create", args={"skill": sid, "name": name})
+    zero_store.append_audit("local", "skill_create",
+                            args={"skill": sid, "name": name, "role_id": rid})
     return get_skill(sid) or {"id": sid, "name": name}
+
+
+def merge_skills(role_id: str, skill_ids: List[str], name: str,
+                 description: str = "") -> Dict[str, Any]:
+    """把多个**同一角色**的专属技能合并成一个，并删除来源技能。
+
+    合并按来源顺序拼接正文；上限按合并后的数量计算（20 个里合并 5 个为 1 个，
+    仍然在限制内）。
+    """
+    rid = str(role_id or "").strip()
+    if not rid:
+        raise ValueError("合并专属技能必须指定 role_id")
+    ids = list(dict.fromkeys(str(x).strip() for x in (skill_ids or []) if str(x).strip()))
+    if len(ids) < 2:
+        raise ValueError("至少选择 2 个技能才能合并")
+    skills = []
+    for sid in ids:
+        skill = get_skill(sid)
+        if not skill:
+            raise ValueError(f"技能不存在: {sid}")
+        if str(skill.get("role_id") or "") != rid:
+            raise ValueError(f"技能不属于该角色，不能合并: {skill.get('name') or sid}")
+        skills.append(skill)
+    if count_role_skills(rid) - len(skills) + 1 > MAX_ROLE_SKILLS:
+        raise ValueError(f"合并后仍超过 {MAX_ROLE_SKILLS} 个技能上限")
+
+    title = str(name or "").strip() or "合并技能"
+    parts = [f"# {title}", ""]
+    if description:
+        parts += [str(description).strip(), ""]
+    for skill in skills:
+        parts += [f"## 来源：{skill.get('name') or skill['id']}", "",
+                  read_skill_text(skill).strip(), ""]
+    merged = create_skill(title, description or "合并后的专属技能",
+                          "\n".join(parts), source="merge", role_id=rid,
+                          enforce_limit=False)
+    for skill in skills:
+        delete_skill(skill["id"])
+    return merged
 
 
 def update_skill(skill_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
@@ -167,6 +272,17 @@ def update_skill(skill_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(str(content)[:MAX_CONTENT_CHARS], encoding="utf-8")
     return get_skill(skill_id) or skill
+
+
+def delete_role_skills(role_id: str) -> int:
+    """删除一个角色的全部专属技能（角色删除时调用）。"""
+    rid = str(role_id or "").strip()
+    if not rid:
+        return 0
+    rows = list_skills(role_id=rid, include_global=False)
+    for skill in rows:
+        delete_skill(skill["id"])
+    return len(rows)
 
 
 def delete_skill(skill_id: str) -> bool:
@@ -208,7 +324,8 @@ def zip_skill(skill_id: str) -> bytes:
     return buf.getvalue()
 
 
-def import_upload(filename: str, data: bytes) -> Dict[str, Any]:
+def import_upload(filename: str, data: bytes,
+                  role_id: Optional[str] = None) -> Dict[str, Any]:
     """上传 .md / .zip 建技能。"""
     if len(data) > MAX_UPLOAD_BYTES:
         raise ValueError(f"上传文件过大（上限 {MAX_UPLOAD_BYTES} 字节）")
@@ -232,20 +349,23 @@ def import_upload(filename: str, data: bytes) -> Dict[str, Any]:
                       if l.strip().startswith("#")), "")
         base = title or parent or (name[:-4] if name.lower().endswith(".zip") else name)
         return create_skill(base or "skill", _first_heading(content), content,
-                            source="upload", extra_files=extra)
+                            source="upload", extra_files=extra, role_id=role_id)
     content = data.decode("utf-8", "replace")
     base = name.rsplit(".", 1)[0] if "." in name else name
-    return create_skill(base or "skill", _first_heading(content), content, source="upload")
+    return create_skill(base or "skill", _first_heading(content), content,
+                        source="upload", role_id=role_id)
 
 
-def import_url(url: str, name: str = "") -> Dict[str, Any]:
+def import_url(url: str, name: str = "",
+               role_id: Optional[str] = None) -> Dict[str, Any]:
     import httpx
 
     resp = httpx.get(url, timeout=30, follow_redirects=True)
     resp.raise_for_status()
     content = resp.text
     title = name or url.rstrip("/").rsplit("/", 1)[-1] or "skill"
-    return create_skill(title, _first_heading(content), content, source="url")
+    return create_skill(title, _first_heading(content), content, source="url",
+                        role_id=role_id)
 
 
 def _first_heading(text: str) -> str:
@@ -260,7 +380,8 @@ def _first_heading(text: str) -> str:
     return ""
 
 
-async def install_from_npm(package: str, name: str = "") -> Dict[str, Any]:
+async def install_from_npm(package: str, name: str = "",
+                           role_id: Optional[str] = None) -> Dict[str, Any]:
     """npm 安装一个技能包，把包目录里的 SKILL.md 装进技能库。"""
     pkg = (package or "").strip()
     if not pkg:
@@ -308,7 +429,7 @@ async def install_from_npm(package: str, name: str = "") -> Dict[str, Any]:
              and p.stat().st_size < 200_000}
     skill = create_skill(name or pkg_name, _first_heading(md.read_text(encoding="utf-8", errors="replace")),
                          md.read_text(encoding="utf-8", errors="replace"),
-                         source=f"npm:{pkg}", extra_files=extra)
+                         source=f"npm:{pkg}", extra_files=extra, role_id=role_id)
     return {"ok": True, "skill": skill, "output": (out or b"").decode("utf-8", "replace")[-600:]}
 
 
@@ -385,7 +506,8 @@ def _frontmatter(text: str) -> Dict[str, str]:
     return meta
 
 
-def _import_skill_dir(skill_dir: Path, source: str) -> Dict[str, Any]:
+def _import_skill_dir(skill_dir: Path, source: str,
+                      role_id: Optional[str] = None) -> Dict[str, Any]:
     md = skill_dir / "SKILL.md"
     text = md.read_text(encoding="utf-8", errors="replace")
     meta = _frontmatter(text)
@@ -396,7 +518,10 @@ def _import_skill_dir(skill_dir: Path, source: str) -> Dict[str, Any]:
              if p.is_file() and p != md and p.suffix.lower() in _CLI_TEXT_EXT
              and p.stat().st_size < 200_000}
 
-    existing = find_skill(name)
+    existing = find_skill(name, role_id=role_id)
+    if role_id and existing and not str(existing.get("role_id") or ""):
+        # 角色安装同名技能时不能覆盖全局技能，否则会把私有内容泄漏给所有角色。
+        existing = None
     if existing:
         skill = update_skill(existing["id"], {"description": description, "content": text})
         skill_dir = skills_root() / (existing.get("path") or "")
@@ -412,11 +537,13 @@ def _import_skill_dir(skill_dir: Path, source: str) -> Dict[str, Any]:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(ftext, encoding="utf-8")
         return skill
-    return create_skill(name, description, text, source=f"skills:{source}", extra_files=extra)
+    return create_skill(name, description, text, source=f"skills:{source}",
+                        extra_files=extra, role_id=role_id)
 
 
 async def install_from_skills_cli(source: str, skills: Any = None,
-                                  agent: str = "claude-code") -> Dict[str, Any]:
+                                  agent: str = "claude-code",
+                                  role_id: Optional[str] = None) -> Dict[str, Any]:
     """用 `npx skills add <owner/repo>` 安装 Agent Skills，导入到技能库。
 
     安装只发生在 data/agent_zero/skills/_npx/<源>/ 里（项目级），不改动用户其它 agent 目录。
@@ -462,7 +589,8 @@ async def install_from_skills_cli(source: str, skills: Any = None,
         d = Path(r["path"])
         if not (d / "SKILL.md").is_file():
             continue
-        imported.append(_import_skill_dir(d, f"{src}/{r.get('name') or d.name}"))
+        imported.append(_import_skill_dir(d, f"{src}/{r.get('name') or d.name}",
+                                              role_id=role_id))
     skipped = max(0, len(installed) - MAX_SKILLS_PER_SOURCE)
     return {
         "ok": True,
@@ -539,14 +667,22 @@ async def search_skills_registry(query: str, limit: int = 30) -> Dict[str, Any]:
     return {"ok": True, "query": q, "items": items}
 
 
-def skills_prompt() -> str:
-    """系统提示里的技能清单（只有启用的技能）。"""
-    skills = list_skills(enabled_only=True)
+def skills_prompt(role_id: Optional[str] = None) -> str:
+    """系统提示里的技能清单（只有启用的技能）。
+
+    给了 `role_id` 时 = 全局技能 + 该角色自己的专属技能；其他角色的专属技能不会出现。
+    """
+    skills = list_skills(enabled_only=True, role_id=role_id)
     if not skills:
         return ""
-    lines = [f"- **{s['name']}**：{s['description'] or '（无描述）'}" for s in skills]
+    lines = []
+    for s in skills:
+        scope = "（专属）" if str(s.get("role_id") or "") else ""
+        lines.append(f"- **{s['name']}**{scope}：{s['description'] or '（无描述）'}")
     return (
         "## 可用技能（可复用的操作指南）\n"
         "任务与某个技能匹配时，先用 use_skill 读取它的完整内容，再按其中的步骤执行；"
-        "如果你总结出一套可复用的做法，用 create_skill 写入技能库。\n" + "\n".join(lines)
+        "如果你总结出一套可复用的做法，用 create_skill 写入技能库。\n"
+        "角色创建的新技能默认只属于自己，不会共享给其他角色；每个角色最多 20 个，"
+        "达到上限时先用 merge 合并。\n" + "\n".join(lines)
     )

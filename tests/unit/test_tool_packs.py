@@ -81,11 +81,12 @@ def test_dev_tools_are_packed_shell_stays_standalone():
 
 
 def test_plan_pack_absorbs_collaboration():
-    """任务 / 目标 / 协作合成一个包，同类工具先合并，包内只留 4 个动作。"""
+    """任务 / 目标 / 协作合成一个包，同类工具先合并，包内只留少量动作。"""
     names = {p.code for p in packs.PACKS}
     assert "plan" in names and "agent" not in names
     plan = next(p for p in packs.PACKS if p.code == "plan")
-    assert set(plan.ops) == {"todo", "goal", "delegate", "team_admin", "role_admin"}
+    assert set(plan.ops) == {"todo", "goal", "delegate", "team_admin", "role_admin",
+                             "department_admin"}
     # 任务清单是唯一进度载体：包里的 todo 动作直指 todo_write
     assert plan.ops["todo"] == "todo_write"
     # 合并掉的旧入口不再下发（实现保留，历史消息仍可调用）
@@ -255,13 +256,14 @@ def test_resolve_split_code_pack_keeps_history_working():
 
 
 def test_plan_pack_is_enriched_and_merges_action_enums():
-    """任务包只留 4 个动作；合并后的参数（action / status / target / todos）取并集。"""
+    """任务包只留少量动作；合并后的参数（action / status / target / todos）取并集。"""
     specs = packs.build_pack_specs(registry.known_codes())
     plan = next(s for s in specs if s["function"]["name"] == "plan")
     fn = plan["function"]
     props = fn["parameters"]["properties"]
     assert set(props["op"]["enum"]) == {
-        "todo", "goal", "delegate", "team_admin", "role_admin"}
+        "todo", "goal", "delegate", "team_admin", "role_admin",
+        "department_admin"}
     # goal 合并了 goal_report + goal_manage：报告 / 状态 / 恢复都要在
     assert {"report", "status", "update", "note", "blocked", "resume", "close"} <= set(
         props["action"]["enum"])
@@ -428,8 +430,8 @@ def test_chat_seq_calls_cover_every_own_branch():
     """
     own_branch = {
         "propose_task", "call_subagent",
-        "call_team", "team_manage", "todo_write",
-        "goal_report", "goal_manage",
+        "call_team", "team_manage", "department_manage", "role_manage",
+        "todo_write", "goal_report", "goal_manage",
     }
     missing = own_branch - _chat_seq_names()
     assert not missing, f"_SEQ_CALLS 漏了专有分支工具：{sorted(missing)}"

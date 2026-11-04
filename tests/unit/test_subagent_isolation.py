@@ -52,16 +52,23 @@ def test_exec_subagent_runs_isolated(monkeypatch):
     assert "配置文件在 config.yaml" in text
 
 
-def test_exec_team_member_runs_isolated(monkeypatch):
+def test_exec_team_member_dispatches_background_run(monkeypatch):
+    """call_team 不再同步跑成员：主持 @ 成员，成员进入独立后台 run。"""
     captured = {}
 
-    async def fake_stream(conv, user, role, sink, **kwargs):
+    def fake_create_run(conv_id, user, **kwargs):
         captured.update(kwargs)
-        sink["text"] = "成员结论"
-        if False:      # pragma: no cover
-            yield {}
+        return {"id": "run-member-1"}
 
-    monkeypatch.setattr(conversation, "_stream_role", fake_stream)
+    async def fake_request_run(_run_id):
+        return None
+
+    monkeypatch.setattr(conversation, "append_mention_message",
+                        lambda conv_id, role, member, goal: {"id": "msg-mention-1"})
+    monkeypatch.setattr("services.agent_zero.task_layer.run_service.create_run",
+                        fake_create_run)
+    monkeypatch.setattr("services.agent_zero.task_layer.conv_worker.request_run",
+                        fake_request_run)
     team = {"leader": {"id": "r1"}, "members": [{"id": "m1", "name": "Reviewer"}]}
     member = {"id": "m1", "name": "Reviewer", "group_id": "ws1", "envelope": {}}
 
@@ -74,7 +81,9 @@ def test_exec_team_member_runs_isolated(monkeypatch):
         {"id": "conv1", "workspace_id": "ws1"}, "local", {"id": "r1"},
         {"member_id": "m1", "goal": "审查改动", "context": "只看 diff"}, 0))
     payload = json.loads(out)
-    assert payload["output"] == "成员结论"
-    assert captured["isolated"] is True
-    assert "审查改动" in captured["context_messages"][0]["content"]
-    assert "只看 diff" in captured["context_messages"][0]["content"]
+    assert payload["status"] == "dispatched"
+    assert payload["run_id"] == "run-member-1"
+    assert captured["target_role_id"] == "m1"
+    assert captured["queued_msg_id"] == "msg-mention-1"
+    assert "审查改动" in captured["content"]
+    assert "只看 diff" in captured["content"]

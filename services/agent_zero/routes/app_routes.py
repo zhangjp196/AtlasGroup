@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from services.agent_zero.config import get_settings
@@ -538,6 +538,47 @@ def put_ui_prefs(body: UiPrefsBody):
         raise HTTPException(status_code=400, detail="prefs too large")
     settings_store.put("ui", prefs)
     return {"code": 0, "data": prefs}
+
+
+# 主题单独一条：V3 每次启动的端口可能变，localStorage 按 origin 隔离，
+# 只靠 localStorage 会看起来「主题没保存」。服务器是跨端口 / 跨重启的持久源。
+_THEME_IDS = {"dark", "light", "midnight", "slate", "ocean", "forest", "sepia", "violet"}
+
+
+class ThemePrefsBody(BaseModel):
+    theme: str = Field("dark", max_length=40)
+    themeSchedule: Dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get("/app/theme")
+def get_theme_prefs():
+    prefs = settings_store.get("ui", {})
+    if not isinstance(prefs, dict):
+        prefs = {}
+    return {"code": 0, "data": {
+        "theme": prefs.get("theme") or "dark",
+        "themeSchedule": prefs.get("themeSchedule") or {},
+    }}
+
+
+@router.put("/app/theme")
+def put_theme_prefs(body: ThemePrefsBody):
+    theme = str(body.theme or "").strip()
+    if theme not in _THEME_IDS:
+        theme = "dark"
+    prefs = settings_store.get("ui", {})
+    if not isinstance(prefs, dict):
+        prefs = {}
+    next_prefs = dict(prefs)
+    next_prefs["theme"] = theme
+    next_prefs["themeSchedule"] = body.themeSchedule or {}
+    if len(json.dumps(next_prefs, ensure_ascii=False)) > 20000:
+        raise HTTPException(status_code=400, detail="prefs too large")
+    settings_store.put("ui", next_prefs)
+    return {"code": 0, "data": {
+        "theme": next_prefs["theme"],
+        "themeSchedule": next_prefs["themeSchedule"],
+    }}
 
 
 class ModelProfileBody(BaseModel):
@@ -1290,12 +1331,12 @@ def put_permissions(body: PermissionBody):
     return {"code": 0, "data": {"policy": policy}}
 
 
-# ── 全局 Agent：跨会话待授权 / 未读 / 运行 / 授权策略 ──────────────────
+# ── Superagent：跨会话待授权 / 未读 / 运行 / 授权策略 ──────────────────
 
 
 @router.get("/app/attention")
 def app_attention(limit: int = 100):
-    """全局 Agent 面板数据：跨会话的待审批、待回答、未读、运行与授权策略。"""
+    """Superagent 面板数据：跨会话的待审批、待回答、未读、运行与授权策略。"""
     from services.agent_zero.services import attention_service
 
     return {"code": 0, "data": attention_service.snapshot(limit)}
@@ -1482,14 +1523,16 @@ class SkillBody(BaseModel):
     name: str = ""
     description: str = ""
     content: str = ""
+    role_id: Optional[str] = None
     enabled: Optional[bool] = None
 
 
 @router.get("/app/skills")
-def list_skills():
+def list_skills(role_id: str = Query(""), include_global: bool = Query(True)):
     from services.agent_zero.services import skill_service
 
-    return {"code": 0, "data": {"items": skill_service.list_skills()}}
+    return {"code": 0, "data": {"items": skill_service.list_skills(
+        role_id=role_id.strip() or None, include_global=include_global)}}
 
 
 @router.post("/app/skills")
@@ -1498,7 +1541,19 @@ def create_skill(body: SkillBody):
 
     try:
         return {"code": 0, "data": skill_service.create_skill(
-            body.name, body.description, body.content)}
+            body.name, body.description, body.content, role_id=body.role_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/app/skills/merge")
+def merge_skills(body: Dict[str, Any]):
+    from services.agent_zero.services import skill_service
+
+    try:
+        return {"code": 0, "data": skill_service.merge_skills(
+            str(body.get("role_id") or ""), body.get("skill_ids") or [],
+            str(body.get("name") or ""), str(body.get("description") or ""))}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1552,7 +1607,8 @@ def upload_skill(body: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="上传数据无效")
     try:
         return {"code": 0, "data": skill_service.import_upload(
-            str(body.get("filename") or "skill"), data)}
+            str(body.get("filename") or "skill"), data,
+            role_id=str(body.get("role_id") or "") or None)}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1574,7 +1630,9 @@ def import_skill_url(body: Dict[str, Any]):
     if not url:
         raise HTTPException(status_code=400, detail="缺少 url")
     try:
-        return {"code": 0, "data": skill_service.import_url(url, str(body.get("name") or ""))}
+        return {"code": 0, "data": skill_service.import_url(
+            url, str(body.get("name") or ""),
+            role_id=str(body.get("role_id") or "") or None)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"抓取失败: {e}")
 

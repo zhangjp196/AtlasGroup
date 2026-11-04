@@ -46,6 +46,7 @@ class TeamCreateBody(BaseModel):
     # V3：群组独立于工作区，可不传；传了只作为历史来源保存。
     workspace_id: Optional[str] = Field(None, max_length=80)
     name: str = Field(..., min_length=1, max_length=120)
+    avatar: Optional[str] = Field(None, max_length=500)
     description: Optional[str] = Field(None, max_length=1000)
     mode: Optional[str] = Field(None, pattern=_MODE_PATTERN)
     max_speakers: Optional[int] = Field(None, ge=1, le=12)
@@ -55,6 +56,7 @@ class TeamCreateBody(BaseModel):
 
 class TeamUpdateBody(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=120)
+    avatar: Optional[str] = Field(None, max_length=500)
     description: Optional[str] = Field(None, max_length=1000)
     mode: Optional[str] = Field(None, pattern=_MODE_PATTERN)
     max_speakers: Optional[int] = Field(None, ge=1, le=12)
@@ -91,6 +93,7 @@ def create_team(body: TeamCreateBody):
     try:
         team = team_service.create_team(
             ws_id, body.name, body.description or "",
+            avatar=body.avatar,
             leader=_spec(body.leader),
             members=[m for m in (_spec(x) for x in (body.members or [])) if m],
             mode=body.mode, max_speakers=body.max_speakers,
@@ -116,6 +119,7 @@ def update_team(team_id: str, body: TeamUpdateBody):
         team = team_service.update_team(
             team_id,
             name=body.name,
+            avatar=body.avatar,
             description=body.description,
             leader=_spec(body.leader),
             members=[m for m in (_spec(x) for x in (body.members or [])) if m]

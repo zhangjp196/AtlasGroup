@@ -492,6 +492,7 @@ class ConversationRunWorker:
             conv_id, run.get("created_by") or "system",
             content=run.get("content") or "",
             mentions=run.get("mentions") or None,
+            target_role_id=run.get("target_role_id") or None,
             autonomous=(run.get("mode") == "autonomous"),
             auto_execute=bool(run.get("auto_execute")),
             run_id=run_id,

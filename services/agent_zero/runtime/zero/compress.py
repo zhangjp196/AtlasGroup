@@ -878,6 +878,7 @@ async def apply(
     *,
     models: Optional[Dict[str, Any]] = None,
     decision: Optional[Dict[str, Any]] = None,
+    force_summary: bool = False,
 ) -> Dict[str, Any]:
     """按决策执行一次压缩；**永不抛错**，任何异常都退化为确定性摘要或硬裁。
 
@@ -910,7 +911,8 @@ async def apply(
             kept_recent = len(tail)
             older, _saved, pruned, deduped = prune_tool_outputs(older)
             pruned_messages = [*_merge_system(head), *older, *tail]
-            if pruned and estimate_tokens(pruned_messages) <= budget * (1.0 - PRUNE_HEADROOM):
+            if (pruned and not force_summary
+                    and estimate_tokens(pruned_messages) <= budget * (1.0 - PRUNE_HEADROOM)):
                 # 一级压缩就够了：保留全部对话结构，不产生摘要
                 out = pruned_messages
                 source = "prune"

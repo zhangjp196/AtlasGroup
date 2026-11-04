@@ -31,9 +31,12 @@ from services.agent_zero.database import init_database
 from services.agent_zero.version import APP_NAME, APP_VERSION
 from services.agent_zero.routes import (
     app_routes,
+    avatar_routes,
+    department_routes,
     role_routes,
     task_routes,
     team_routes,
+    work_routes,
     workspace_admin_routes,
     workspace_routes,
 )
@@ -236,8 +239,11 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
 
     app.include_router(app_routes.router, prefix=API_PREFIX, tags=["应用"])
     app.include_router(task_routes.router, prefix=API_PREFIX, tags=["对话"])
+    app.include_router(work_routes.router, prefix=API_PREFIX, tags=["工单助手"])
     app.include_router(workspace_admin_routes.router, prefix=API_PREFIX, tags=["工作区"])
     app.include_router(team_routes.router, prefix=API_PREFIX, tags=["团队"])
+    app.include_router(department_routes.router, prefix=API_PREFIX, tags=["部门"])
+    app.include_router(avatar_routes.router, prefix=API_PREFIX, tags=["头像"])
     app.include_router(role_routes.router, prefix=API_PREFIX, tags=["角色"])
     app.include_router(workspace_routes.router,
                        prefix=f"{API_PREFIX}/workspace", tags=["Workspace"])

@@ -28,9 +28,11 @@ _PROTECTED = {zero_store.DEFAULT_ROLE_ID}
 
 class RoleCreateBody(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
+    title: Optional[str] = Field(None, max_length=120)
+    department_id: Optional[str] = Field(None, max_length=80)
     persona: Optional[str] = Field(None, max_length=4000)
     expertise: Optional[str] = Field(None, max_length=1000)
-    avatar: Optional[str] = Field(None, max_length=200)
+    avatar: Optional[str] = Field(None, max_length=500)
     tools: Optional[List[str]] = Field(None, max_length=40)
     model_code: Optional[str] = Field(None, max_length=80)
     scope: Optional[str] = Field(None, pattern="^(persistent|temporary)$")
@@ -40,21 +42,29 @@ class RoleCreateBody(BaseModel):
 
 class RoleUpdateBody(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=120)
+    title: Optional[str] = Field(None, max_length=120)
+    department_id: Optional[str] = Field(None, max_length=80)
     persona: Optional[str] = Field(None, max_length=4000)
     expertise: Optional[str] = Field(None, max_length=1000)
-    avatar: Optional[str] = Field(None, max_length=200)
+    avatar: Optional[str] = Field(None, max_length=500)
     tools: Optional[List[str]] = Field(None, max_length=40)
     model_code: Optional[str] = Field(None, max_length=80)
     scope: Optional[str] = Field(None, pattern="^(persistent|temporary)$")
     session_id: Optional[str] = Field(None, max_length=80)
 
 
-def _public(role: Dict[str, Any]) -> Dict[str, Any]:
+def _public(role: Dict[str, Any],
+            paths: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     envelope = role.get("envelope") if isinstance(role.get("envelope"), dict) else {}
     tools = [str(t) for t in (envelope.get("tools") or [])]
+    dept_id = str(role.get("department_id") or "")
+    paths = paths if paths is not None else zero_store.department_paths()
     return {
         "id": role.get("id"),
         "name": str(role.get("name") or role.get("id") or ""),
+        "title": str(role.get("title") or ""),
+        "department_id": dept_id,
+        "department": paths.get(dept_id, ""),
         "persona": str(role.get("persona") or ""),
         "expertise": str(role.get("expertise") or ""),
         "avatar": str(role.get("avatar") or ""),
@@ -66,6 +76,18 @@ def _public(role: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": str(role.get("created_at") or ""),
         "system": str(role.get("id") or "") in _PROTECTED,
     }
+
+
+def _department_value(dept_id: Optional[str]) -> Optional[str]:
+    """部门 id 归一：None = 未提供（PATCH 保持原值），空串 = 显式未安排。"""
+    if dept_id is None:
+        return None
+    clean = str(dept_id).strip()
+    if not clean:
+        return ""
+    if not zero_store.get_department(clean):
+        raise HTTPException(status_code=400, detail=f"部门不存在: {clean}")
+    return clean
 
 
 def _envelope(tools: Optional[List[str]], current: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -98,10 +120,11 @@ def _get_or_404(role_id: str) -> Dict[str, Any]:
 def list_roles(include_temporary: bool = Query(False),
                session_id: Optional[str] = Query(None, max_length=80)):
     """角色库。默认只返回持久角色；带 session_id 时额外返回该会话的临时角色。"""
-    rows = zero_store.list_roles(limit=200)
+    rows = zero_store.list_roles(limit=1000)
+    paths = zero_store.department_paths()
     out: List[Dict[str, Any]] = []
     for row in rows:
-        item = _public(row)
+        item = _public(row, paths)
         if item["scope"] == "temporary":
             if not include_temporary:
                 continue
@@ -124,6 +147,8 @@ def create_role(body: RoleCreateBody):
         "id": zero_store.new_id("role"),
         "group_id": None,
         "name": body.name,
+        "title": body.title or "",
+        "department_id": _department_value(body.department_id) or "",
         "persona": body.persona or "",
         "expertise": body.expertise or "",
         "avatar": body.avatar,
@@ -147,10 +172,18 @@ def update_role(role_id: str, body: RoleUpdateBody):
                             detail="临时角色必须带 session_id（所属会话）")
     if scope == "persistent":
         session_id = ""   # 显式清空（upsert 里 NULL 表示“保持不变”）
+    fields_set = body.model_fields_set
+    title = (("" if body.title is None else body.title)
+             if "title" in fields_set else None)
+    department_id = (
+        ("" if body.department_id is None else _department_value(body.department_id))
+        if "department_id" in fields_set else None)
     role = zero_store.upsert_role({
         "id": role_id,
         "group_id": current.get("group_id"),
         "name": body.name or current.get("name"),
+        "title": title,
+        "department_id": department_id,
         "persona": body.persona if body.persona is not None else current.get("persona"),
         "expertise": (body.expertise if body.expertise is not None
                       else current.get("expertise")),
@@ -183,6 +216,8 @@ def promote_role(role_id: str):
         "id": role_id,
         "group_id": current.get("group_id"),
         "name": current.get("name"),
+        "title": current.get("title"),
+        "department_id": current.get("department_id"),
         "persona": current.get("persona"),
         "expertise": current.get("expertise"),
         "avatar": current.get("avatar"),

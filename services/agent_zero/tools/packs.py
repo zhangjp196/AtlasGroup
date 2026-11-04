@@ -15,8 +15,8 @@
   `goal_report` 合入 `goal_manage`（action=report）；`call_subagent` / `call_team`
   合成 `delegate`（target 选子代理 / 团队成员）。设置页与模型工具清单只看到
   合并后的入口，历史消息里的旧名字仍能执行。
-- **任务与协作包**（`plan`）保留 5 个动作：`todo` / `goal` / `delegate` /
-  `team_admin` / `role_admin`。任务清单是唯一的进度载体（整份覆盖式 `todo_write`）；
+- **任务与协作包**（`plan`）保留 6 个动作：`todo` / `goal` / `delegate` /
+  `team_admin` / `role_admin` / `department_admin`。任务清单是唯一的进度载体（整份覆盖式 `todo_write`）；
   执行计划流程图已下线，不再有独立的 plan 工具。`ask_user` 是独立工具。
 - 其余按用途保持 `fs` / `net` / `memory` / `skill` / `mcp`。
 
@@ -89,6 +89,7 @@ PACKS: Tuple[ToolPack, ...] = (
         "delegate": "delegate",
         "team_admin": "team_manage",
         "role_admin": "role_manage",
+        "department_admin": "department_manage",
     }),
     # 开发与仓库：后台任务 / 版本控制 / 代码图谱。
     # vcs 与 codegraph 自带 `op` 参数，进包后在包里统一暴露成 `action`
@@ -102,6 +103,7 @@ PACKS: Tuple[ToolPack, ...] = (
         "list": "list_skills",
         "use": "use_skill",
         "create": "create_skill",
+        "merge": "merge_skills",
         "install": "install_skill",
     }),
     ToolPack("mcp", "MCP", {
@@ -124,7 +126,7 @@ STANDALONE_TOOLS: Tuple[str, ...] = (
     "workspace",
     # ask_user 是通用的人机交互，不属于任何工具包。
     "ask_user",
-    # 全局 Agent 专用：手动注入到 global-agent 会话，普通会话不下发。
+    # Superagent 专用：手动注入到 global-agent 会话，普通会话不下发。
     "app_manage",
 )
 

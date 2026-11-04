@@ -34,7 +34,8 @@ FILE_TOOL_CODES = frozenset({"read_file", "read_office", "edit_file", "write_fil
                              "list_files"})
 
 # 技能与 MCP 管理工具（不依赖工作区，走 skill_service / mcp_service）
-SKILL_TOOL_CODES = frozenset({"list_skills", "use_skill", "create_skill", "install_skill"})
+SKILL_TOOL_CODES = frozenset({"list_skills", "use_skill", "create_skill",
+                              "merge_skills", "install_skill"})
 MCP_CONFIG_CODES = frozenset({"list_mcp", "add_mcp_server", "install_mcp"})
 
 # 超大工具输出落盘阈值缓存（config.yaml tools.max_output_chars，2s TTL）
@@ -387,7 +388,8 @@ class ToolDispatcher:
         if canon == "web":
             return await self._act_web(task, config, node, args)
         if canon in SKILL_TOOL_CODES:
-            return await self._act_skills(canon, args)
+            return await self._act_skills(canon, args,
+                                          role_id=str(task.get("role_id") or ""))
         if canon in MCP_CONFIG_CODES:
             return await self._act_mcp_config(canon, args)
         return {"error": f"工具 {canon} 未实现"}
@@ -673,32 +675,43 @@ class ToolDispatcher:
             return {"error": f"非法 MCP 工具名: {name}（应为 mcp__<server>__<tool>）"}
         return await mcp_service.call_tool(parts[1], parts[2], args or {})
 
-    async def _act_skills(self, canon: str, args: Dict[str, Any]) -> Any:
+    async def _act_skills(self, canon: str, args: Dict[str, Any],
+                          role_id: str = "") -> Any:
         from services.agent_zero.services import skill_service
 
+        rid = str(role_id or "").strip()
         try:
             if canon == "list_skills":
-                return {"skills": skill_service.list_skills()}
+                return {"skills": skill_service.list_skills(role_id=rid or None)}
             if canon == "use_skill":
-                skill = skill_service.find_skill(str(args.get("name") or ""))
+                skill = skill_service.find_skill(str(args.get("name") or ""),
+                                                 role_id=rid or None)
                 if not skill:
                     return {"error": f"技能不存在: {args.get('name')}",
-                            "available": [s["name"] for s in skill_service.list_skills()]}
+                            "available": [s["name"] for s in
+                                          skill_service.list_skills(role_id=rid or None)]}
                 return {"skill": skill["name"], "description": skill["description"],
                         "content": skill_service.read_skill_text(skill),
-                        "files": skill.get("files") or []}
+                        "files": skill.get("files") or [],
+                        "role_id": str(skill.get("role_id") or "")}
             if canon == "create_skill":
                 skill = skill_service.create_skill(
                     str(args.get("name") or ""), str(args.get("description") or ""),
-                    str(args.get("content") or ""))
+                    str(args.get("content") or ""), role_id=rid or None)
+                return {"ok": True, "skill": skill}
+            if canon == "merge_skills":
+                skill = skill_service.merge_skills(
+                    rid, args.get("skill_ids") or [],
+                    str(args.get("name") or ""), str(args.get("description") or ""))
                 return {"ok": True, "skill": skill}
             if canon == "install_skill":
                 source = str(args.get("source") or args.get("repo") or "").strip()
                 if source:
                     return await skill_service.install_from_skills_cli(
-                        source, args.get("skills") or [])
+                        source, args.get("skills") or [], role_id=rid or None)
                 return await skill_service.install_from_npm(
-                    str(args.get("package") or ""), str(args.get("name") or ""))
+                    str(args.get("package") or ""), str(args.get("name") or ""),
+                    role_id=rid or None)
         except Exception as e:
             return {"error": f"技能操作失败: {e}"}
         return {"error": f"技能工具 {canon} 未实现"}

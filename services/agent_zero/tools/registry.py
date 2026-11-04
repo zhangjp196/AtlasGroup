@@ -451,9 +451,9 @@ TOOL_DEFS: List[ToolDef] = [
         "app_manage", (),
         name="全局 App 管理",
         description=(
-            "全局 Agent 专用：跨会话查看 / 处理待授权、回答问题、标记已读、"
+            "工单助手 专用：跨会话查看 / 处理待授权、回答问题、标记已读、"
             "设置会话权限、设置全局默认权限、停止运行。\n"
-            "只在全局 Agent 会话里下发；普通会话不会看到这个工具。\n"
+            "只在工单助手 会话里下发；普通会话不会看到这个工具。\n"
             "action=status 返回当前待授权 / 未读 / 运行 / 会话授权的快照；"
             "approve 需要 approval_id + decision；answer 需要 question_id；"
             "set_permission 需要 conversation_id + mode；stop_run 需要 run_id 或 "
@@ -496,14 +496,18 @@ TOOL_DEFS: List[ToolDef] = [
             "角色是独立人格（不属于工作区）；群组只是角色集合。会话内按需创建的角色默认"
             "为**临时角色**（只属于当前会话，会话删除即销毁），并自动加入当前群聊；"
             "需要跨会话复用时用 action=promote 存为持久角色。\n"
-            "创建时给出 name / expertise / persona / tools（工具子集，不填=默认全集）。"
+            "创建时给出 name（谁）/ title（岗位）/ department_id（部门，可空）/ "
+            "expertise / persona / tools（工具子集，不填=默认全集）。"
         ),
         parameters=_obj({
             "action": {"type": "string",
                        "enum": ["list", "create", "update", "promote", "delete"],
                        "description": "操作"},
             "role_id": {"type": "string", "description": "角色 id（update / promote / delete 必填）"},
-            "name": {"type": "string", "description": "角色名称"},
+            "name": {"type": "string", "description": "角色名称（谁）"},
+            "title": {"type": "string", "description": "岗位（做什么），与名称分离"},
+            "department_id": {"type": "string",
+                              "description": "所属部门 id（可空 = 未安排）"},
             "expertise": {"type": "string", "description": "一句话专长"},
             "persona": {"type": "string", "description": "人格 / 工作方式"},
             "tools": {"type": "array", "items": {"type": "string"},
@@ -513,6 +517,31 @@ TOOL_DEFS: List[ToolDef] = [
                       "description": "create 时的生命周期（默认 temporary）"},
             "add_to_team": {"type": "boolean",
                             "description": "create 时是否加入当前会话绑定的群聊（默认 true）"},
+        }, ["action"]),
+        gated=False,
+    ),
+    ToolDef(
+        "department_manage", ("department_admin", "org_manage"),
+        name="组织部门",
+        description=(
+            "管理组织里的部门：列出 / 新建 / 修改 / 移动 / 删除。部门支持多级，"
+            "用 parent_id 指定上级（不填 = 根部门）。删除部门时子部门会上移到上一级，"
+            "部门内角色变为「未安排」。\n"
+            "角色归档到部门用 role_manage(update, department_id=...)；部门只影响组织"
+            "管理与展示，不改变角色能力。"
+        ),
+        parameters=_obj({
+            "action": {"type": "string",
+                       "enum": ["list", "create", "update", "delete"],
+                       "description": "操作"},
+            "department_id": {"type": "string",
+                              "description": "部门 id（update / delete 必填）"},
+            "name": {"type": "string", "description": "部门名称"},
+            "parent_id": {"type": "string",
+                          "description": "上级部门 id；空 = 根部门"},
+            "sort": {"type": "integer", "description": "同级排序（越小越靠前）"},
+            "avatar": {"type": "string",
+                       "description": "可选：头像 URL（先通过 /avatars 上传）"},
         }, ["action"]),
         gated=False,
     ),
@@ -540,6 +569,9 @@ TOOL_DEFS: List[ToolDef] = [
         name="创建 / 更新技能",
         description=(
             "把一份可复用的操作指南写入技能库（SKILL.md）。同名技能会被更新。"
+            "角色调用时创建的是**该角色专属技能**，不会共享给其他角色；"
+            "可以先用文件 / 图片 / 网页搜索等方式收集材料，再把整理后的步骤写入 content。"
+            "每个角色最多 20 个专属技能，达到上限后先用 merge_skills 合并。"
             "内容应包含适用场景、步骤、注意事项，可结合工作区里的脚本或示例文件。"
         ),
         parameters=_obj({
@@ -547,6 +579,22 @@ TOOL_DEFS: List[ToolDef] = [
             "description": {"type": "string", "description": "一句话说明这个技能做什么"},
             "content": {"type": "string", "description": "SKILL.md 正文（Markdown）"},
         }, ["name", "content"]),
+        risk="medium",
+        gated=False,
+    ),
+    ToolDef(
+        "merge_skills", ("skill_merge",),
+        name="合并专属技能",
+        description=(
+            "把当前角色的多个专属技能合并成一个，并删除来源技能。每个角色最多 20 个"
+            "专属技能，达到上限后先用它合并。只能合并属于当前角色的技能。"
+        ),
+        parameters=_obj({
+            "skill_ids": {"type": "array", "items": {"type": "string"},
+                          "description": "要合并的技能 id（至少 2 个）"},
+            "name": {"type": "string", "description": "合并后的技能名称"},
+            "description": {"type": "string", "description": "合并后的技能描述"},
+        }, ["skill_ids", "name"]),
         risk="medium",
         gated=False,
     ),

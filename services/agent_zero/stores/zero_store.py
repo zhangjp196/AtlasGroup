@@ -188,6 +188,124 @@ def update_workspace(ws_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, A
     return get_workspace(ws_id)
 
 
+# ── 部门 ─────────────────────────────────────────────────────
+
+
+def list_departments() -> List[Dict[str, Any]]:
+    """全部部门（扁平结构，调用方按 parent_id 自己组树）。"""
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT id, name, avatar, parent_id, sort, created_at "
+                 f"FROM {_q('departments')} ORDER BY sort ASC, created_at ASC, name ASC"),
+        ).mappings().all()
+    return [decode_row(r) for r in rows]
+
+
+def get_department(dept_id: str) -> Optional[Dict[str, Any]]:
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        row = db.execute(
+            text(f"SELECT id, name, avatar, parent_id, sort, created_at "
+                 f"FROM {_q('departments')} WHERE id = :id"),
+            {"id": dept_id},
+        ).mappings().first()
+    return decode_row(row) if row else None
+
+
+def department_paths() -> Dict[str, str]:
+    """部门 id → 完整路径（`公司 / 产品部 / 设计组`）。"""
+    rows = list_departments()
+    by_id = {str(r.get("id") or ""): r for r in rows}
+    cache: Dict[str, str] = {}
+
+    def path(dept_id: str) -> str:
+        dept_id = str(dept_id or "")
+        if not dept_id or dept_id not in by_id:
+            return ""
+        if dept_id in cache:
+            return cache[dept_id]
+        seen = set()
+        names: List[str] = []
+        cur = by_id[dept_id]
+        while cur and str(cur.get("id") or "") not in seen:
+            seen.add(str(cur.get("id") or ""))
+            names.append(str(cur.get("name") or ""))
+            cur = by_id.get(str(cur.get("parent_id") or ""))
+        cache[dept_id] = " / ".join(reversed(names))
+        return cache[dept_id]
+
+    return {dept_id: path(dept_id) for dept_id in by_id}
+
+
+def department_path(dept_id: Optional[str]) -> str:
+    if not dept_id:
+        return ""
+    return department_paths().get(str(dept_id), "")
+
+
+def role_counts_by_department() -> Dict[str, int]:
+    """部门 id → 直属角色数（未安排部门不在此表里）。"""
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT department_id, COUNT(*) AS n FROM {_q('roles')} "
+                 f"WHERE department_id IS NOT NULL AND department_id != '' "
+                 f"GROUP BY department_id"),
+        ).all()
+    return {str(r[0]): int(r[1] or 0) for r in rows}
+
+
+def upsert_department(row: Dict[str, Any]) -> Dict[str, Any]:
+    dept_id = str(row.get("id") or new_id("dept"))
+    parent_id = str(row.get("parent_id") or "").strip() or None
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"INSERT INTO {_q('departments')} "
+                 f"(id, name, avatar, parent_id, sort) "
+                 f"VALUES (:id, :name, NULLIF(:avatar, ''), :parent, :sort) "
+                 f"ON CONFLICT (id) DO UPDATE SET "
+                 f"name = :name, "
+                 f"avatar = CASE WHEN :avatar IS NULL THEN departments.avatar "
+                 f"ELSE NULLIF(:avatar, '') END, "
+                 f"parent_id = :parent, sort = :sort"),
+            {"id": dept_id, "name": str(row.get("name") or "")[:120] or dept_id,
+             "avatar": row.get("avatar"),
+             "parent": parent_id, "sort": int(row.get("sort") or 0)},
+        )
+        db.commit()
+    return get_department(dept_id) or {}
+
+
+def delete_department(dept_id: str) -> Dict[str, Any]:
+    """删除部门：子部门上移到父级，部门内角色变为「未安排」。"""
+    current = get_department(dept_id)
+    if not current:
+        return {"deleted": False, "id": dept_id}
+    parent_id = current.get("parent_id")
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        roles = db.execute(
+            text(f"UPDATE {_q('roles')} SET department_id = NULL "
+                 f"WHERE department_id = :id"),
+            {"id": dept_id},
+        ).rowcount
+        children = db.execute(
+            text(f"UPDATE {_q('departments')} SET parent_id = :parent "
+                 f"WHERE parent_id = :id"),
+            {"parent": parent_id, "id": dept_id},
+        ).rowcount
+        db.execute(
+            text(f"DELETE FROM {_q('departments')} WHERE id = :id"),
+            {"id": dept_id},
+        )
+        db.commit()
+    return {"deleted": True, "id": dept_id,
+            "roles_unassigned": max(0, int(roles or 0)),
+            "children_moved": max(0, int(children or 0))}
+
+
 # ── 角色 ─────────────────────────────────────────────────────
 
 
@@ -195,11 +313,11 @@ def list_roles(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         rows = db.execute(
-            text(f"SELECT id, group_id, name, persona, expertise, avatar, envelope, "
-                 f"model_code, scope, source, session_id, created_at "
+            text(f"SELECT id, group_id, name, title, department_id, persona, expertise, "
+                 f"avatar, envelope, model_code, scope, source, session_id, created_at "
                  f"FROM {_q('roles')} ORDER BY created_at ASC, id "
                  f"LIMIT :limit OFFSET :offset"),
-            {"limit": max(1, min(int(limit), 100)), "offset": max(0, int(offset))},
+            {"limit": max(1, min(int(limit), 2000)), "offset": max(0, int(offset))},
         ).mappings().all()
     return [decode_row(r) for r in rows]
 
@@ -208,8 +326,8 @@ def get_role(role_id: str) -> Optional[Dict[str, Any]]:
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         row = db.execute(
-            text(f"SELECT id, group_id, name, persona, expertise, avatar, envelope, "
-                 f"model_code, scope, source, session_id "
+            text(f"SELECT id, group_id, name, title, department_id, persona, expertise, "
+                 f"avatar, envelope, model_code, scope, source, session_id "
                  f"FROM {_q('roles')} WHERE id = :id"),
             {"id": role_id},
         ).mappings().first()
@@ -222,14 +340,18 @@ def upsert_role(row: Dict[str, Any]) -> Dict[str, Any]:
     with SessionLocal() as db:
         db.execute(
             text(f"INSERT INTO {_q('roles')} "
-                 f"(id, group_id, name, persona, expertise, avatar, envelope, model_code, "
-                 f"scope, source, session_id) "
-                 f"VALUES (:id, :gid, :name, :persona, :expertise, :avatar, :envelope, "
+                 f"(id, group_id, name, title, department_id, persona, expertise, "
+                 f"avatar, envelope, model_code, scope, source, session_id) "
+                 f"VALUES (:id, :gid, :name, :title, NULLIF(:department_id, ''), "
+                 f":persona, :expertise, :avatar, :envelope, "
                  f":model_code, COALESCE(:scope, 'persistent'), "
                  f"COALESCE(:source, 'user'), :session_id) "
                  f"ON CONFLICT (id) DO UPDATE SET "
                  f"group_id = :gid, name = :name, persona = :persona, "
                  f"expertise = :expertise, "
+                 f"title = CASE WHEN :title IS NULL THEN roles.title ELSE :title END, "
+                 f"department_id = CASE WHEN :department_id IS NULL THEN roles.department_id "
+                 f"WHEN :department_id = '' THEN NULL ELSE :department_id END, "
                  f"avatar = CASE WHEN :avatar IS NULL THEN roles.avatar ELSE :avatar END, "
                  f"envelope = :envelope, "
                  f"model_code = CASE WHEN :model_code IS NULL THEN roles.model_code "
@@ -240,6 +362,8 @@ def upsert_role(row: Dict[str, Any]) -> Dict[str, Any]:
                  f"ELSE :session_id END"),
             {"id": rid, "gid": row.get("group_id"),
              "name": str(row.get("name") or "")[:128] or None,
+             "title": row.get("title"),
+             "department_id": row.get("department_id"),
              "persona": row.get("persona"), "expertise": row.get("expertise"),
              "avatar": row.get("avatar") if row.get("avatar") is not None else None,
              "envelope": _json(row.get("envelope") or {}),
@@ -253,6 +377,13 @@ def upsert_role(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def delete_role(role_id: str) -> bool:
+    # 角色删除时带走它的专属技能（全局技能不受影响）。
+    try:
+        from services.agent_zero.services import skill_service
+
+        skill_service.delete_role_skills(role_id)
+    except Exception as e:
+        logger.debug("清理角色专属技能失败（忽略）: %s", e)
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         db.execute(text(f"DELETE FROM {_q('roles')} WHERE id = :id"), {"id": role_id})
@@ -351,7 +482,7 @@ def _drop_retired_tools() -> int:
 
     known = set(registry.known_codes())
     cleaned = 0
-    for role in list_roles(limit=200):
+    for role in list_roles(limit=2000):
         envelope = dict(role.get("envelope") or {})
         tools = list(envelope.get("tools") or [])
         kept, seen = [], set()
@@ -384,7 +515,7 @@ def _drop_retired_tools() -> int:
 def _grant_missing_tools(extras=("read_office", "save_analysis", "ask_user")) -> int:
     """给已有角色追加新工具（仅当它已被授予 read_file）。幂等，只加不删。"""
     granted = 0
-    for role in list_roles(limit=100):
+    for role in list_roles(limit=2000):
         envelope = dict(role.get("envelope") or {})
         tools = list(envelope.get("tools") or [])
         if not tools or "read_file" not in tools:

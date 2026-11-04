@@ -26,6 +26,8 @@ class PromptContext:
 
     name: str
     now: str
+    title: str = ""
+    department: str = ""
     persona: str = ""
     expertise: str = ""
     principles: List[str] = field(default_factory=list)
@@ -167,7 +169,13 @@ SUBAGENT = """# 子代理模式
 
 
 def _identity(ctx: PromptContext) -> str:
-    return IDENTITY.format(name=ctx.name or APP_NAME, now=ctx.now)
+    text = IDENTITY.format(name=ctx.name or APP_NAME, now=ctx.now)
+    lines = []
+    if ctx.title.strip():
+        lines.append(f"- 你的岗位：{ctx.title.strip()[:120]}。")
+    if ctx.department.strip():
+        lines.append(f"- 你所属部门：{ctx.department.strip()[:240]}。")
+    return text.rstrip() + ("\n" + "\n".join(lines) if lines else "") + "\n"
 
 
 def _role_parts(ctx: PromptContext) -> List[str]:

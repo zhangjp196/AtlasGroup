@@ -99,21 +99,46 @@
     return THEMES[index].id;
   }
 
+  // 桌面端每次启动可能换端口：localStorage 按 origin 隔离会丢，cookie 只按 host
+  // 隔离（忽略端口），因此在 cookie 里留一份窄缓存，保证重启后主题不回落。
+  function readCookie(name) {
+    try {
+      const hit = document.cookie.split('; ').find((row) => row.startsWith(name + '='));
+      return hit ? decodeURIComponent(hit.slice(name.length + 1)) : null;
+    } catch { return null; }
+  }
+
+  function writeCookie(name, value) {
+    try {
+      document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=31536000; SameSite=Lax`;
+    } catch { /* ignore */ }
+  }
+
   function readTheme() {
     try {
       const saved = localStorage.getItem(THEME_KEY);
       if (THEME_IDS.has(saved)) return saved;
-    } catch { /* localStorage 不可用时用默认值 */ }
-    return 'dark';
+    } catch { /* localStorage 不可用时看 cookie */ }
+    const cookie = readCookie(THEME_KEY);
+    return THEME_IDS.has(cookie) ? cookie : 'dark';
   }
 
   function readSchedule() {
+    let raw = null;
+    try { raw = localStorage.getItem(SCHEDULE_KEY); } catch { /* ignore */ }
+    if (!raw) raw = readCookie(SCHEDULE_KEY);
     try {
-      const raw = localStorage.getItem(SCHEDULE_KEY);
       return normalizeSchedule(raw ? JSON.parse(raw) : null);
     } catch {
       return normalizeSchedule(null);
     }
+  }
+
+  function hasSaved() {
+    try {
+      if (THEME_IDS.has(localStorage.getItem(THEME_KEY))) return true;
+    } catch { /* ignore */ }
+    return THEME_IDS.has(readCookie(THEME_KEY));
   }
 
   function writePrefs(theme, schedule) {
@@ -121,6 +146,8 @@
       if (THEME_IDS.has(theme)) localStorage.setItem(THEME_KEY, theme);
       if (schedule) localStorage.setItem(SCHEDULE_KEY, JSON.stringify(normalizeSchedule(schedule)));
     } catch { /* 无痕模式等场景：仅本次会话生效 */ }
+    if (THEME_IDS.has(theme)) writeCookie(THEME_KEY, theme);
+    if (schedule) writeCookie(SCHEDULE_KEY, JSON.stringify(normalizeSchedule(schedule)));
   }
 
   /** 把主题写到 <html>，并同步浏览器/WebView 的配色与状态栏颜色。 */
@@ -159,6 +186,7 @@
     scheduledTheme,
     readTheme,
     readSchedule,
+    hasSaved,
     writePrefs,
     apply,
     modeOf,

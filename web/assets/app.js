@@ -1187,6 +1187,7 @@
       'tool.use_skill': 'Use skill',
       'tool.create_skill': 'Create skill',
       'tool.install_skill': 'Install skill',
+      'tool.merge_skills': 'Merge skills',
       'tool.list_mcp': 'List MCP servers',
       'tool.add_mcp_server': 'Add MCP server',
       'tool.install_mcp': 'Install MCP',
@@ -1199,6 +1200,7 @@
       'tool.goal_manage': 'Goal',
       'tool.plan_manage': 'Plan steps',
       'tool.team_manage': 'Team setup',
+      'tool.department_manage': 'Organization departments',
       'tool.role_manage': 'Role library',
       'tool.app_manage': 'Global app manager',
       'tool.call_team': 'Delegate to team',
@@ -2325,6 +2327,7 @@
       'tool.use_skill': '使用技能',
       'tool.create_skill': '创建技能',
       'tool.install_skill': '安装技能',
+      'tool.merge_skills': '合并专属技能',
       'tool.list_mcp': '列出 MCP 服务',
       'tool.add_mcp_server': '接入 MCP 服务',
       'tool.install_mcp': '安装 MCP 服务',
@@ -2337,6 +2340,7 @@
       'tool.goal_manage': '目标',
       'tool.plan_manage': '计划步骤',
       'tool.team_manage': '团队管理',
+      'tool.department_manage': '组织部门',
       'tool.role_manage': '角色库',
       'tool.app_manage': '全局 App 管理',
       'tool.call_team': '委派团队',
@@ -2975,6 +2979,7 @@
     goal_manage: 'tool.goal_manage',
     plan_manage: 'tool.plan_manage',
     team_manage: 'tool.team_manage',
+    department_manage: 'tool.department_manage',
     role_manage: 'tool.role_manage',
     app_manage: 'tool.app_manage',
     ask_user: 'tool.ask_user',
@@ -2983,6 +2988,7 @@
     use_skill: 'tool.use_skill',
     create_skill: 'tool.create_skill',
     install_skill: 'tool.install_skill',
+    merge_skills: 'tool.merge_skills',
     list_mcp: 'tool.list_mcp',
     add_mcp_server: 'tool.add_mcp_server',
     install_mcp: 'tool.install_mcp',
@@ -14966,13 +14972,14 @@
     state.theme = id;
     if (window.AtlasTheme) {
       AtlasTheme.apply(id);
+      AtlasTheme.writePrefs(id, state.themeSchedule);
     } else {
       document.documentElement.dataset.theme = id;
       document.documentElement.dataset.themeMode = THEME_MODE[id] || 'dark';
       const meta = document.querySelector('meta[name="theme-color"]');
       if (meta) meta.content = THEME_BG[id] || '#0d0d0e';
+      localStorage.setItem('az-theme', id);
     }
-    localStorage.setItem('az-theme', id);
     saveUi();
     renderThemeGrid();
     if (opts.notify !== false) notifyThemeToParent();
@@ -14984,8 +14991,12 @@
   }
 
   function saveThemeSchedule() {
-    if (window.AtlasTheme) state.themeSchedule = AtlasTheme.normalizeSchedule(state.themeSchedule);
-    localStorage.setItem('az-theme-schedule', JSON.stringify(state.themeSchedule));
+    if (window.AtlasTheme) {
+      state.themeSchedule = AtlasTheme.normalizeSchedule(state.themeSchedule);
+      AtlasTheme.writePrefs(state.theme, state.themeSchedule);
+    } else {
+      localStorage.setItem('az-theme-schedule', JSON.stringify(state.themeSchedule));
+    }
     saveUi();
     notifyThemeToParent();
   }

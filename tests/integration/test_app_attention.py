@@ -1,4 +1,4 @@
-"""全局 Agent：跨会话待授权 / 未读 / 运行 / 授权策略。"""
+"""Superagent：跨会话待授权 / 未读 / 运行 / 授权策略。"""
 from __future__ import annotations
 
 API = "/api/agent-zero"
@@ -56,7 +56,7 @@ def test_global_agent_is_a_real_conversation(client):
     assert conv["zone"] == "global-agent"
     fetched = client.get(f"{API}/conversations/{conv['id']}").json()["data"]
     assert fetched["zone"] == "global-agent"
-    # 全局 Agent 自己不出现在「会话授权 / 未读」列表里
+    # Superagent 自己不出现在「会话授权 / 未读」列表里
     data = client.get(f"{API}/app/attention").json()["data"]
     assert all(s["id"] != conv["id"] for s in data["sessions"])
 
@@ -77,6 +77,6 @@ def test_global_agent_tool_is_registered_and_reads_status(client):
     out = conversation._exec_app_manage({"id": "conv-test"}, {"action": "status"})
     assert "counts" in out
     assert out["counts"]["authorizations"] == 0
-    assert "全局 Agent" in conversation._global_agent_addon()
+    assert "工单助手" in conversation._global_agent_addon()
     snap = attention_service.snapshot()
     assert set(("approvals", "questions", "unread", "running", "sessions", "policy")) <= set(snap)

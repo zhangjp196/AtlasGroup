@@ -100,7 +100,8 @@ class MessageAttachmentBody(BaseModel):
 
 
 class MessageBody(BaseModel):
-    content: str = Field(..., min_length=1)
+    # 允许空正文：只发图片 / 附件也是合法消息（附件负责提供内容）。
+    content: str = Field("", max_length=2_000_000)
     refs: Optional[List[str]] = None
     auto_execute: Optional[bool] = None
     mode: Optional[str] = Field(None, pattern="^(chat|autonomous|goal)$")
@@ -123,6 +124,8 @@ async def conv_message_run(conv_id: str, body: MessageBody):
     conv = conversation.get_conversation(conv_id)
     if not conv:
         raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    if not str(body.content or "").strip() and not body.attachments:
+        raise HTTPException(status_code=400, detail="消息为空")
     mode = body.mode or conv.get("run_mode") or "autonomous"
     if mode not in ("chat", "autonomous", "goal"):
         mode = "autonomous"
@@ -167,7 +170,7 @@ async def conv_message_run(conv_id: str, body: MessageBody):
             attachments = attachment_service.process_uploads(
                 conv_id,
                 [a.model_dump() for a in body.attachments],
-                allow_images=llm_mod.get_active_vision(),
+                allow_images=conversation.chat_vision_for(conv),
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -225,6 +228,71 @@ async def conv_message_run(conv_id: str, body: MessageBody):
     data["queue"] = queue
     data["running_run_id"] = (running or {}).get("id")
     return {"code": 0, "data": data}
+
+
+@router.post("/conversations/{conv_id}/compact")
+async def compact_conversation(conv_id: str):
+    """手动压缩上下文：把旧历史压成检查点，后续轮次继续使用。
+
+    没有可折叠历史时只返回原因，不报错；运行中的会话要求先停止，避免
+    压缩和正在执行的 run 同时改同一份上下文。
+    """
+    conv = conversation.get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    if run_service.running_run(conv_id):
+        raise HTTPException(status_code=409, detail="当前会话正在运行，先停止再压缩")
+    try:
+        role = zero_store.get_role(str(conv.get("role_id") or "")) or {}
+        models = conversation._chat_models(role) or {"loop": "default", "fallback": "default"}
+        messages = conversation._history_messages(conv_id)
+        from services.agent_zero.runtime.zero import compress
+
+        decision = await compress.decide(
+            messages, models=models, force=True, reason="manual")
+        if not decision.get("should_compress"):
+            return {"code": 0, "data": {
+                "compressed": False,
+                "reason": decision.get("reason") or "nothing",
+                "before_tokens": int(decision.get("current") or 0),
+                "after_tokens": int(decision.get("current") or 0),
+            }}
+        result = await compress.apply(
+            messages, models=models, decision=decision, force_summary=True)
+        if result.get("summary"):
+            conversation.persist_checkpoint(
+                conv, str(result.get("summary") or ""),
+                str(result.get("source") or "manual"))
+        return {"code": 0, "data": {
+            "compressed": bool(result.get("compressed")),
+            "source": result.get("source") or "",
+            "before_tokens": int(result.get("original_tokens") or 0),
+            "after_tokens": int(result.get("tokens") or 0),
+            "pruned_tool_outputs": int(result.get("pruned_tool_outputs") or 0),
+            "dropped_exchanges": int(result.get("dropped_exchanges") or 0),
+        }}
+    except Exception as e:
+        logger.warning("手动压缩失败: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"压缩失败: {e}")
+
+
+class ClearContextBody(BaseModel):
+    # all = 清空所有会话的模型上下文；current = 只清当前会话。
+    scope: Optional[str] = Field("all", pattern="^(all|current)$")
+
+
+@router.post("/conversations/{conv_id}/clear")
+def clear_conversation_context(conv_id: str, body: Optional[ClearContextBody] = None):
+    """清空模型上下文，但**不删除**历史消息（转录仍可回看）。"""
+    conv = conversation.get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    scope = (body.scope if body else "all") or "all"
+    if scope == "current":
+        ok = conversation.clear_context(conv_id)
+        return {"code": 0, "data": {"cleared": 1 if ok else 0, "scope": scope}}
+    count = conversation.clear_all_contexts()
+    return {"code": 0, "data": {"cleared": count, "scope": "all"}}
 
 
 class MessageEditBody(BaseModel):
@@ -578,11 +646,23 @@ def get_conversation(conv_id: str):
         raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
     conv["created_at"] = str(conv.get("created_at") or "")
     conv["updated_at"] = str(conv.get("updated_at") or "")
+    conv["vision"] = conversation.chat_vision_for(conv)
     return {"code": 0, "data": {
         **conv,
         "messages": conversation.list_messages(conv_id),
         "usage_total": conversation.usage_total(conv_id),
     }}
+
+
+@router.get("/conversations/{conv_id}/graph")
+def get_conversation_graph(conv_id: str):
+    """执行画布：主代理 / 团队成员 / 子代理的 DAG 与最近活动。"""
+    from services.agent_zero.services import graph_service
+
+    data = graph_service.conversation_graph(conv_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    return {"code": 0, "data": data}
 
 
 @router.get("/conversations/{conv_id}/messages")
@@ -609,6 +689,36 @@ def get_conversation_attachment(conv_id: str, attachment_id: str):
         media_type=media_type,
         headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(name)}"},
     )
+
+
+@router.get("/conversations/{conv_id}/attachments/{attachment_id}/preview")
+def preview_conversation_attachment(conv_id: str, attachment_id: str,
+                                    max_chars: int = 120_000):
+    """附件预览：返回抽取后的文本 / 元数据，前端按类型做 Markdown、表格、HTML、PDF 等渲染。
+
+    原文件仍走 `/attachments/{id}`；HTML 不在同源 iframe 里直接打开，而是
+    前端用 sandbox iframe + srcdoc 渲染，避免附件脚本拿到 App 的权限。
+    """
+    from urllib.parse import quote
+
+    from services.agent_zero.services import attachment_service
+
+    path, meta = attachment_service.resolve_attachment(conv_id, attachment_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    limit = max(1_000, min(int(max_chars or 120_000), 400_000))
+    text = attachment_service.read_attachment_text(conv_id, meta, max_chars=limit)
+    return {"code": 0, "data": {
+        "id": attachment_id,
+        "name": str(meta.get("name") or path.name),
+        "mime": str(meta.get("mime") or "application/octet-stream"),
+        "size": int(meta.get("size") or path.stat().st_size),
+        "kind": str(meta.get("kind") or "file"),
+        "text": text,
+        "truncated": bool(meta.get("truncated") or len(text) >= limit),
+        "url": (f"/api/agent-zero/conversations/{quote(str(conv_id), safe='')}"
+                f"/attachments/{quote(str(attachment_id), safe='')}"),
+    }}
 
 
 @router.delete("/conversations/{conv_id}")

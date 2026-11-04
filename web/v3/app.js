@@ -3,6 +3,23 @@
   'use strict';
   const API = '/api/agent-zero';
   const GLOBAL_AGENT_ZONE = 'global-agent';
+  // 附件：与后端 attachment_service 的限制保持一致。
+  const MAX_ATTACHMENTS = 8;
+  const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+  const MAX_ATTACHMENTS_TOTAL = 50 * 1024 * 1024;
+  const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|avif)$/i;
+  const DOC_EXTENSIONS = [
+    '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf',
+    '.txt', '.text', '.md', '.markdown', '.mdx', '.rst', '.log', '.csv', '.tsv',
+    '.json', '.jsonl', '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf', '.cfg',
+    '.properties', '.html', '.htm', '.css', '.scss', '.less', '.js', '.mjs', '.cjs',
+    '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.py', '.java', '.kt', '.scala',
+    '.cs', '.c', '.h', '.cc', '.cpp', '.hpp', '.go', '.rs', '.rb', '.php', '.swift',
+    '.dart', '.lua', '.r', '.pl', '.sh', '.bash', '.zsh', '.fish', '.bat', '.cmd',
+    '.ps1', '.sql', '.gradle', '.tex', '.proto',
+  ];
+  const DOC_ACCEPT = DOC_EXTENSIONS.join(',');
+  const IMAGE_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,image/bmp,image/avif';
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
   const h = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({
@@ -13,7 +30,10 @@
     for (let i = 0; i < String(s).length; i += 1) n = ((n * 31) + String(s).charCodeAt(i)) >>> 0;
     return n % 360;
   };
-  const av = (name, cls = '') => `<span class="avatar ${cls}" style="--h:${hue(name)}">${h((String(name || '·')[0] || '·').toUpperCase())}</span>`;
+  const avatarInner = (name, avatar = '') => (avatar
+    ? `<img class="avatar-img" src="${h(avatar)}" alt="" loading="lazy" />`
+    : h((String(name || '·')[0] || '·').toUpperCase()));
+  const av = (name, cls = '', avatar = '') => `<span class="avatar ${cls}" style="--h:${hue(name)}">${avatarInner(name, avatar)}</span>`;
   const gaAvatar = (cls = '') => `<span class="avatar ga-avatar ${cls}"><svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="11" rx="4"/><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6"/></svg></span>`;
   const toast = (msg, tone = '') => {
     const el = document.createElement('div');
@@ -33,6 +53,59 @@
     return body && body.data !== undefined ? body.data : body;
   }
 
+  async function uploadAvatar(file, scope) {
+    if (!file) return null;
+    const form = new FormData();
+    form.append('scope', scope);
+    form.append('file', file);
+    const res = await fetch(`${API}/avatars`, { method: 'POST', body: form });
+    let body = null;
+    try { body = await res.json(); } catch { /* ignore */ }
+    if (!res.ok) throw new Error((body && body.detail) || `HTTP ${res.status}`);
+    return body && body.data !== undefined ? body.data : body;
+  }
+
+  function avatarFieldHtml(id, scope, current, name) {
+    return `<div class="avatar-field" data-avatar-field="${h(id)}">
+      <span class="avatar round avatar-preview" data-avatar-preview="${h(id)}" style="--h:${hue(name)}">${avatarInner(name, current || '')}</span>
+      <div class="avatar-field-main">
+        <input type="hidden" id="${h(id)}" value="${h(current || '')}" />
+        <input type="file" id="${h(id)}File" accept="image/*" hidden />
+        <div class="avatar-actions">
+          <button class="btn small" type="button" data-avatar-pick="${h(id)}">上传头像</button>
+          <button class="btn small" type="button" data-avatar-clear="${h(id)}">移除</button>
+        </div>
+        <small class="role-line">支持 PNG / JPG / GIF / WebP / SVG / BMP / TIFF 等，最大 8 MB。</small>
+      </div>
+    </div>`;
+  }
+
+  function bindAvatarField(id, scope, name) {
+    const hidden = document.getElementById(id);
+    const input = document.getElementById(`${id}File`);
+    const preview = document.querySelector(`[data-avatar-preview="${id}"]`);
+    if (!hidden || !input) return;
+    const pick = document.querySelector(`[data-avatar-pick="${id}"]`);
+    const clear = document.querySelector(`[data-avatar-clear="${id}"]`);
+    if (pick) pick.addEventListener('click', () => input.click());
+    if (clear) clear.addEventListener('click', () => {
+      hidden.value = '';
+      if (preview) preview.innerHTML = avatarInner(name, '');
+    });
+    input.addEventListener('change', async () => {
+      const file = input.files && input.files[0];
+      input.value = '';
+      if (!file) return;
+      try {
+        const out = await uploadAvatar(file, scope);
+        if (!out || !out.url) return;
+        hidden.value = out.url;
+        if (preview) preview.innerHTML = avatarInner(name, out.url);
+        toast('头像已上传', 'ok', 1600);
+      } catch (err) { toast(err.message, 'bad'); }
+    });
+  }
+
   window.addEventListener('error', (e) => {
     const wrap = document.getElementById('toastWrap');
     if (!wrap) return;
@@ -43,12 +116,19 @@
   });
 
   const S = {
-    section: 'conv',
-    workspaces: [], convs: [], roles: [], teams: [],
+    section: 'work',
+    workspaces: [], convs: [], roles: [], teams: [], departments: [],
+    roleDept: 'all',
     windows: new Map(), activeWin: null, z: 100, models: [], activeModel: '', commands: null, 
     globalWin: null,
-    selectedWs: null, wsPath: '.', wsFiles: null, wsPreview: null, wsLoading: false,
+    selectedWs: null, wsDrawerId: null, wsPath: '.', wsFiles: null, wsPreview: null, wsLoading: false,
     settingsTab: 'models', settings: null, draft: null, toolCatalog: null,
+    workItems: [], workStats: {}, workPolicy: null, workFilter: 'open',
+    workSelected: null, workDrawerId: null, workTimer: null,
+    roleSkills: [], roleSkillsRoleId: null,
+    agentCanvasConv: null, agentCanvasTimer: null, agentCanvasData: null,
+    agentCanvasFilter: 'all', agentCanvasZoom: 1, agentCanvasSelected: null,
+    agentCanvasReplayTimer: null, agentCanvasReplay: false, agentCanvasRefreshTimer: null,
     attention: null, gaTab: 'auth', gaOpen: false, gaTimer: null,
     gaAuto: false, gaAutoHandled: new Set(), gaNotifyCount: -1,
   };
@@ -65,6 +145,7 @@
     mode: 'manual', day: 'light', night: 'dark', interval: 15, dayStart: '06:00', nightStart: '19:00',
   };
   S.themeTimer = null;
+  S.themeSyncTimer = null;
 
   function applyTheme(theme, opts = {}) {
     S.theme = themeCore ? themeCore.apply(theme) : theme;
@@ -80,12 +161,46 @@
     }
     const badge = $('#themeAuto');
     if (badge) badge.hidden = !auto;
-    if (opts.persist !== false) persistThemePrefs();
+    if (opts.persist !== false) {
+      persistThemePrefs();
+      syncThemeToServer();
+    }
     return S.theme;
   }
 
   function persistThemePrefs() {
     if (themeCore) themeCore.writePrefs(S.theme, S.themeSchedule);
+  }
+
+  function syncThemeToServer() {
+    if (!themeCore) return;
+    clearTimeout(S.themeSyncTimer);
+    S.themeSyncTimer = setTimeout(() => {
+      try {
+        fetch(`${API}/app/theme`, {
+          method: 'PUT',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ theme: S.theme, themeSchedule: S.themeSchedule }),
+        }).catch(() => {});
+      } catch { /* ignore */ }
+    }, 120);
+  }
+
+  async function initTheme() {
+    // 本地 / cookie 有值时优先用本机选择；完全没有时才从服务器恢复。
+    if (themeCore && !themeCore.hasSaved()) {
+      try {
+        const data = await api('/app/theme');
+        if (data && data.theme) {
+          S.themeSchedule = themeCore.normalizeSchedule(data.themeSchedule || S.themeSchedule);
+          S.theme = data.theme;
+          themeCore.writePrefs(S.theme, S.themeSchedule);
+          applyTheme(S.theme, { persist: false });
+        }
+      } catch { /* ignore */ }
+    }
+    startThemeSchedule();
   }
 
   function scheduledTheme() {
@@ -163,9 +278,92 @@
     return { team, members, role, isGroup: !!(team && members.length) };
   }
 
+  function convAvatar(conv) {
+    const { team, role, isGroup } = convParts(conv);
+    if (isGroup && team) return team.avatar || '';
+    return (role && role.avatar) || '';
+  }
+
+  // ── 组织：部门树 + 角色身份 ─────────────────────────────
+  function roleLabel(role) {
+    if (!role) return '';
+    const bits = [];
+    if (role.title) bits.push(role.title);
+    if (role.department) bits.push(role.department);
+    return bits.length ? `${role.name || role.id} · ${bits.join(' · ')}` : (role.name || role.id || '');
+  }
+
+  function deptById(id) {
+    return S.departments.find((d) => d.id === id) || null;
+  }
+
+  function deptPath(id) {
+    const seen = new Set();
+    const names = [];
+    let cur = deptById(id);
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      names.push(cur.name);
+      cur = deptById(cur.parent_id);
+    }
+    return names.reverse().join(' / ');
+  }
+
+  function deptChildren(parentId) {
+    return S.departments.filter((d) => (d.parent_id || '') === (parentId || ''));
+  }
+
+  function deptOrdered() {
+    const out = [];
+    const walk = (parentId, depth) => {
+      deptChildren(parentId).forEach((d) => {
+        out.push({ ...d, depth });
+        walk(d.id, depth + 1);
+      });
+    };
+    walk('', 0);
+    return out;
+  }
+
+  function deptSubtree(id) {
+    const out = new Set([String(id)]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      S.departments.forEach((d) => {
+        if (!out.has(d.id) && out.has(d.parent_id || '')) { out.add(d.id); changed = true; }
+      });
+    }
+    return out;
+  }
+
+  function deptRoleCount(id, subtree = true) {
+    const ids = subtree ? deptSubtree(id) : new Set([String(id)]);
+    return S.roles.filter((r) => ids.has(r.department_id || '')).length;
+  }
+
+  function deptOptions(current, opts = {}) {
+    const rows = [];
+    const walk = (parentId, depth) => {
+      deptChildren(parentId).forEach((d) => {
+        if (opts.exclude && opts.exclude.has(d.id)) return;
+        rows.push(`<option value="${h(d.id)}"${d.id === current ? ' selected' : ''}>${'　'.repeat(depth)}${h(d.name)}</option>`);
+        walk(d.id, depth + 1);
+      });
+    };
+    walk('', 0);
+    return `<option value=""${!current ? ' selected' : ''}>${h(opts.emptyLabel || '未安排')}</option>` + rows.join('');
+  }
+
+  function roleDeptMatches(role, key) {
+    if (key === 'all') return true;
+    if (!key) return !role.department_id;
+    return deptSubtree(key).has(role.department_id || '');
+  }
+
   // 会话标题：群聊显示群名、单聊显示角色名，避免用首条消息当标题
   function convTitle(conv) {
-    if (String(conv.zone || '') === GLOBAL_AGENT_ZONE) return '全局 Agent';
+    if (String(conv.zone || '') === GLOBAL_AGENT_ZONE) return '工单';
     const { team, role, isGroup } = convParts(conv);
     if (isGroup && team) return team.name;
     if (role) return role.name;
@@ -174,13 +372,13 @@
 
   function convMeta(conv) {
     if (String(conv.zone || '') === GLOBAL_AGENT_ZONE) {
-      return { kind: '全局', sub: '可代替你管理 App' };
+      return { kind: '工单', sub: '主动推进 · 代处理授权' };
     }
     const { team, role, members, isGroup } = convParts(conv);
     if (isGroup && team) {
       return { kind: '群聊', sub: `${members.length} 个角色 · ${modeLabel(team.mode)}` };
     }
-    return { kind: '单聊', sub: role && role.name ? `角色：${role.name}` : '默认角色' };
+    return { kind: '单聊', sub: role && role.name ? `角色：${roleLabel(role)}` : '默认角色' };
   }
 
   function convIsGroup(conv) {
@@ -188,15 +386,24 @@
   }
 
   /* ── 列表 ─────────────────────────────────────────────── */
-  const TITLES = { conv: '会话', ws: '工作区', role: '角色', group: '群组', settings: '设置', about: '关于' };
-  const ADD_LABEL = { conv: '新建会话', ws: '添加工作区', role: '新建角色', group: '新建群组' };
+  const TITLES = { conv: '会话', work: '工单', ws: '工作区', role: '组织与角色', group: '群组', settings: '设置', about: '关于' };
+  const ADD_LABEL = { conv: '新建会话', work: '新建工单', ws: '添加工作区', role: '新建角色', group: '新建群组' };
+  const WORK_FILTERS = [
+    ['open', '待办'], ['attention', '需要你'], ['inbox', '待分派'],
+    ['working', '进行中'], ['done', '已完成'], ['all', '全部'],
+  ];
+  const WORK_STATUS = {
+    inbox: '待分派', working: '进行中', needs_attention: '需要你',
+    done: '已完成', closed: '已关闭',
+  };
 
   async function loadAll() {
-    const [ws, conv, roles, teams, models] = await Promise.all([
+    const [ws, conv, roles, teams, depts, models] = await Promise.all([
       api('/workspaces?include_archived=true').catch(() => ({ items: [] })),
       api('/conversations?limit=80').catch(() => ({ items: [] })),
       api('/roles').catch(() => ({ items: [] })),
       api('/teams').catch(() => ({ items: [] })),
+      api('/departments').catch(() => ({ items: [] })),
       api('/app/models').catch(() => ({ items: [], active: '' })),
     ]);
     S.models = models.items || [];
@@ -205,6 +412,8 @@
     S.convs = conv.items || [];
     S.roles = roles.items || [];
     S.teams = teams.items || [];
+    S.departments = depts.items || [];
+    if (S.roleDept !== 'all' && S.roleDept !== '' && !deptById(S.roleDept)) S.roleDept = 'all';
     // 会话改名 / 群名变更后，已打开的标签也跟着更新。
     S.windows.forEach((w) => {
       const fresh = S.convs.find((c) => c.id === w.convId);
@@ -221,11 +430,107 @@
     renderCanvas();
   }
 
+  /* ── 工单 ─────────────────────────────────── */
+  async function loadWorkItems(opts = {}) {
+    try {
+      const data = await api('/work-items?limit=120');
+      S.workItems = data.items || [];
+      S.workStats = data.stats || {};
+      S.workPolicy = data.policy || S.workPolicy;
+      if (S.workSelected && !S.workItems.some((w) => w.id === S.workSelected)) {
+        S.workSelected = null;
+      }
+      if (S.workDrawerId && !S.workItems.some((w) => w.id === S.workDrawerId)) {
+        S.workDrawerId = null;
+      }
+      paintWorkBadge();
+      const modalOpen = $('#modal') && !$('#modal').hidden;
+      if (S.workDrawerId && !modalOpen) {
+        renderWorkDrawer();
+      } else if (S.section === 'work' && !modalOpen) {
+        renderCanvas();
+      }
+    } catch (err) {
+      if (!opts.quiet) toast(`工单加载失败：${err.message}`, 'bad');
+    }
+  }
+
+  function paintWorkBadge() {
+    const n = Number((S.workStats && S.workStats.attention) || 0);
+    const badge = $('#workBadge');
+    if (badge) {
+      badge.hidden = n <= 0;
+      badge.textContent = n > 99 ? '99+' : String(n);
+    }
+    const btn = $('.rail-btn[data-section="work"]');
+    if (btn) btn.title = n ? `工单 · ${n} 个需要你` : '工单';
+  }
+
+  function workItemsForFilter() {
+    const f = S.workFilter;
+    return S.workItems.filter((w) => {
+      if (f === 'all') return true;
+      if (f === 'open') return ['inbox', 'working', 'needs_attention'].includes(w.status);
+      return w.status === f;
+    });
+  }
+
+  function workSelectedItem() {
+    return S.workItems.find((w) => w.id === S.workSelected) || null;
+  }
+
+  function attentionInboxHtml() {
+    const attention = S.attention || {};
+    const items = [];
+    (attention.approvals || []).forEach((a) => {
+      items.push({
+        kind: 'approval', id: a.id, conversation: a.conversation_id,
+        title: a.tool || a.name || '工具授权',
+        sub: a.conversation_title || a.conversation_id || '',
+        note: a.note || (a.reasons || []).join(' · ') || '需要你批准后才能继续',
+      });
+    });
+    (attention.questions || []).forEach((q) => {
+      items.push({
+        kind: 'question', id: q.id, conversation: q.conversation_id,
+        title: q.question || '代理在等你回答',
+        sub: q.conversation_title || q.conversation_id || '',
+        note: '回答后代理继续推进',
+      });
+    });
+    if (!items.length) {
+      return `<section class="sa-attention sa-attention-empty">
+        <span class="sa-attention-ico"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span>
+        <div><b>现在没有需要你处理的事</b><span>工单会在需要授权或回答时回来。</span></div>
+      </section>`;
+    }
+    return `<section class="sa-attention">
+      <div class="sa-section-head">
+        <div><h2>需要你处理</h2><p>这些事停下来等你决定，其余工作继续在后台推进。</p></div>
+        <span class="sa-count danger">${items.length}</span>
+      </div>
+      <div class="sa-attention-list">${items.slice(0, 8).map((it) => `<div class="sa-attention-row">
+        <span class="sa-attention-type ${it.kind}">${it.kind === 'approval' ? '授权' : '回答'}</span>
+        <div class="sa-attention-main"><b>${h(it.title)}</b><span>${h(it.sub)} · ${h(it.note)}</span></div>
+        ${it.conversation ? `<button class="btn small primary" type="button" data-attn-conv="${h(it.conversation)}">处理</button>` : ''}
+      </div>`).join('')}</div>
+    </section>`;
+  }
+
+  const FLAT_SECTIONS = new Set(['conv', 'work', 'role', 'group', 'ws']);
+
+  function applySectionLayout(name) {
+    const app = $('#app');
+    if (app) app.classList.toggle('flat', FLAT_SECTIONS.has(name));
+  }
+
   function setSection(name) {
     if (name === 'about') { openAboutModal(); return; }
     S.section = name;
+    applySectionLayout(name);
     $$('.rail-btn').forEach((b) => b.classList.toggle('active', b.dataset.section === name));
     $('#listTitle').textContent = TITLES[name] || '';
+    if (name === 'work') loadWorkItems({ quiet: true });
     renderList();
     renderCanvas();
   }
@@ -235,48 +540,34 @@
     const q = ($('#searchInput').value || '').trim().toLowerCase();
     const match = (s) => !q || String(s || '').toLowerCase().includes(q);
     let html = '';
-    if (S.section === 'conv') {
-      const items = S.convs.filter((c) => {
-        if (String(c.zone || '') === GLOBAL_AGENT_ZONE) return false;
-        const title = convTitle(c);
-        return match(title) || match(c.last_message);
-      });
-      html = items.length ? items.map((c) => {
-        const open = [...S.windows.values()].some((w) => w.convId === c.id);
-        const title = convTitle(c);
-        const group = convIsGroup(c);
-        const running = !!c.active;
-        const unread = !!c.unread;
-        return `<button class="row${open ? ' active' : ''}" data-conv="${h(c.id)}">
-          ${av(title || '会', group ? '' : 'round')}
-          <span class="row-main">
-            <span class="row-title">${h(title)}
-              <span class="tag${group ? ' grp' : ''}">${group ? '群' : '单'}</span>
-              ${running ? '<span class="dot run" title="运行中"></span>' : (unread ? '<span class="dot" title="未读"></span>' : '')}</span>
-            <span class="row-sub">${h(c.last_message || c.updated_at || '还没有消息')}</span>
-          </span>
-          <span class="row-time">${h(shortTime(c.updated_at))}</span>
-        </button>`;
-      }).join('') : `<div class="empty">还没有会话<br>点右上角 + 新建，或从角色 / 群组开始</div>`;
-    } else if (S.section === 'ws') {
-      const items = S.workspaces.filter((w) => match(w.name));
-      html = items.map((w) => `<button class="row${S.selectedWs === w.id ? ' active' : ''}" data-ws="${h(w.id)}">
-        ${av(w.name || 'W')}
-        <span class="row-main"><span class="row-title">${h(w.name)}</span>
-        <span class="row-sub">${h(w.path || '')}</span></span>
-      </button>`).join('') || `<div class="empty">还没有工作区<br>工作区只提供文件与终端上下文</div>`;
-    } else if (S.section === 'role') {
-      const items = S.roles.filter((r) => match(r.name));
-      html = items.map((r) => `<button class="row" data-role="${h(r.id)}">
-        ${av(r.name || '角', 'round')}
+    if (FLAT_SECTIONS.has(S.section)) { body.innerHTML = ''; return; }
+    if (S.section === 'role') {
+      const visible = S.roles.filter((r) => match(r.name) || match(r.title)
+        || match(r.department) || match(r.expertise));
+      const rowHtml = (r) => `<button class="row" data-role="${h(r.id)}">
+        ${av(r.name || '角', 'round', r.avatar)}
         <span class="row-main"><span class="row-title">${h(r.name)}
           ${r.scope === 'temporary' ? '<span class="tag tmp">临时</span>' : '<span class="tag">持久</span>'}</span>
-          <span class="row-sub">${h(r.expertise || r.persona || '')}</span></span>
-      </button>`).join('') || `<div class="empty">角色库是空的<br>新建一个，或在对话里让 LLM 创建</div>`;
+          <span class="row-sub">${h([r.title, r.department || '未安排部门', r.expertise || r.persona || ''].filter(Boolean).join(' · '))}</span></span>
+      </button>`;
+      const groups = deptOrdered().map((d) => ({
+        id: d.id, label: d.name, path: deptPath(d.id), depth: d.depth,
+        avatar: d.avatar || '',
+        rows: visible.filter((r) => r.department_id === d.id),
+      }));
+      groups.push({
+        id: '', label: '未安排', path: '未安排部门', depth: 0, avatar: '',
+        rows: visible.filter((r) => !r.department_id || !deptById(r.department_id)),
+      });
+      const grouped = groups.filter((g) => g.rows.length).map((g) =>
+        `<div class="list-dept" style="--depth:${g.depth}" title="${h(g.path)}">
+          ${g.avatar ? av(g.label, 'xs round', g.avatar) : ''}<span>${h(g.label)}</span><b>${g.rows.length}</b>
+        </div>${g.rows.map(rowHtml).join('')}`).join('');
+      html = grouped || `<div class="empty">角色库是空的<br>新建一个，或在对话里让 LLM 创建</div>`;
     } else if (S.section === 'group') {
       const items = S.teams.filter((t) => match(t.name));
       html = items.map((t) => `<button class="row" data-group="${h(t.id)}">
-        ${av(t.name || '群')}
+        ${av(t.name || '群', '', t.avatar)}
         <span class="row-main"><span class="row-title">${h(t.name)}</span>
         <span class="row-sub">${(t.members || []).length} 个角色 · ${modeLabel(t.mode)}</span></span>
       </button>`).join('') || `<div class="empty">还没有群组<br>群组 = 一组角色 + 协作方式，不绑定工作区</div>`;
@@ -290,12 +581,23 @@
     body.innerHTML = html;
     const foot = {
       conv: `${S.convs.length} 个会话 · ${S.windows.size} 个会话打开`,
+      work: `${S.workStats.open || 0} 个待办 · ${S.workStats.attention || 0} 个需要你`,
       ws: `${S.workspaces.length} 个工作区`,
-      role: `${S.roles.filter((r) => r.scope !== 'temporary').length} 个持久角色`,
+      role: `${S.roles.filter((r) => r.scope !== 'temporary').length} 个持久角色 · ${S.departments.length} 个部门`,
       group: `${S.teams.length} 个群组 · 不绑定工作区`,
       about: '',
     }[S.section];
     $('#listFoot').innerHTML = `<span>${h(foot || '')}</span>`;
+    $$('[data-work-filter]', body).forEach((el) => el.addEventListener('click', () => {
+      S.workFilter = el.dataset.workFilter;
+      renderList();
+    }));
+    $$('[data-work]', body).forEach((el) => el.addEventListener('click', () => {
+      S.workSelected = el.dataset.work;
+      closeMobileList();
+      renderList();
+      renderCanvas();
+    }));
     $$('[data-conv]', body).forEach((el) => {
       el.addEventListener('click', () => { closeMobileList(); openConversation(el.dataset.conv); });
       el.addEventListener('contextmenu', (e) => {
@@ -314,14 +616,14 @@
       });
     });
     $$('[data-role]', body).forEach((el) => {
-      el.addEventListener('click', () => { closeMobileList(); openRoleChat(el.dataset.role); });
+      el.addEventListener('click', () => { closeMobileList(); openRoleDetail(el.dataset.role); });
       el.addEventListener('contextmenu', (e) => {
         const role = S.roles.find((r) => r.id === el.dataset.role);
         if (role) roleMenu(e, role);
       });
     });
     $$('[data-group]', body).forEach((el) => {
-      el.addEventListener('click', () => { closeMobileList(); openGroupChat(el.dataset.group); });
+      el.addEventListener('click', () => { closeMobileList(); openGroupDetail(el.dataset.group); });
       el.addEventListener('contextmenu', (e) => {
         const team = S.teams.find((t) => t.id === el.dataset.group);
         if (team) groupMenu(e, team);
@@ -363,14 +665,19 @@
     return one.length > max ? `${one.slice(0, max)}…` : one;
   }
 
+  function refreshWorkspaceView() {
+    if (S.wsDrawerId) renderWorkspaceDrawer();
+    else renderCanvas();
+  }
+
   async function loadWsDir(wsId, path) {
-    S.wsLoading = true; renderCanvas();
+    S.wsLoading = true; refreshWorkspaceView();
     try {
       S.wsFiles = await api(`/workspace/list?workspace_id=${encodeURIComponent(wsId)}&path=${encodeURIComponent(path || '.')}`);
     } catch (err) {
       S.wsFiles = []; toast(err.message, 'bad');
     } finally {
-      S.wsLoading = false; renderCanvas();
+      S.wsLoading = false; refreshWorkspaceView();
     }
   }
 
@@ -378,7 +685,7 @@
     try {
       const data = await api(`/workspace/file?workspace_id=${encodeURIComponent(wsId)}&path=${encodeURIComponent(path)}`);
       S.wsPreview = { path, text: data.text || '', size: data.size || 0, truncated: !!data.truncated };
-      renderCanvas();
+      refreshWorkspaceView();
     } catch (err) { toast(err.message, 'bad'); }
   }
 
@@ -395,6 +702,146 @@
   }
 
   /* ── 画布 ─────────────────────────────────────────────── */
+  function bindWorkActions(scope) {
+    $$('[data-attn-conv]', scope).forEach((el) => el.addEventListener('click', () => {
+      const id = el.dataset.attnConv;
+      if (id) openConversation(id);
+    }));
+    $$('[data-work-select]', scope).forEach((el) => el.addEventListener('click', () => {
+      S.workSelected = el.dataset.workSelect;
+      renderList();
+      renderCanvas();
+    }));
+    $$('[data-work-new]', scope).forEach((el) => el.addEventListener('click', newWorkItem));
+    $$('[data-work-settings]', scope).forEach((el) => el.addEventListener('click', openWorkSettings));
+    $$('[data-work-refresh]', scope).forEach((el) => el.addEventListener('click', () => loadWorkItems()));
+    $$('[data-work-open]', scope).forEach((el) => el.addEventListener('click', () => {
+      const item = workSelectedItem();
+      if (item && item.conversation_id) openWorkConversation(item);
+    }));
+    $$('[data-work-dispatch]', scope).forEach((el) => el.addEventListener('click', () => {
+      const item = workSelectedItem();
+      if (item) dispatchWork(item);
+    }));
+    $$('[data-work-done]', scope).forEach((el) => el.addEventListener('click', () => {
+      const item = workSelectedItem();
+      if (item) patchWorkStatus(item, 'done');
+    }));
+    $$('[data-work-close]', scope).forEach((el) => el.addEventListener('click', () => {
+      const item = workSelectedItem();
+      if (item) patchWorkStatus(item, 'closed');
+    }));
+    $$('[data-work-reopen]', scope).forEach((el) => el.addEventListener('click', () => {
+      const item = workSelectedItem();
+      if (item) patchWorkStatus(item, 'inbox');
+    }));
+    $$('[data-work-edit]', scope).forEach((el) => el.addEventListener('click', () => {
+      const item = workSelectedItem();
+      if (item) editWorkItem(item);
+    }));
+    $$('[data-work-delete]', scope).forEach((el) => el.addEventListener('click', () => {
+      const item = workSelectedItem();
+      if (item) deleteWorkItem(item);
+    }));
+  }
+
+  function workDetailHtml(item) {
+    const badge = WORK_STATUS[item.status] || item.status;
+    const waiting = item.status === 'needs_attention' && /等待/.test(item.attention_reason || '');
+    const sourceRef = item.source_ref
+      ? (/^https?:\/\//.test(item.source_ref)
+        ? `<a href="${h(item.source_ref)}" target="_blank" rel="noopener">${h(item.source_ref)}</a>`
+        : h(item.source_ref))
+      : '';
+    const statusIcon = item.status === 'needs_attention'
+      ? '<path d="M12 4 3 20h18Z"/><path d="M12 10v4M12 17h.01"/>'
+      : item.status === 'working'
+        ? '<circle cx="12" cy="12" r="7"/><path d="M12 8v4l3 2"/>'
+        : item.status === 'done'
+          ? '<path d="m5 12 4 4L19 6"/>'
+          : '<path d="M5 4h14v17H5z"/><path d="M8 8h8M8 12h8M8 16h5"/>';
+    return `<article class="work-detail work-detail-${h(item.status)}">
+      <div class="sa-detail-head">
+        <span class="sa-detail-orb ${h(item.status)}"><svg viewBox="0 0 24 24">${statusIcon}</svg></span>
+        <div class="sa-detail-title">
+          <div class="sa-eyebrow">工单 · ${h(item.source || 'manual')}</div>
+          <h1>${h(item.title)}</h1>
+        </div>
+        <span class="work-badge ${h(item.status)}">${h(badge)}</span>
+      </div>
+      <div class="work-meta">
+        <span><i>来源</i><b>${h(item.source || 'manual')}</b></span>
+        ${sourceRef ? `<span><i>链接</i>${sourceRef}</span>` : ''}
+        ${item.source_actor ? `<span><i>发起人</i><b>${h(item.source_actor)}</b></span>` : ''}
+        <span><i>工作区</i><b>${h(item.workspace_name || item.workspace_id || '默认')}</b></span>
+        <span><i>角色</i><b>${h([item.role_name || item.role_id || '默认', item.role_title, item.role_department].filter(Boolean).join(' · '))}</b></span>
+        ${item.team_name ? `<span><i>群组</i><b>${h(item.team_name)}</b></span>` : ''}
+        <span><i>创建</i><b>${h(item.created_at || '')}</b></span>
+      </div>
+      ${item.status === 'needs_attention' ? `<div class="work-attention">
+        <span class="sa-attention-ico danger"><svg viewBox="0 0 24 24"><path d="M12 4 3 20h18Z"/><path d="M12 10v4M12 17h.01"/></svg></span>
+        <span>需要你：${h(item.attention_reason || '处理这个工单')}</span>
+        ${item.conversation_id ? '<button class="btn primary" data-work-open>打开会话处理</button>' : ''}
+        ${(item.conversation_id && !waiting) ? '<button class="btn" data-work-dispatch>重新派活</button>' : ''}
+      </div>` : ''}
+      <div class="sa-detail-label">工单说明</div>
+      <div class="work-body">${md(item.body || '（没有补充说明）')}</div>
+      ${item.result_summary ? `<div class="sa-detail-label">结果</div><div class="work-result">${md(item.result_summary)}</div>` : ''}
+      <div class="sa-detail-label">运行</div>
+      <div class="work-run">
+        ${item.run_id ? `<span><i>run</i><code>${h(item.run_id)}</code></span>` : ''}
+        ${item.conversation_id ? `<span><i>会话</i><code>${h(item.conversation_id)}</code></span>` : ''}
+        ${item.finished_at ? `<span><i>结束</i>${h(item.finished_at)}</span>` : ''}
+        <span>只展示需要人的工单；其余在后台推进。</span>
+      </div>
+    </article>`;
+  }
+
+  function workActionButtonsHtml(item) {
+    const waiting = item.status === 'needs_attention' && /等待/.test(item.attention_reason || '');
+    const out = [];
+    if (item.conversation_id) out.push(`<button class="btn${item.status === 'needs_attention' ? ' primary' : ''}" data-work-open>打开会话</button>`);
+    if (['inbox', 'needs_attention'].includes(item.status) && !waiting) {
+      out.push(`<button class="btn${item.conversation_id ? '' : ' primary'}" data-work-dispatch>${item.conversation_id ? '重新派活' : '派活'}</button>`);
+    }
+    if (!['done', 'closed'].includes(item.status)) {
+      out.push('<button class="btn" data-work-done>标记完成</button>');
+      out.push('<button class="btn danger" data-work-close>关闭</button>');
+    } else {
+      out.push('<button class="btn" data-work-reopen>重新打开</button>');
+    }
+    out.push('<button class="btn" data-work-edit>编辑</button>');
+    out.push('<button class="btn danger" data-work-delete>删除</button>');
+    return out.join('');
+  }
+
+  function renderWorkDrawer() {
+    const item = S.workItems.find((w) => w.id === S.workDrawerId);
+    const drawer = $('#sideDrawer');
+    const body = $('#sideDrawerBody');
+    const foot = $('#sideDrawerFoot');
+    if (!drawer || !body || !foot) return;
+    if (!item) { closeSideDrawer(); return; }
+    const badge = WORK_STATUS[item.status] || item.status;
+    $('#sideDrawerTitle').textContent = '工单';
+    $('#sideDrawerSub').textContent = `${item.title} · ${badge}`;
+    body.innerHTML = workDetailHtml(item);
+    foot.innerHTML = `${workActionButtonsHtml(item)}<span class="spacer"></span><button class="btn" type="button" data-work-drawer-close>关闭</button>`;
+    drawer.hidden = false;
+    const scrim = $('#drawerScrim');
+    if (scrim) scrim.hidden = false;
+    bindWorkActions(body);
+    bindWorkActions(foot);
+    const close = $('[data-work-drawer-close]', foot);
+    if (close) close.addEventListener('click', closeSideDrawer);
+  }
+
+  function openWorkDetail(itemId) {
+    S.workSelected = itemId;
+    S.workDrawerId = itemId;
+    renderWorkDrawer();
+  }
+
   function renderCanvas() {
     const crumb = $('#crumb');
     const actions = $('#canvasActions');
@@ -406,94 +853,229 @@
     showChat(chatVisible);
     if (chatVisible) return;
     if (S.section === 'conv') {
-      crumb.innerHTML = `<span>桌面</span><b>打开会话后在标签间切换</b><span class="chip">${S.windows.size} 个会话</span>`;
+      const items = S.convs.filter((c) => String(c.zone || '') !== GLOBAL_AGENT_ZONE);
+      crumb.innerHTML = `<span>会话</span><b>全部会话</b><span class="chip">${items.length} 个</span>`;
       actions.innerHTML = `<button class="btn primary" data-new="conv">新建会话</button>`;
-      body.innerHTML = `<div class="hero"><div><h1>工作区桌面</h1>
-        <p>打开会话后，聊天会嵌入在这里，用顶部标签在多个会话之间切换。工作区只负责文件、终端与项目上下文。</p></div></div>
-        <div class="cards">
-          <article class="card"><h3>打开的会话</h3>
-            <p>${S.windows.size ? [...S.windows.values()].map((w) => h(w.title)).join(' · ') : '还没有打开会话'}</p>
-            <div class="chips">${[...S.windows.values()].map((w) => `<span class="chip">${h(w.title)}</span>`).join('') || '<span class="chip">从左侧会话开始</span>'}</div></article>
-          <article class="card"><h3>角色</h3><p>${S.roles.length} 个角色可直接单聊；临时角色只属于一个会话。</p>
-            <div class="chips">${S.roles.slice(0, 5).map((r) => `<span class="chip">${h(r.name)}</span>`).join('') || '<span class="chip">角色库为空</span>'}</div></article>
-          <article class="card"><h3>群组</h3><p>${S.teams.length} 个群组；群组不绑定工作区，会话可单独绑。</p>
-            <div class="chips">${S.teams.slice(0, 4).map((t) => `<span class="chip">${h(t.name)}</span>`).join('') || '<span class="chip">还没有群组</span>'}</div></article>
-        </div>`;
+      body.innerHTML = `<div class="hero"><div><h1>会话</h1>
+        <p>点开一个会话直接在画布里聊天；右键可以重命名、绑定工作区或删除。</p></div></div>
+        <div class="tile-grid">${items.map((c) => {
+          const title = convTitle(c);
+          const group = convIsGroup(c);
+          const role = convParts(c).role;
+          const running = !!c.active;
+          const unread = !!c.unread;
+          const meta = convMeta(c);
+          return `<article class="tile-card conv-tile${unread ? ' unread' : ''}" data-conv-card="${h(c.id)}">
+            <div class="tile-head">
+              ${av(title || '会', group ? '' : 'round', convAvatar(c))}
+              <div class="tile-title"><b>${h(title)}</b><span>${h(meta.kind)} · ${h(meta.sub)}</span></div>
+              ${running ? '<span class="dot run" title="运行中"></span>' : (unread ? '<span class="dot" title="未读"></span>' : '')}
+            </div>
+            <p class="tile-preview">${h(c.last_message || '还没有消息')}</p>
+            <div class="tile-chips">
+              <span class="chip">${group ? '群聊' : '单聊'}</span>
+              ${role && role.title ? `<span class="chip">${h(role.title)}</span>` : ''}
+              ${role && role.department ? `<span class="chip">${h(role.department)}</span>` : ''}
+            </div>
+            <div class="tile-foot"><span>${h(shortTime(c.updated_at))}</span><span>${unread ? '未读' : '打开会话'}</span></div>
+          </article>`;
+        }).join('') || '<div class="empty">还没有会话<br>点右上角「新建会话」开始</div>'}</div>`;
+      $$('[data-conv-card]', body).forEach((el) => {
+        el.addEventListener('click', () => openConversation(el.dataset.convCard));
+        el.addEventListener('contextmenu', (e) => {
+          const conv = S.convs.find((c) => c.id === el.dataset.convCard);
+          if (conv) convMenu(e, conv);
+        });
+      });
+    } else if (S.section === 'work') {
+      const policy = S.workPolicy || {};
+      const mode = policy.mode || 'observe';
+      const modeText = { off: '手动模式', observe: '观察模式', auto: '自动模式' }[mode] || '观察模式';
+      const defaultWs = S.workspaces.find((w) => w.id === policy.default_workspace_id);
+      const items = workItemsForFilter();
+      const filters = WORK_FILTERS.map(([id, label]) => {
+        const n = id === 'all' ? S.workItems.length
+          : id === 'open' ? Number(S.workStats.open || 0)
+          : Number(S.workStats[id] || 0);
+        return `<button class="work-filter${S.workFilter === id ? ' on' : ''}" data-work-filter="${id}">${label}${n ? ` ${n}` : ''}</button>`;
+      }).join('');
+      crumb.innerHTML = `<span>工单</span><b>注意力与工单</b><span class="chip">${S.workStats.open || 0} 个待办</span>`;
+      actions.innerHTML = `<button class="btn primary" data-work-new>新建工单</button><button class="btn" data-work-settings>策略</button>`;
+      body.innerHTML = `<div class="sa-dashboard">
+        <section class="sa-hero">
+          <div class="sa-orb"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6"/></svg></div>
+          <div class="sa-hero-main">
+            <div class="sa-eyebrow">工单 · 主动执行层</div>
+            <h1>工单</h1>
+            <p>把工作拆成工单，在隔离的会话 / 工作区里推进；只在必须由你决定时才回来。你看到的是结果和需要你处理的事，不是一堆过程。</p>
+            <div class="sa-pills">
+              <span class="sa-pill"><i class="sa-dot ${mode === 'auto' ? 'on' : ''}"></i>${modeText}</span>
+              <span class="sa-pill"><i class="sa-dot ${(S.workStats.working || 0) ? 'on' : ''}"></i>${S.workStats.working || 0} 个运行中</span>
+              <span class="sa-pill${(S.workStats.attention || 0) ? ' danger' : ''}"><i class="sa-dot ${(S.workStats.attention || 0) ? 'danger' : ''}"></i>${S.workStats.attention || 0} 个需要你</span>
+            </div>
+          </div>
+        </section>
+        ${attentionInboxHtml()}
+        <div class="work-stats sa-stats">
+          <div class="work-stat sa-stat">
+            <span class="sa-stat-ico"><svg viewBox="0 0 24 24"><path d="M5 4h14v17H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></span>
+            <div><b>${S.workStats.open || 0}</b><span>待办（含进行中）</span></div>
+          </div>
+          <div class="work-stat sa-stat">
+            <span class="sa-stat-ico accent"><svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="5"/></svg></span>
+            <div><b>${S.workStats.working || 0}</b><span>正在执行</span></div>
+          </div>
+          <div class="work-stat attention sa-stat">
+            <span class="sa-stat-ico danger"><svg viewBox="0 0 24 24"><path d="M12 4 3 20h18Z"/><path d="M12 10v4M12 17h.01"/></svg></span>
+            <div><b>${S.workStats.attention || 0}</b><span>需要你</span></div>
+          </div>
+          <div class="work-stat sa-stat">
+            <span class="sa-stat-ico ok"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span>
+            <div><b>${S.workStats.done || 0}</b><span>已完成</span></div>
+          </div>
+        </div>
+        <div class="sa-columns">
+          <section class="sa-section">
+            <div class="sa-section-head"><div><h2>全部工单</h2><p>点开工单查看详情或派活；按状态筛选。</p></div><span class="sa-count">${S.workStats.total || 0}</span></div>
+            <div class="work-filters">${filters}</div>
+            ${items.length ? `<div class="tile-grid work-grid">${items.map((w) => {
+              const attention = w.status === 'needs_attention';
+              return `<article class="tile-card work-tile${attention ? ' attention' : ''}" data-work-card="${h(w.id)}">
+                <div class="tile-head">
+                  <span class="work-status ${h(w.status)}"></span>
+                  <div class="tile-title"><b>${h(w.title)}</b><span>${h(WORK_STATUS[w.status] || w.status)} · ${h(w.source || 'manual')}${w.source_ref ? ` · ${h(w.source_ref)}` : ''}</span></div>
+                  ${w.priority ? '<span class="tag">高</span>' : ''}
+                </div>
+                <p class="tile-preview">${h(firstLine(w.body || w.attention_reason || '没有补充说明', 110))}</p>
+                <div class="tile-foot"><span>${h(shortTime(w.updated_at))}</span><span>${h(WORK_STATUS[w.status] || w.status)}</span></div>
+              </article>`;
+            }).join('')}</div>` : `<div class="sa-onboard">
+              <div class="sa-onboard-step"><b>1</b><span>新建一个工单，写清要做什么</span></div>
+              <div class="sa-onboard-step"><b>2</b><span>派活后工单在隔离会话里执行</span></div>
+              <div class="sa-onboard-step"><b>3</b><span>只有需要授权 / 回答 / 失败时才回来</span></div>
+              <button class="btn primary" type="button" data-work-new>创建第一个工单</button>
+            </div>`}
+          </section>
+          <section class="sa-section sa-policy-card">
+            <div class="sa-section-head"><div><h2>工作方式</h2><p>决定工单何时自动推进。</p></div></div>
+            <div class="sa-policy-row"><span>模式</span><b>${modeText}</b></div>
+            <div class="sa-policy-row"><span>新会话权限</span><b>${h({ auto: '自动判断', once: '每次询问', session: '会话允许', always: '完全允许' }[policy.permission_mode] || '自动判断')}</b></div>
+            <div class="sa-policy-row"><span>默认工作区</span><b>${h((defaultWs && defaultWs.name) || policy.default_workspace_id || '默认')}</b></div>
+            <p class="sa-policy-note">会话、角色、群组、工作区都可以「新建工单」；工单完成后结果会回写到这里。</p>
+            <button class="btn" type="button" data-work-settings>调整策略</button>
+          </section>
+        </div>
+      </div>`;
+      $$('[data-work-filter]', body).forEach((el) => el.addEventListener('click', () => {
+        S.workFilter = el.dataset.workFilter;
+        renderCanvas();
+      }));
+      $$('[data-work-card]', body).forEach((el) => el.addEventListener('click', () => openWorkDetail(el.dataset.workCard)));
+      bindWorkActions(actions);
+      bindWorkActions(body);
     } else if (S.section === 'ws') {
-      const ws = S.workspaces.find((w) => w.id === S.selectedWs) || S.workspaces[0];
-      S.selectedWs = ws ? ws.id : null;
-      crumb.innerHTML = `<span>工作区</span><b>${h(ws ? ws.name : '未选择')}</b>${ws ? `<span class="chip">${h(S.wsPath === '.' ? '/' : '/' + S.wsPath)}</span>` : ''}`;
-      actions.innerHTML = `<button class="btn" data-add-workspace>＋ 添加</button>`
-        + (ws ? `<button class="btn" data-ws-rename>重命名</button><button class="btn" data-ws-up>上一级</button><button class="btn" data-ws-reveal>打开文件夹</button>` : '');
-      if (!ws) {
-        body.innerHTML = `<div class="empty">选择或添加一个工作区</div>`;
-      } else {
-        if (!S.wsFiles && !S.wsLoading) loadWsDir(ws.id, S.wsPath);
-        const files = S.wsFiles || [];
-        const preview = S.wsPreview;
-        body.innerHTML = `<div class="hero"><div><h1>${h(ws.name)}</h1>
-          <p>${h(ws.path || '')} · 工作区只提供文件与终端上下文，不承载聊天或角色。</p></div>
-          <div class="head-actions" style="margin-left:auto"><button class="btn" data-ws-bind>绑定到当前窗口</button></div></div>
-          <div style="display:grid;grid-template-columns:minmax(220px,320px) minmax(0,1fr);gap:14px;min-height:320px">
-            <aside class="editor" style="padding:10px;gap:2px;max-width:none">
-              <div class="role-line" style="padding:4px 8px;color:var(--dim)">${h(S.wsPath === '.' ? '/' : '/' + S.wsPath)}</div>
-              <div class="file-list">${S.wsLoading ? '<div>加载中…</div>' : (files.length ? files.map((f) => `
-                <div data-ws-item="${h(f.path)}" data-ws-type="${h(f.type)}">${f.type === 'dir' ? '▸ ' : '· '}${h(f.name)}</div>`).join('') : '<div style="color:var(--faint)">空目录</div>')}</div>
-            </aside>
-            <article class="editor" style="max-width:none;padding:0;overflow:hidden;min-width:0">
-              ${preview ? `<div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);font-size:11px;color:var(--faint);min-width:0">
-                <b style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${h(preview.path)}</b>
-                <span>·</span><span>${bytes(preview.size)}</span><span>·</span><span>只读预览</span>
-                <span style="margin-left:auto;cursor:pointer" data-ws-preview-close>关闭</span></div>
-                <pre style="margin:0;padding:14px;font:11.5px/1.7 var(--mono);color:#aab6c8;overflow:auto;max-height:520px;white-space:pre-wrap">${h(preview.text || '')}</pre>`
-                : `<div class="empty" style="padding:60px 20px">选择左侧文件查看只读预览<br><span style="font-size:10.5px">聊天窗口需要文件上下文时，在标题栏绑定工作区</span></div>`}
-            </article>
-          </div>`;
-        $$('[data-ws-item]', body).forEach((el) => el.addEventListener('click', () => {
-          if (el.dataset.wsType === 'dir') { S.wsPath = el.dataset.wsItem; S.wsPreview = null; S.wsFiles = null; loadWsDir(ws.id, S.wsPath); }
-          else openWsFile(ws.id, el.dataset.wsItem);
-        }));
-        const up = $('[data-ws-up]', actions);
-        if (up) up.addEventListener('click', () => {
-          const parts = (S.wsPath === '.' ? [] : S.wsPath.split('/'));
-          parts.pop();
-          S.wsPath = parts.length ? parts.join('/') : '.';
-          S.wsPreview = null; S.wsFiles = null; loadWsDir(ws.id, S.wsPath);
+      const items = S.workspaces.filter((w) => !w.archived);
+      crumb.innerHTML = `<span>工作区</span><b>全部工作区</b><span class="chip">${items.length} 个</span>`;
+      actions.innerHTML = `<button class="btn primary" data-add-workspace>＋ 添加工作区</button>`;
+      body.innerHTML = `<div class="hero"><div><h1>工作区</h1>
+        <p>工作区只提供文件与终端上下文。点开一个块查看目录、文件预览和绑定操作。</p></div></div>
+        <div class="tile-grid">${items.map((w) => `<article class="tile-card ws-tile" data-ws-card="${h(w.id)}">
+          <div class="tile-head">
+            <span class="ws-tile-icon"><svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z"/></svg></span>
+            <div class="tile-title"><b>${h(w.name)}</b><span>${h(w.path || w.root_path || '托管目录')}</span></div>
+          </div>
+          <div class="tile-chips">
+            <span class="chip">${Number(w.conversation_count || 0)} 个会话</span>
+            ${w.last_conv_updated ? `<span class="chip">最近 ${h(shortTime(w.last_conv_updated))}</span>` : '<span class="chip">还没有会话</span>'}
+          </div>
+          <div class="tile-foot"><span>点击查看目录与文件</span><span>${w.archived ? '已归档' : '打开详情'}</span></div>
+        </article>`).join('') || `<div class="empty">还没有工作区<br>点右上角「＋ 添加工作区」选择一个文件夹</div>`}</div>`;
+      $$('[data-ws-card]', body).forEach((el) => {
+        el.addEventListener('click', () => openWorkspaceDetail(el.dataset.wsCard));
+        el.addEventListener('contextmenu', (e) => {
+          const ws = S.workspaces.find((w) => w.id === el.dataset.wsCard);
+          if (ws) workspaceMenu(e, ws);
         });
-        const add = $('[data-add-workspace]', actions);
-        if (add) add.addEventListener('click', () => addWorkspace());
-        const rename = $('[data-ws-rename]', actions);
-        if (rename) rename.addEventListener('click', () => renameWorkspace(ws));
-        const reveal = $('[data-ws-reveal]', actions);
-        if (reveal) reveal.addEventListener('click', async () => {
-          try {
-            await api('/workspace/reveal', {
-              method: 'POST', body: JSON.stringify({ workspace_id: ws.id, path: '.' }),
-            });
-          } catch (err) { toast(err.message, 'bad'); }
-        });
-        const close = $('[data-ws-preview-close]', body);
-        if (close) close.addEventListener('click', () => { S.wsPreview = null; renderCanvas(); });
-        const bind = $('[data-ws-bind]', body);
-        if (bind) bind.addEventListener('click', () => {
-          const win = S.activeWin;
-          if (!win) { toast('先打开一个会话窗口', 'bad'); return; }
-          bindWorkspaceTo(win, ws.id);
-        });
-      }
+      });
+      const add = $('[data-add-workspace]', body);
+      if (add) add.addEventListener('click', () => addWorkspace());
+      const add2 = $('[data-add-workspace]', actions);
+      if (add2) add2.addEventListener('click', () => addWorkspace());
     } else if (S.section === 'role') {
-      crumb.innerHTML = `<span>角色库</span><b>独立于工作区</b>`;
-      actions.innerHTML = `<button class="btn primary" data-new="role">＋ 新建角色</button>`;
-      body.innerHTML = `<div class="hero"><div><h1>角色库</h1>
-        <p>角色是独立人格，不属于工作区也不属于群组。持久角色跨会话复用；临时角色只活在一个会话里；LLM 可以在对话中直接创建。</p></div></div>
-        <div class="role-grid">${S.roles.map((r) => `<article class="role-card" data-role-card="${h(r.id)}">
-          <div class="role-top">${av(r.name || '角', 'round')}<span style="min-width:0"><b>${h(r.name)}</b><br><span class="role-line">${h(r.expertise || '')}</span></span>
-            <span class="tag ${r.scope === 'temporary' ? 'tmp' : ''}" style="margin-left:auto">${r.scope === 'temporary' ? '临时' : (r.source === 'llm' ? 'LLM' : '持久')}</span></div>
-          <div class="role-line">${r.model_code ? `模型：${h(r.model_code)}` : '模型：跟随全局'}</div>
-          <div class="chips">${(r.tools || []).slice(0, 6).map((x) => `<span class="chip">${h(x)}</span>`).join('') || '<span class="chip">无工具</span>'}</div>
-        </article>`).join('') || '<div class="empty">还没有角色</div>'}</div>`;
+      const selected = S.roleDept === undefined ? 'all' : S.roleDept;
+      const selectedDept = selected && selected !== 'all' ? deptById(selected) : null;
+      const visible = S.roles.filter((r) => roleDeptMatches(r, selected));
+      crumb.innerHTML = `<span>组织与角色</span><b>${h(selected === 'all' ? '全部角色' : (selectedDept ? deptPath(selectedDept.id) : '未安排'))}</b>`;
+      actions.innerHTML = `<button class="btn" data-new="dept">＋ 部门</button><button class="btn primary" data-new="role">＋ 新建角色</button>`;
+      const deptNode = (d, depth) => {
+        const kids = deptChildren(d.id);
+        const row = `<div class="dept-row${selected === d.id ? ' active' : ''}" style="--depth:${depth}">
+          <button class="dept-main" type="button" data-dept-select="${h(d.id)}" title="${h(deptPath(d.id))}">
+            ${av(d.name, 'xs round', d.avatar)}<span class="dept-name">${h(d.name)}</span><span class="dept-count">${deptRoleCount(d.id)}</span>
+          </button>
+          <button class="dept-more" type="button" data-dept-menu="${h(d.id)}" title="部门操作" aria-label="部门操作">⋯</button>
+        </div>`;
+        return row + kids.map((c) => deptNode(c, depth + 1)).join('');
+      };
+      const rootNodes = deptChildren('').map((d) => deptNode(d, 0)).join('');
+      const headTitle = selected === 'all' ? '全部角色'
+        : (selectedDept ? deptPath(selectedDept.id) : '未安排部门');
+      const headHint = selected === 'all'
+        ? '按部门管理角色；角色也可以不安排部门，归入「未安排」。'
+        : (selectedDept
+          ? `包含「${selectedDept.name}」及其子部门的角色；可在此新建角色或子部门。`
+          : '这些角色还没有安排部门，编辑角色即可归档到部门。');
+      const cards = visible.map((r) => `<article class="role-card" data-role-card="${h(r.id)}">
+        <div class="role-top">${av(r.name || '角', 'round', r.avatar)}<span style="min-width:0"><b>${h(r.name)}</b><br><span class="role-line">${h(r.title || r.expertise || '未填写岗位')}</span></span>
+          <span class="tag ${r.scope === 'temporary' ? 'tmp' : ''}" style="margin-left:auto">${r.scope === 'temporary' ? '临时' : (r.source === 'llm' ? 'LLM' : '持久')}</span></div>
+        <div class="role-line">${r.department ? `部门：${h(r.department)}` : '<span class="role-warn">未安排部门</span>'}</div>
+        <div class="role-line">${r.model_code ? `模型：${h(r.model_code)}` : '模型：未指定'}</div>
+        <div class="chips">${(r.tools || []).slice(0, 6).map((x) => `<span class="chip">${h(x)}</span>`).join('') || '<span class="chip">无工具</span>'}</div>
+      </article>`).join('') || `<div class="empty">${selected === 'all' ? '还没有角色' : '这个范围还没有角色'}<br>${selectedDept ? '点右上角「＋ 新建角色」归档到这里' : '编辑角色即可安排部门'}</div>`;
+      body.innerHTML = `<div class="hero"><div><h1>组织与角色</h1>
+        <p>部门支持多级；角色可以安排在部门里，也可以保持「未安排」。角色名称是「谁」，岗位是「做什么」，两者分开维护。</p></div></div>
+        <div class="org-layout">
+          <aside class="org-tree">
+            <div class="org-tree-head"><b>组织</b><button class="mini-link" type="button" data-new="dept">＋ 根部门</button></div>
+            <button class="dept-row dept-flat${selected === 'all' ? ' active' : ''}" type="button" data-dept-select="all">
+              <span class="dept-name">全部角色</span><span class="dept-count">${S.roles.length}</span>
+            </button>
+            <button class="dept-row dept-flat${selected === '' ? ' active' : ''}" type="button" data-dept-select="">
+              <span class="dept-name">未安排</span><span class="dept-count">${S.roles.filter((r) => !r.department_id).length}</span>
+            </button>
+            <div class="org-tree-sep"></div>
+            ${rootNodes || '<div class="org-tree-empty">还没有部门<br>用「＋ 根部门」开始</div>'}
+          </aside>
+          <section class="org-main">
+            <div class="org-main-head">
+              <div><h2>${h(headTitle)}</h2><p>${h(headHint)}</p></div>
+              <span class="org-count">${visible.length} 个角色</span>
+            </div>
+            ${selectedDept ? `<div class="org-main-actions">
+              <button class="btn small" type="button" data-dept-child="${h(selectedDept.id)}">＋ 子部门</button>
+              <button class="btn small" type="button" data-dept-add-role="${h(selectedDept.id)}">＋ 在此部门新建角色</button>
+            </div>` : ''}
+            <div class="role-grid">${cards}</div>
+          </section>
+        </div>`;
+      $$('[data-dept-select]', body).forEach((el) => el.addEventListener('click', () => {
+        S.roleDept = el.dataset.deptSelect;
+        renderList();
+        renderCanvas();
+      }));
+      $$('[data-dept-menu]', body).forEach((el) => el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const dept = deptById(el.dataset.deptMenu);
+        if (dept) departmentMenu(e, dept);
+      }));
+      $$('[data-dept-child]', body).forEach((el) => el.addEventListener('click', () => {
+        openDeptEditor(null, el.dataset.deptChild);
+      }));
+      $$('[data-dept-add-role]', body).forEach((el) => el.addEventListener('click', () => {
+        openRoleEditor(null, { department_id: el.dataset.deptAddRole });
+      }));
       $$('[data-role-card]', body).forEach((el) => {
-        el.addEventListener('click', () => openRoleChat(el.dataset.roleCard));
+        el.addEventListener('click', () => openRoleDetail(el.dataset.roleCard));
         el.addEventListener('contextmenu', (e) => {
           const role = S.roles.find((r) => r.id === el.dataset.roleCard);
           if (role) roleMenu(e, role);
@@ -514,7 +1096,13 @@
         const btn = card.querySelector('[data-group-open]');
         if (!btn) return;
         const team = S.teams.find((t) => t.id === btn.dataset.groupOpen);
-        if (team) card.addEventListener('contextmenu', (e) => groupMenu(e, team));
+        if (team) {
+          card.addEventListener('contextmenu', (e) => groupMenu(e, team));
+          card.addEventListener('click', (e) => {
+            if (e.target.closest('button, a')) return;
+            openGroupDetail(team.id);
+          });
+        }
       });
       $$('[data-group-open]', body).forEach((el) => el.addEventListener('click', () => openGroupChat(el.dataset.groupOpen)));
       $$('[data-group-edit]', body).forEach((el) => el.addEventListener('click', () => openGroupDetail(el.dataset.groupEdit)));
@@ -538,6 +1126,7 @@
     if (kind === 'conv') return newConversation();
     if (kind === 'ws') return addWorkspace();
     if (kind === 'role') return openRoleEditor(null);
+    if (kind === 'dept') return openDeptEditor(null);
     if (kind === 'group') return newGroup();
     return null;
   }
@@ -617,10 +1206,24 @@
       if (!forceNew) {
         // 单聊复用：同一个角色已有单聊就切过去，不重复堆会话。
         const existing = S.convs.find((c) => c.role_id === roleId && !convIsGroup(c));
-        if (existing) return openConversation(existing.id);
+        if (existing) {
+          // 角色固定了模型、而旧单聊还没有自己的模型时，补成角色模型；
+          // 会话里显式选过别的模型则保持不变。
+          if (role.model_code && !existing.model_code) {
+            try {
+              await api(`/conversations/${encodeURIComponent(existing.id)}/preferences`, {
+                method: 'PUT', body: JSON.stringify({ model_code: role.model_code }),
+              });
+              existing.model_code = role.model_code;
+            } catch { /* ignore */ }
+          }
+          return openConversation(existing.id);
+        }
       }
       const conv = await api('/conversations', {
-        method: 'POST', body: JSON.stringify({ role_id: roleId }),
+        method: 'POST', body: JSON.stringify({
+          role_id: roleId, model_code: role.model_code || undefined,
+        }),
       });
       await loadAll();
       openConversation(conv.id);
@@ -917,8 +1520,8 @@
     const ws = await pickFolderModal();
     if (!ws) return;
     await loadAll();
-    S.selectedWs = ws.id; S.wsPath = '.'; S.wsFiles = null; S.wsPreview = null;
     setSection('ws');
+    openWorkspaceDetail(ws.id);
     toast(ws.restored ? '工作区已恢复' : '工作区已添加', 'ok');
   }
 
@@ -937,6 +1540,7 @@
         method: 'PATCH', body: JSON.stringify({ name: saved.name }),
       });
       await loadAll();
+      if (S.wsDrawerId === ws.id) renderWorkspaceDrawer();
       toast('已重命名', 'ok');
     } catch (err) { toast(err.message, 'bad'); }
   }
@@ -947,6 +1551,7 @@
     try {
       await api(`/workspaces/${encodeURIComponent(ws.id)}`, { method: 'DELETE' });
       if (S.selectedWs === ws.id) { S.selectedWs = null; S.wsFiles = null; S.wsPreview = null; }
+      if (S.wsDrawerId === ws.id) closeSideDrawer();
       await loadAll();
       toast('工作区已归档', 'ok');
     } catch (err) { toast(err.message, 'bad'); }
@@ -965,7 +1570,9 @@
       await api(`/workspaces/${encodeURIComponent(ws.id)}`, {
         method: 'PATCH', body: JSON.stringify({ archived: !ws.archived }),
       });
-      await loadAll(); S.settings = null; toast('已更新', 'ok');
+      await loadAll(); S.settings = null;
+      if (S.wsDrawerId === ws.id) renderWorkspaceDrawer();
+      toast('已更新', 'ok');
     } catch (err) { toast(err.message, 'bad'); }
   }
 
@@ -993,6 +1600,9 @@
       { label: '新建单聊会话', action: () => openRoleChat(role.id, true) },
       { label: '编辑角色…', action: () => openRoleEditor(role) },
       { label: '查看详情', action: () => openRoleDetail(role.id) },
+      { label: '新建工单…', action: () => newWorkItem({
+        role_id: role.id, body: `来自角色「${role.name}」\n\n`,
+      }) },
       { sep: true },
       { label: '复制角色', action: () => duplicateRole(role) },
       ...(role.scope === 'temporary' ? [{ label: '存为持久角色', action: async () => {
@@ -1002,11 +1612,22 @@
       { label: '加入群组…', action: () => addRoleToGroup(role) },
       { sep: true },
       { label: '复制角色 ID', action: () => copyText(role.id) },
-      { label: '删除角色', danger: true, action: async () => {
+      ...(role.system ? [] : [{ label: '删除角色', danger: true, action: async () => {
         if (!confirm(`删除角色「${role.name}」？`)) return;
         try { await api(`/roles/${encodeURIComponent(role.id)}`, { method: 'DELETE' }); await loadAll(); toast('角色已删除', 'ok'); }
         catch (err) { toast(err.message, 'bad'); }
-      } },
+      } }]),
+    ]);
+  }
+
+  function departmentMenu(e, dept) {
+    openCtx(e, [
+      { label: '在此部门新建角色…', action: () => openRoleEditor(null, { department_id: dept.id }) },
+      { label: '新建子部门…', action: () => openDeptEditor(null, dept.id) },
+      { label: '重命名 / 移动…', action: () => openDeptEditor(dept) },
+      { sep: true },
+      { label: '复制部门 ID', action: () => copyText(dept.id) },
+      { label: '删除部门', danger: true, action: () => deleteDepartment(dept) },
     ]);
   }
 
@@ -1014,6 +1635,9 @@
     openCtx(e, [
       { label: '打开群聊', action: () => openGroupChat(team.id) },
       { label: '编辑群组…', action: () => openGroupDetail(team.id) },
+      { label: '新建工单…', action: () => newWorkItem({
+        team_id: team.id, body: `来自群组「${team.name}」\n\n`,
+      }) },
       { sep: true },
       { label: '复制群组', action: () => duplicateTeam(team) },
       { label: '复制群组 ID', action: () => copyText(team.id) },
@@ -1023,14 +1647,18 @@
 
   function workspaceMenu(e, ws) {
     openCtx(e, [
-      { label: '在画布里打开', action: () => {
-        S.selectedWs = ws.id; S.wsPath = '.'; S.wsFiles = null; S.wsPreview = null; setSection('ws');
+      { label: '查看详情', action: () => {
+        setSection('ws');
+        openWorkspaceDetail(ws.id);
       } },
       { label: '绑定到当前窗口', action: async () => {
         const win = S.activeWin;
         if (!win) { toast('先打开一个会话窗口', 'bad'); return; }
         await bindWorkspaceTo(win, ws.id);
       } },
+      { label: '新建工单…', action: () => newWorkItem({
+        workspace_id: ws.id, body: `来自工作区「${ws.name}」\n\n`,
+      }) },
       { label: '在 Finder 中打开', action: () => revealWorkspace(ws) },
       { label: '复制路径', action: () => copyText(ws.path || '') },
       { sep: true },
@@ -1042,8 +1670,17 @@
 
   function conversationMenuItems(w) {
     const isGlobal = String(w.conv.zone || '') === GLOBAL_AGENT_ZONE;
+    // 工单不提供「角色资料」入口：它绑定的是默认角色，打开后会看到不可删除的默认角色抽屉。
+    const infoItem = { label: convParts(w.conv).isGroup ? '群聊设置' : '角色资料', action: () => openConversationInfo(w) };
     return [
-      { label: '会话信息', action: () => openConversationInfo(w) },
+      ...(isGlobal ? [] : [infoItem]),
+      { label: '执行画布…', action: () => openAgentCanvas(w) },
+      { label: '新建工单…', action: () => newWorkItem({
+        workspace_id: w.conv.bound_workspace_id || w.conv.workspace_id || null,
+        role_id: w.conv.role_id || null,
+        team_id: w.conv.team_id || null,
+        body: `来自会话「${convTitle(w.conv)}」\n\n`,
+      }) },
       { label: '重命名会话…', action: () => renameConversation(w.conv) },
       { label: '绑定工作区…', action: () => bindWorkspace(w) },
       { label: '标记为已读', action: async () => {
@@ -1055,7 +1692,7 @@
         { label: S.gaAuto ? '关闭低风险代处理' : '开启低风险代处理', action: () => {
           S.gaAuto = !S.gaAuto;
           try { localStorage.setItem('atlasx.ga.auto', S.gaAuto ? '1' : '0'); } catch { /* ignore */ }
-          toast(S.gaAuto ? '全局 Agent 将代处理低风险授权' : '已关闭低风险代处理', 'ok', 1600);
+          toast(S.gaAuto ? '工单将代处理低风险授权' : '已关闭低风险代处理', 'ok', 1600);
           if (S.gaAuto) loadAttention();
         } },
       ] : []),
@@ -1072,53 +1709,239 @@
     openCtx(e, conversationMenuItems(w));
   }
 
-  async function openConversationInfo(w) {
+  // 会话信息不再单独弹框：群聊直接打开群设置抽屉，单聊直接打开角色资料。
+  function openConversationInfo(w) {
     if (!w) return;
-    const conv = w.conv;
-    const parts = convParts(conv);
-    const title = convTitle(conv);
-    const ws = S.workspaces.find((x) => x.id === conv.bound_workspace_id);
-    const model = conv.model_code || S.activeModel || '跟随全局';
-    const msgCount = Number(conv.message_count || 0);
-    const role = parts.role;
-    const subtitle = parts.isGroup
-      ? `群聊 · ${parts.members.length} 个角色 · ${modeLabel(parts.team && parts.team.mode)}`
-      : `单聊 · ${role && role.name ? `角色：${role.name}` : '默认角色'}`;
-    const memberHtml = parts.isGroup
-      ? `<div class="field"><span>群成员</span><div class="chips">${parts.members.map((m) => `<span class="chip">${h(m.name)}</span>`).join('') || '<span class="chip">暂无成员</span>'}</div></div>`
-      : `<div class="field"><span>角色</span><div class="role-line">${h((role && (role.expertise || role.persona)) || '默认角色')}</div></div>`;
-    const action = await modal({
-      title: '会话信息',
-      fields: `<div class="about-modal">
-        <div class="about-brand">${av(title || '会', parts.isGroup ? '' : 'round')}
-          <div><b>${h(title)}</b><div class="role-line">${h(subtitle)}</div></div></div>
-        <div class="settings-fields">
-          <div class="field"><span>工作区</span><div class="role-line">${h(ws ? ws.name : '未绑定（纯聊天）')}</div></div>
-          <div class="field"><span>模型</span><div class="role-line">${h(model)}</div></div>
-          <div class="field"><span>消息</span><div class="role-line">${msgCount} 条</div></div>
-          <div class="field"><span>运行状态</span><div class="role-line">${w.streamingNow || w.es ? '运行中' : '空闲'}</div></div>
-          <div class="field"><span>创建时间</span><div class="role-line">${h(conv.created_at || '')}</div></div>
-          <div class="field"><span>最近活动</span><div class="role-line">${h(conv.updated_at || '')}</div></div>
-        </div>
-        ${memberHtml}
-        <div class="field"><span>会话 ID</span><div class="role-line mono">${h(w.convId)}</div></div>
-      </div>`,
-      buttons: [
-        { label: parts.isGroup ? '群组资料' : '角色详情', value: 'detail' },
-        { label: '重命名', value: 'rename' },
-        { label: '关闭', primary: true, value: 'close' },
-      ],
-      read: (v) => ({ action: v }),
-    });
-    if (!action) return;
-    if (action.action === 'detail') {
-      if (parts.isGroup && parts.team) return openGroupDetail(parts.team.id);
-      if (role) return openRoleDetail(role.id);
-      return null;
+    // 工单不打开角色资料（按钮已隐藏，这里兜底）。
+    if (String(w.conv.zone || '') === GLOBAL_AGENT_ZONE) return;
+    const parts = convParts(w.conv);
+    if (parts.isGroup && parts.team) return openGroupDetail(parts.team.id);
+    if (parts.role) return openRoleDetail(parts.role.id);
+    toast('这个会话没有可编辑的资料', 'ok');
+  }
+
+  /* ── 执行画布：主代理 / 团队 / 子代理 DAG ─────────────── */
+  const AGENT_STATUS = {
+    running: '运行中', queued: '排队中', done: '完成',
+    failed: '失败', idle: '待命',
+  };
+
+  function agentTokens(n) {
+    const value = Number(n) || 0;
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+    return String(value);
+  }
+
+  function agentNodeHtml(node, x, y) {
+    const status = String(node.status || 'idle');
+    const tools = node.tools || [];
+    const root = node.kind === 'root';
+    const progress = status === 'done' || status === 'failed' ? 100
+      : status === 'running' ? 64 : status === 'queued' ? 12 : 0;
+    const metrics = [];
+    if (root) {
+      metrics.push(`${agentTokens((S.agentCanvasData.stats || {}).tokens)} token`);
+      metrics.push(`${tools.length} 工具`);
+    } else {
+      metrics.push(`${tools.length} 工具`);
+      if (node.kind === 'team' && status === 'idle') metrics.push('待委派');
+      else if (node.elapsed_ms) metrics.push(durationText(node.elapsed_ms));
     }
-    if (action.action === 'rename') return renameConversation(conv);
-    if (action.action === 'close') return closeWin(w);
-    return null;
+    const current = node.current || firstLine(node.text || node.goal || '', 64);
+    const selected = S.agentCanvasSelected === node.id ? ' selected' : '';
+    return `<article class="agent-node ${status}${selected}" data-agent-node="${h(node.id)}" style="left:${x}px;top:${y}px">
+      <div class="agent-node-head">
+        ${av(node.name || 'A', 'round')}
+        <div class="agent-node-name"><b>${h(node.name)}</b><span>${root ? '主代理' : node.kind === 'team' ? '团队成员' : '子代理'}</span></div>
+        <span class="agent-status ${status}">${h(AGENT_STATUS[status] || status)}</span>
+      </div>
+      <div class="agent-goal">${h(firstLine(node.goal || '', 74))}</div>
+      <div class="agent-progress ${status === 'running' ? 'indeterminate' : ''}"><i style="width:${progress}%"></i></div>
+      <div class="agent-metrics">${metrics.map((m) => `<span>${h(m)}</span>`).join('')}</div>
+      <div class="agent-current" title="${h(current)}">${h(current || '—')}</div>
+    </article>`;
+  }
+
+  function agentFeedRow(item) {
+    const status = String(item.status || '');
+    const kind = String(item.kind || '');
+    const label = kind === 'tool_call' ? '工具' : kind === 'tool_result' ? '完成'
+      : kind === 'error' ? '失败' : kind === 'done' ? '完成' : '进展';
+    const when = item.ts ? new Date(Number(item.ts)).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+    return `<div class="agent-feed-row ${h(status)}" data-agent-feed="${h(item.agent_id || '')}">
+      <span class="agent-dot ${h(status)}"></span>
+      <div class="agent-feed-main"><b>${h(item.agent || '代理')}</b><span>${h(firstLine(item.text || label, 90))}</span></div>
+      <span class="agent-feed-meta">${h(label)}${when ? ` · ${h(when)}` : ''}</span>
+    </div>`;
+  }
+
+  function renderAgentCanvas() {
+    const data = S.agentCanvasData;
+    if (!data || !data.root) return;
+    const filter = S.agentCanvasFilter;
+    const allNodes = data.nodes || [];
+    const visible = allNodes.filter((n) => {
+      if (filter === 'all') return true;
+      if (filter === 'running') return n.status === 'running' || n.status === 'queued';
+      if (filter === 'failed') return n.status === 'failed';
+      return true;
+    });
+    const stage = $('#agentCanvasStage');
+    if (!stage) return;
+    const cols = Math.min(4, Math.max(1, visible.length));
+    const rows = Math.max(1, Math.ceil(visible.length / cols));
+    const nodeW = 260;
+    const gapX = 24;
+    const gapY = 30;
+    const width = Math.max(920, cols * nodeW + (cols - 1) * gapX + 80);
+    const height = 250 + rows * 190 + 40;
+    stage.style.width = `${width}px`;
+    stage.style.height = `${height}px`;
+    stage.style.transform = `scale(${S.agentCanvasZoom})`;
+    const rootW = 260;
+    const rootX = (width - rootW) / 2;
+    const rootY = 26;
+    let svg = `<svg class="agent-edges" width="${width}" height="${height}">`;
+    let cards = '';
+    visible.forEach((node, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const x = (width - (cols * nodeW + (cols - 1) * gapX)) / 2 + col * (nodeW + gapX);
+      const y = 236 + row * (190 + gapY);
+      const x1 = rootX + rootW / 2;
+      const y1 = rootY + 176;
+      const x2 = x + nodeW / 2;
+      const y2 = y;
+      const mid = (y1 + y2) / 2;
+      const cls = node.status === 'running' || node.status === 'queued' ? 'active'
+        : node.status === 'failed' ? 'failed' : '';
+      svg += `<path class="agent-edge ${cls}" d="M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}"/>`;
+      cards += agentNodeHtml(node, x, y);
+    });
+    svg += '</svg>';
+    stage.innerHTML = `${svg}${agentNodeHtml(data.root, rootX, rootY)}${cards}`;
+    $$('[data-agent-node]', stage).forEach((el) => el.addEventListener('click', () => {
+      const id = el.dataset.agentNode;
+      S.agentCanvasSelected = S.agentCanvasSelected === id ? null : id;
+      renderAgentCanvas();
+    }));
+
+    const stats = data.stats || {};
+    const run = data.run || {};
+    $('#agentCanvasSub').textContent = `${(data.conversation || {}).title || '当前会话'} · ${AGENT_STATUS[run.status] || run.status || '空闲'} · ${stats.agents || 1} 个代理 · ${agentTokens(stats.tokens)} token`;
+    $$('#agentCanvasFilter [data-graph-filter]').forEach((btn) => {
+      btn.classList.toggle('on', btn.dataset.graphFilter === filter);
+    });
+
+    const selected = S.agentCanvasSelected;
+    let activity = data.activity || [];
+    if (!S.agentCanvasReplay && selected) activity = activity.filter((x) => x.agent_id === selected);
+    const recent = activity.slice().sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0)).slice(0, 40);
+    const activityEl = $('#agentActivity');
+    if (activityEl) activityEl.innerHTML = recent.length ? recent.map(agentFeedRow).join('') : '<div class="agent-feed-empty">还没有活动</div>';
+    const just = (data.activity || []).slice(-5).reverse();
+    const justEl = $('#agentJustHappened');
+    if (justEl) justEl.innerHTML = just.length ? just.map(agentFeedRow).join('') : '<div class="agent-feed-empty">暂无</div>';
+    const up = data.upcoming || [];
+    const upEl = $('#agentUpcoming');
+    if (upEl) upEl.innerHTML = up.length ? up.map((r) => `<div class="agent-feed-row queued">
+      <span class="agent-dot queued"></span><div class="agent-feed-main"><b>排队中的运行</b><span>${h(firstLine(r.content || '等待执行', 90))}</span></div>
+      <span class="agent-feed-meta">${h((r.created_at || '').slice(11, 16))}</span></div>`).join('') : '<div class="agent-feed-empty">没有待执行的运行</div>';
+  }
+
+  async function refreshAgentCanvas() {
+    if (!S.agentCanvasConv) return;
+    try {
+      const data = await api(`/conversations/${encodeURIComponent(S.agentCanvasConv)}/graph`);
+      S.agentCanvasData = data;
+      renderAgentCanvas();
+    } catch (err) {
+      const sub = $('#agentCanvasSub');
+      if (sub) sub.textContent = `画布加载失败：${err.message}`;
+    }
+  }
+
+  function openAgentCanvas(w) {
+    if (!w) return;
+    S.agentCanvasConv = w.convId;
+    S.agentCanvasData = null;
+    S.agentCanvasFilter = 'all';
+    S.agentCanvasSelected = null;
+    S.agentCanvasZoom = 1;
+    S.agentCanvasReplay = false;
+    const overlay = $('#agentCanvas');
+    if (overlay) overlay.hidden = false;
+    $('#agentCanvasSub').textContent = `${convTitle(w.conv)} · 加载中…`;
+    refreshAgentCanvas();
+    if (S.agentCanvasTimer) clearInterval(S.agentCanvasTimer);
+    S.agentCanvasTimer = setInterval(() => {
+      if (!$('#agentCanvas') || $('#agentCanvas').hidden) return;
+      refreshAgentCanvas();
+    }, 2000);
+  }
+
+  function closeAgentCanvas() {
+    const overlay = $('#agentCanvas');
+    if (overlay) overlay.hidden = true;
+    if (S.agentCanvasTimer) { clearInterval(S.agentCanvasTimer); S.agentCanvasTimer = null; }
+    if (S.agentCanvasReplayTimer) { clearInterval(S.agentCanvasReplayTimer); S.agentCanvasReplayTimer = null; }
+    S.agentCanvasReplay = false;
+    S.agentCanvasConv = null;
+    S.agentCanvasData = null;
+  }
+
+  function replayAgentCanvas() {
+    const data = S.agentCanvasData;
+    if (!data) return;
+    if (S.agentCanvasReplayTimer) { clearInterval(S.agentCanvasReplayTimer); S.agentCanvasReplayTimer = null; }
+    const items = (data.activity || []).slice().sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0));
+    if (!items.length) return;
+    S.agentCanvasReplay = true;
+    let idx = 0;
+    S.agentCanvasReplayTimer = setInterval(() => {
+      if (idx >= items.length) {
+        clearInterval(S.agentCanvasReplayTimer);
+        S.agentCanvasReplayTimer = null;
+        S.agentCanvasReplay = false;
+        S.agentCanvasSelected = null;
+        renderAgentCanvas();
+        return;
+      }
+      S.agentCanvasSelected = items[idx].agent_id || null;
+      renderAgentCanvas();
+      idx += 1;
+    }, 650);
+  }
+
+  function bindAgentCanvas() {
+    const overlay = $('#agentCanvas');
+    if (!overlay) return;
+    const close = $('#agentCanvasClose');
+    if (close) close.addEventListener('click', closeAgentCanvas);
+    const refresh = $('#agentCanvasRefresh');
+    if (refresh) refresh.addEventListener('click', refreshAgentCanvas);
+    const replay = $('#agentCanvasReplay');
+    if (replay) replay.addEventListener('click', replayAgentCanvas);
+    const zin = $('#agentCanvasZoomIn');
+    if (zin) zin.addEventListener('click', () => {
+      S.agentCanvasZoom = Math.min(1.6, S.agentCanvasZoom + 0.1);
+      renderAgentCanvas();
+    });
+    const zout = $('#agentCanvasZoomOut');
+    if (zout) zout.addEventListener('click', () => {
+      S.agentCanvasZoom = Math.max(0.6, S.agentCanvasZoom - 0.1);
+      renderAgentCanvas();
+    });
+    const fit = $('#agentCanvasFit');
+    if (fit) fit.addEventListener('click', () => {
+      S.agentCanvasZoom = 1;
+      renderAgentCanvas();
+    });
+    $$('#agentCanvasFilter [data-graph-filter]').forEach((btn) => btn.addEventListener('click', () => {
+      S.agentCanvasFilter = btn.dataset.graphFilter;
+      renderAgentCanvas();
+    }));
   }
 
   /* ── 设置 ─────────────────────────────────────────────── */
@@ -1375,7 +2198,7 @@
       fields: `
         <div class="field"><label>单聊 · 选一个角色</label>
           <select class="input" id="ncRole"><option value="">默认角色（AtlasX）</option>
-          ${roles.map((r) => `<option value="${h(r.id)}">${h(r.name)}${r.expertise ? ` · ${h(r.expertise)}` : ''}</option>`).join('')}</select></div>
+          ${roles.map((r) => `<option value="${h(r.id)}">${h(roleLabel(r))}${r.expertise ? ` · ${h(r.expertise)}` : ''}</option>`).join('')}</select></div>
         <div class="field"><label>或群聊（选择后优先于单聊）</label>
           <select class="input" id="ncGroup"><option value="">不开群聊</option>
           ${groups.map((t) => `<option value="${h(t.id)}">${h(t.name)} · ${(t.members || []).length} 个角色</option>`).join('')}</select></div>
@@ -1401,6 +2224,7 @@
     const existing = S.windows.get(convId);
     if (existing) {
       S.section = 'conv';
+      applySectionLayout('conv');
       $$('.rail-btn').forEach((b) => b.classList.toggle('active', b.dataset.section === 'conv'));
       activateView(existing);
       showChat(true);
@@ -1447,9 +2271,22 @@
         toast('这个群组还没有成员，先在「群组」里加角色', 'bad');
         return;
       }
+      const leaderModel = team.leader && team.leader.model_code ? team.leader.model_code : '';
       const existing = S.convs.find((c) => c.team_id === teamId && convIsGroup(c));
-      if (existing) return openConversation(existing.id);
-      const conv = await api('/conversations', { method: 'POST', body: JSON.stringify({ team_id: teamId }) });
+      if (existing) {
+        if (leaderModel && !existing.model_code) {
+          try {
+            await api(`/conversations/${encodeURIComponent(existing.id)}/preferences`, {
+              method: 'PUT', body: JSON.stringify({ model_code: leaderModel }),
+            });
+            existing.model_code = leaderModel;
+          } catch { /* ignore */ }
+        }
+        return openConversation(existing.id);
+      }
+      const conv = await api('/conversations', {
+        method: 'POST', body: JSON.stringify({ team_id: teamId, model_code: leaderModel || undefined }),
+      });
       await loadAll();
       openConversation(conv.id);
     } catch (err) { toast(err.message, 'bad'); }
@@ -1469,7 +2306,7 @@
     try { perm = localStorage.getItem('atlasx.perm.' + conv.id) || 'ask'; } catch { /* ignore */ }
     el.innerHTML = `
       <header class="win-head chat-head">
-        ${isGlobal ? gaAvatar(isGroup ? '' : 'round') : av(title || '会', isGroup ? '' : 'round')}
+        ${isGlobal ? gaAvatar(isGroup ? '' : 'round') : av(title || '会', isGroup ? '' : 'round', convAvatar(conv))}
         <span class="win-title"><b>${h(title)}</b><span>${h(meta.kind)} · ${h(meta.sub)}</span></span>
         <button class="chip" data-bind-ws title="绑定工作区">${h(boundLabel(conv))}</button>
         <div class="head-menus">
@@ -1477,9 +2314,12 @@
           ${isGlobal ? `<button class="head-btn" data-ga-notify title="系统通知" aria-label="系统通知">
             <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
           </button>` : ''}
-          <button class="head-btn" data-conv-info title="会话信息" aria-label="会话信息">
-            <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="2.6"/><path d="M3.6 19c0-2.6 2.4-4.4 5.4-4.4s5.4 1.8 5.4 4.4"/><circle cx="17" cy="9" r="2.2"/><path d="M15.8 14.8c2.4.3 4.2 2 4.2 4.2"/></svg>
+          <button class="head-btn" data-conv-graph title="执行画布" aria-label="执行画布">
+            <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.2"/><circle cx="18" cy="7" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M8.2 6.2 15.8 7M7.2 8l3.6 8M16.8 9l-3.6 7"/></svg>
           </button>
+          ${isGlobal ? '' : `<button class="head-btn" data-conv-info title="${isGroup ? '群聊设置' : '角色资料'}" aria-label="${isGroup ? '群聊设置' : '角色资料'}">
+            <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="2.6"/><path d="M3.6 19c0-2.6 2.4-4.4 5.4-4.4s5.4 1.8 5.4 4.4"/><circle cx="17" cy="9" r="2.2"/><path d="M15.8 14.8c2.4.3 4.2 2 4.2 4.2"/></svg>
+          </button>`}
           <button class="head-btn" data-conv-more title="更多操作" aria-label="更多操作">
             <svg viewBox="0 0 24 24" class="dots"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>
           </button>
@@ -1497,10 +2337,10 @@
         <div class="queue-bar" hidden></div>
         <div class="attach-bar" hidden></div>
         <div class="slash-pop mention-pop" hidden></div>
-        <div class="mention-pop" hidden></div>
+        <div class="mention-pop member-pop" hidden></div>
         <div class="box"><button class="wbtn attach" title="添加附件"><svg viewBox="0 0 24 24"><path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L16 6"/></svg></button>
           <input type="file" class="file-input" hidden multiple />
-          <textarea rows="1" placeholder="${isGroup ? '发消息…  @ 成员 · / 命令 · Enter 发送' : '发消息…  / 命令 · Enter 发送'}" aria-label="消息"></textarea>
+          <textarea rows="1" placeholder="${isGroup ? '输入 @ 选择群成员 · / 命令 · Enter 发送' : '发消息…  / 命令 · Enter 发送'}" aria-label="消息"></textarea>
           <button class="send" title="发送 (Enter)"><svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
           <button class="stop" hidden title="停止"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button></div>
         <div class="tools">
@@ -1516,7 +2356,7 @@
     (floating ? document.body : $('#chatHostV3')).appendChild(el);
     const w = {
       convId: conv.id, conv, el, es: null, runId: null, cursor: 0,
-      title, kind: meta.kind, isGlobal, floating, live: null,
+      title, kind: meta.kind, isGlobal, floating, isGroup, live: null,
       members: parts.members, teamId: isGroup ? (conv.team_id || '') : '', perm,
       queue: [], pollTimer: null, streamingNow: false, attachments: [],
       think: conv.thinking_level || '',
@@ -1554,39 +2394,278 @@
     } catch { /* ignore */ }
   }
 
+  function attExt(name) {
+    const match = /\.([A-Za-z0-9]+)$/.exec(String(name || ''));
+    return match ? match[1].toLowerCase() : '';
+  }
+
+  function attLabel(att) {
+    const ext = attExt(att.name);
+    const kind = String(att.kind || '');
+    if (kind === 'image' || String(att.mime || '').startsWith('image/')) return '图片';
+    if (ext === 'pdf' || kind === 'pdf') return 'PDF';
+    if (['doc', 'docx', 'odt', 'rtf'].includes(ext)) return 'Word';
+    if (['ppt', 'pptx', 'odp'].includes(ext)) return 'PPT';
+    if (['xls', 'xlsx', 'xlsm', 'ods', 'csv', 'tsv'].includes(ext)) return '表格';
+    if (['md', 'markdown', 'mdx'].includes(ext)) return 'Markdown';
+    if (['html', 'htm', 'xhtml'].includes(ext)) return 'HTML';
+    if (['json', 'jsonl'].includes(ext)) return 'JSON';
+    return kind === 'office' ? '文档' : '文本';
+  }
+
   function attachmentsHtml(list) {
     if (!Array.isArray(list) || !list.length) return '';
     return `<div class="msg-attachments">${list.map((a) => {
       const name = h(a.name || '附件');
       const url = h(a.url || '');
       const img = String(a.mime || '').startsWith('image/') && url;
-      return img ? `<a class="att-img" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${name}" /></a>`
-        : `<a class="att-file" href="${url}" target="_blank" rel="noopener"><svg viewBox="0 0 24 24"><path d="M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7Z"/><path d="M14 3v4h4"/></svg><span>${name}</span></a>`;
+      if (img) return `<a class="att-img" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${name}" /></a>`;
+      const ext = attExt(a.name);
+      if (a.local || !url) {
+        return `<span class="att-file" title="${name}">
+          <svg viewBox="0 0 24 24"><path d="M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7Z"/><path d="M14 3v4h4"/></svg>
+          <b>${name}</b><span>${bytes(a.size)}</span></span>`;
+      }
+      return `<div class="att-card" data-att-id="${h(a.id || '')}" data-att-url="${url}"
+        data-att-name="${name}" data-att-ext="${h(ext)}" data-att-kind="${h(a.kind || '')}">
+        <button class="att-card-head" type="button" data-att-toggle>
+          <span class="att-card-ico"><svg viewBox="0 0 24 24"><path d="M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7Z"/><path d="M14 3v4h4"/></svg></span>
+          <span class="att-card-title"><b>${name}</b><span>${h(attLabel(a))} · ${bytes(a.size)}</span></span>
+          <span class="att-card-action">预览</span>
+          <span class="att-card-caret">›</span>
+        </button>
+        <div class="att-card-body" hidden></div>
+      </div>`;
     }).join('')}</div>`;
+  }
+
+  function attFooter(url, truncated) {
+    return `<div class="att-foot"><a href="${h(url)}" target="_blank" rel="noopener">打开原文件</a>${truncated ? '<span>· 预览已截断</span>' : ''}</div>`;
+  }
+
+  function attCsvTable(text, delimiter) {
+    const lines = String(text || '').split(/\r?\n/).filter((line) => line.length).slice(0, 200);
+    if (!lines.length) return '<div class="att-loading">没有可预览的表格内容</div>';
+    const rows = lines.map((line) => line.split(delimiter || ',').slice(0, 20));
+    return `<div class="att-table-wrap"><table class="att-table"><tbody>${rows.map((row, i) =>
+      `<tr>${row.map((cell) => (i === 0 ? `<th>${h(cell)}</th>` : `<td>${h(cell)}</td>`)).join('')}</tr>`).join('')}</tbody></table></div>`;
+  }
+
+  function renderAttPreview(card, host, data) {
+    const ext = card.dataset.attExt || '';
+    const text = String(data.text || '');
+    const url = data.url || card.dataset.attUrl || '';
+    const footer = attFooter(url, data.truncated);
+    if (ext === 'pdf' || data.kind === 'pdf') {
+      host.innerHTML = `<iframe class="att-pdf" src="${h(url)}" title="${h(data.name || 'PDF')}"></iframe>
+        ${text ? `<details class="att-pdf-text"><summary>文本内容</summary><pre class="att-pre">${h(text)}</pre></details>` : ''}${footer}`;
+      return;
+    }
+    if (['html', 'htm', 'xhtml'].includes(ext)) {
+      host.innerHTML = `<iframe class="att-html" sandbox="" title="${h(data.name || 'HTML')}"></iframe>${footer}`;
+      const frame = host.querySelector('iframe');
+      if (frame) frame.srcdoc = text;
+      return;
+    }
+    if (['md', 'markdown', 'mdx'].includes(ext)) {
+      host.innerHTML = `<div class="att-md">${md(text)}</div>${footer}`;
+      return;
+    }
+    if (['csv', 'tsv'].includes(ext)) {
+      host.innerHTML = `${attCsvTable(text, ext === 'tsv' ? '\t' : ',')}${footer}`;
+      return;
+    }
+    if (['xls', 'xlsx', 'xlsm', 'ods'].includes(ext)) {
+      // document_service 的表格抽取格式是「单元格 | 单元格」。
+      host.innerHTML = `${attCsvTable(text, ' | ')}${footer}`;
+      return;
+    }
+    if (['json', 'jsonl'].includes(ext)) {
+      let pretty = text;
+      try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch { /* keep raw */ }
+      host.innerHTML = `<pre class="att-pre">${h(pretty)}</pre>${footer}`;
+      return;
+    }
+    host.innerHTML = `<pre class="att-pre att-doc">${h(text || '没有可预览的文本，请打开原文件。')}</pre>${footer}`;
+  }
+
+  async function loadAttPreview(card) {
+    const host = $('.att-card-body', card);
+    if (!host) return;
+    host.innerHTML = '<div class="att-loading"><span class="sp"></span>加载预览…</div>';
+    try {
+      const res = await fetch(`${card.dataset.attUrl}/preview`, { headers: { Accept: 'application/json' } });
+      let payload = null;
+      try { payload = await res.json(); } catch { /* ignore */ }
+      if (!res.ok) throw new Error((payload && payload.detail) || `HTTP ${res.status}`);
+      renderAttPreview(card, host, (payload && payload.data) || {});
+    } catch (err) {
+      host.innerHTML = `<div class="att-loading">预览失败：${h(err.message)}</div>${attFooter(card.dataset.attUrl || '', false)}`;
+    }
+  }
+
+  function toggleAttPreview(card) {
+    const host = $('.att-card-body', card);
+    if (!host) return;
+    const open = !host.hidden;
+    host.hidden = open;
+    card.classList.toggle('open', !open);
+    const action = $('.att-card-action', card);
+    if (action) action.textContent = open ? '预览' : '收起';
+    if (!open && card.dataset.loaded !== '1') {
+      card.dataset.loaded = '1';
+      loadAttPreview(card);
+    }
+  }
+
+  function isImageFile(file) {
+    return String(file.type || '').startsWith('image/') || IMAGE_EXT_RE.test(file.name || '');
+  }
+
+  function isDocumentFile(file) {
+    const name = String(file.name || '').toLowerCase();
+    const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')) : '';
+    if (DOC_EXTENSIONS.includes(ext)) return true;
+    const base = name.split('/').pop();
+    if (['dockerfile', 'makefile', 'rakefile', 'gemfile', 'procfile'].includes(base)) return true;
+    return String(file.type || '').startsWith('text/');
+  }
+
+  function attachmentKind(name, mime) {
+    if (String(mime || '').startsWith('image/') || IMAGE_EXT_RE.test(name || '')) return 'image';
+    const ext = `.${attExt(name)}`;
+    if (ext === '.pdf') return 'pdf';
+    if (['.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.ppt', '.pptx', '.odt', '.ods'].includes(ext)) return 'office';
+    return 'file';
+  }
+
+  function modelProfile(code) {
+    const key = code || S.activeModel || '';
+    return (S.models || []).find((m) => (m.code || m.id) === key) || null;
+  }
+
+  // 图片是否随消息发送，由当前会话实际使用的模型决定（后端会再校验一次）。
+  function supportsVision(w) {
+    if (w && w.conv && typeof w.conv.vision === 'boolean') return w.conv.vision;
+    const role = (S.roles || []).find((r) => r.id === ((w && w.conv && w.conv.role_id) || ''));
+    const code = (w && w.conv && w.conv.model_code)
+      || (role && role.model_code) || S.activeModel || '';
+    const profile = modelProfile(code);
+    if (!profile) return false;
+    if (typeof profile.effective_vision === 'boolean') return profile.effective_vision;
+    return !!profile.vision;
+  }
+
+  function syncAttachAvailability(w) {
+    const btn = $('.attach', w.el);
+    const input = $('.file-input', w.el);
+    if (!btn) return;
+    const vision = supportsVision(w);
+    btn.dataset.vision = vision ? '1' : '0';
+    btn.title = vision ? '添加图片或文档' : '添加文档（当前模型不支持图片）';
+    btn.setAttribute('aria-label', btn.title);
+    if (input) input.accept = vision ? `${DOC_ACCEPT},${IMAGE_ACCEPT}` : DOC_ACCEPT;
   }
 
   function renderAttachments(w) {
     const bar = $('.attach-bar', w.el);
     if (!bar) return;
-    if (!w.attachments.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+    const list = w.attachments || [];
+    if (!list.length) { bar.hidden = true; bar.innerHTML = ''; return; }
     bar.hidden = false;
-    bar.innerHTML = w.attachments.map((a, i) =>
-      `<span class="chip att-chip">${h(a.name)} · ${bytes(a.size)}<button class="wbtn" data-attach-remove="${i}" title="移除">×</button></span>`).join('');
+    bar.innerHTML = list.map((a, i) => {
+      const image = a.kind === 'image';
+      const thumb = image && a.preview
+        ? `<img src="${h(a.preview)}" alt="" />`
+        : `<svg viewBox="0 0 24 24"><path d="M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7Z"/><path d="M14 3v4h4"/></svg>`;
+      return `<div class="att-pending${image ? ' is-image' : ''}">
+        <span class="att-pending-thumb">${thumb}</span>
+        <span class="att-pending-main">
+          <b title="${h(a.name)}">${h(a.name)}</b>
+          <span>${bytes(a.size)}${image ? ' · 图片' : ''}</span>
+        </span>
+        <button type="button" class="wbtn att-pending-remove" data-attach-remove="${i}" title="移除附件" aria-label="移除附件">×</button>
+      </div>`;
+    }).join('');
   }
 
   function addAttachments(w, files) {
-    const allowed = files.slice(0, 8);
-    allowed.forEach((f) => {
-      if (f.size > 25 * 1024 * 1024) { toast(`${f.name} 超过 25MB`, 'bad'); return; }
-      const reader = new FileReader();
-      reader.onload = () => {
-        w.attachments.push({
-          name: f.name, mime: f.type || '', size: f.size, data: String(reader.result || ''),
-        });
-        renderAttachments(w);
-      };
-      reader.readAsDataURL(f);
-    });
+    const incoming = Array.from(files || []);
+    if (!incoming.length) return;
+    const vision = supportsVision(w);
+    let total = (w.attachments || []).reduce((n, a) => n + Number(a.size || 0), 0);
+    let changed = false;
+    for (const file of incoming) {
+      if ((w.attachments || []).length >= MAX_ATTACHMENTS) {
+        toast(`每条消息最多 ${MAX_ATTACHMENTS} 个附件`, 'bad', 4000);
+        break;
+      }
+      const image = isImageFile(file);
+      if (image && !vision) {
+        toast('当前模型未开启图片支持，请在「设置 → 模型」中开启或切换模型', 'bad', 5200);
+        continue;
+      }
+      if (!image && !isDocumentFile(file)) {
+        toast(`不支持的文件：${file.name}`, 'bad', 4000);
+        continue;
+      }
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        toast(`${file.name} 超过 25 MB`, 'bad', 4200);
+        continue;
+      }
+      if (total + file.size > MAX_ATTACHMENTS_TOTAL) {
+        toast('附件总大小超过 50 MB', 'bad', 4200);
+        break;
+      }
+      total += file.size;
+      w.attachments.push({
+        localId: `att-local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        name: file.name,
+        mime: file.type || '',
+        size: file.size,
+        kind: image ? 'image' : 'file',
+        file,
+        preview: image ? URL.createObjectURL(file) : '',
+      });
+      changed = true;
+    }
+    if (changed) renderAttachments(w);
+  }
+
+  function removeAttachment(w, index) {
+    const att = (w.attachments || [])[index];
+    if (att && att.preview) URL.revokeObjectURL(att.preview);
+    w.attachments.splice(index, 1);
+    renderAttachments(w);
+  }
+
+  function clearAttachments(w) {
+    // 发送成功后清空待发送区；预览 URL 留给乐观消息继续显示，页面刷新后自然释放。
+    w.attachments = [];
+    renderAttachments(w);
+  }
+
+  async function attachmentPayloads(list) {
+    const out = [];
+    for (const a of list || []) {
+      let data = '';
+      if (a.file) {
+        data = bytesToBase64(await a.file.arrayBuffer());
+      }
+      if (!data) continue;
+      out.push({ name: a.name, mime: a.mime || '', size: a.size || 0, data });
+    }
+    return out;
+  }
+
+  function bytesToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
   }
 
   function thinkingOptions(modelCode, current) {
@@ -1660,6 +2739,7 @@
       if (btn && body) btn.hidden = nearBottom(body);
     });
     api(`/conversations/${encodeURIComponent(w.convId)}/read`, { method: 'POST' }).catch(() => { /* 忽略 */ });
+    refreshTeamTasks();
   }
 
   function showChat(show) {
@@ -1670,6 +2750,39 @@
     if (canvas) canvas.classList.toggle('chat-open', !!show);
     document.body.classList.toggle('chat-open', !!show);
     if (show && S.activeWin) activateView(S.activeWin);
+    refreshTeamTasks();
+  }
+
+  async function refreshTeamTasks() {
+    const el = $('#teamTaskFloat');
+    if (!el) return;
+    const w = S.activeWin;
+    const shell = $('#chatShellV3');
+    if (!w || !w.isGroup || w.floating || !shell || shell.hidden) {
+      el.hidden = true;
+      return;
+    }
+    try {
+      const data = await api(`/conversations/${encodeURIComponent(w.convId)}/runs?limit=30`);
+      const runs = (Array.isArray(data) ? data : (data && data.items) || [])
+        .filter((r) => r && r.target_role_id
+          && ['queued', 'running'].includes(String(r.status || '')));
+      if (!runs.length) { el.hidden = true; return; }
+      el.innerHTML = `<div class="ttf-head"><span class="dot run"></span><b>后台成员</b><span class="n">${runs.length}</span></div>
+        <div class="ttf-list">${runs.map((r) => {
+          const role = S.roles.find((x) => x.id === r.target_role_id) || null;
+          const name = role ? role.name : (r.role_name || r.target_role_id);
+          const status = r.status === 'running' ? '执行中' : '排队中';
+          return `<div class="ttf-item">
+            ${av(name || '成', 'xs round', role ? role.avatar : '')}
+            <div class="ttf-main"><b>${h(name || '成员')}</b><span>${h(status)} · ${h((r.content || '').slice(0, 60))}</span><small>${h(shortTime(r.started_at || r.created_at || ''))}</small></div>
+            <span class="ttf-dot${r.status === 'running' ? ' running' : ''}"></span>
+          </div>`;
+        }).join('')}</div>`;
+      el.hidden = false;
+    } catch {
+      el.hidden = true;
+    }
   }
 
   function menuAt(anchor, items) {
@@ -1694,6 +2807,7 @@
     S.activeWin = rest.length ? rest[Math.max(0, Math.min(idx, rest.length - 1))] : null;
     if (S.activeWin) { activateView(S.activeWin); showChat(true); }
     else showChat(false);
+    refreshTeamTasks();
     renderList();
     renderCanvas();
   }
@@ -1769,6 +2883,12 @@
     const jump = $('[data-scroll-bottom]', el);
     if (jump) jump.addEventListener('click', () => scrollBottom(body, true));
     syncScrollButton();
+    body.addEventListener('click', (e) => {
+      const toggle = e.target.closest('[data-att-toggle]');
+      if (!toggle) return;
+      const card = toggle.closest('.att-card');
+      if (card) toggleAttPreview(card);
+    });
     $('.win-body', el).addEventListener('contextmenu', (e) => {
       const msgEl = e.target.closest('.msg');
       if (!msgEl) return;
@@ -1784,6 +2904,8 @@
     });
     $('[data-close]', el).addEventListener('click', (e) => { e.stopPropagation(); closeWin(w); });
     $('[data-bind-ws]', el).addEventListener('click', () => bindWorkspace(w));
+    const graphBtn = $('[data-conv-graph]', el);
+    if (graphBtn) graphBtn.addEventListener('click', (e) => { e.stopPropagation(); openAgentCanvas(w); });
     const infoBtn = $('[data-conv-info]', el);
     if (infoBtn) infoBtn.addEventListener('click', (e) => { e.stopPropagation(); openConversationInfo(w); });
     const moreBtn = $('[data-conv-more]', el);
@@ -1800,18 +2922,44 @@
     });
     ta.addEventListener('input', () => { autoGrow(ta); updateMention(w); updateSlash(w); });
     ta.addEventListener('blur', () => setTimeout(() => hideMention(w), 150));
+    ta.addEventListener('paste', (e) => {
+      const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
+      if (!files.length) return;
+      e.preventDefault();
+      addAttachments(w, files);
+    });
     autoGrow(ta);
     const temp = $('[data-temp-role]', el);
     if (temp) temp.addEventListener('click', () => createTempRole(w));
     const fileInput = $('.file-input', el);
     $('.attach', el).addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', () => addAttachments(w, [...fileInput.files]));
+    fileInput.addEventListener('change', () => {
+      addAttachments(w, [...fileInput.files]);
+      fileInput.value = '';
+    });
+    const composerBox = $('.composer .box', el);
+    if (composerBox) {
+      composerBox.addEventListener('dragover', (e) => {
+        if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+        e.preventDefault();
+        composerBox.classList.add('drag-over');
+      });
+      composerBox.addEventListener('dragleave', (e) => {
+        if (!composerBox.contains(e.relatedTarget)) composerBox.classList.remove('drag-over');
+      });
+      composerBox.addEventListener('drop', (e) => {
+        if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+        e.preventDefault();
+        composerBox.classList.remove('drag-over');
+        addAttachments(w, e.dataTransfer.files);
+      });
+    }
     $('.attach-bar', el).addEventListener('click', (e) => {
       const rm = e.target.closest('[data-attach-remove]');
       if (!rm) return;
-      w.attachments.splice(Number(rm.dataset.attachRemove), 1);
-      renderAttachments(w);
+      removeAttachment(w, Number(rm.dataset.attachRemove));
     });
+    syncAttachAvailability(w);
     const modelSel = $('[data-model]', el);
     if (modelSel) modelSel.addEventListener('change', async () => {
       try {
@@ -1819,8 +2967,20 @@
           method: 'PUT', body: JSON.stringify({ model_code: modelSel.value || '' }),
         });
         w.conv.model_code = modelSel.value || '';
+        if (modelSel.value) {
+          const profile = modelProfile(w.conv.model_code);
+          w.conv.vision = !!(profile && (profile.effective_vision ?? profile.vision));
+        } else {
+          delete w.conv.vision;
+        }
         w.think = '';
         syncThinking(w);
+        syncAttachAvailability(w);
+        if (!supportsVision(w) && (w.attachments || []).some((a) => a.kind === 'image')) {
+          w.attachments = w.attachments.filter((a) => a.kind !== 'image');
+          renderAttachments(w);
+          toast('新模型不支持图片，已移除待发送的图片', 'bad', 4200);
+        }
         toast('模型已切换', 'ok', 1500);
       } catch (err) { toast(err.message, 'bad'); }
     });
@@ -1875,7 +3035,7 @@
       const hint = w.kind === '群聊'
         ? '发一条消息开始，或者 @ 成员 / 输入 / 命令'
         : '发一条消息开始，或者输入 / 命令';
-      box.innerHTML = `<div class="chat-empty">${w.isGlobal ? gaAvatar('round') : av(w.title || 'A', w.kind === '群聊' ? '' : 'round')}<b>${h(w.title)}</b><span>${h(hint)}</span></div>`;
+      box.innerHTML = `<div class="chat-empty">${w.isGlobal ? gaAvatar('round') : av(w.title || 'A', w.kind === '群聊' ? '' : 'round', convAvatar(w.conv))}<b>${h(w.title)}</b><span>${h(hint)}</span></div>`;
       scroller.dataset.stick = stick ? '1' : '0';
       scroller.dataset.freeze = '0';
       return;
@@ -1891,6 +3051,15 @@
   }
 
   function messageNode(m) {
+    if (m.kind === 'clear_context') {
+      const el = document.createElement('div');
+      el.className = 'ctx-clear';
+      el.dataset.msgId = m.id || '';
+      el.innerHTML = `<span class="ctx-clear-line"></span>
+        <span class="ctx-clear-copy"><b>上下文已清空</b><span>此前的消息仍保留在历史中，模型不会再读取它们</span></span>
+        <span class="ctx-clear-line"></span>`;
+      return el;
+    }
     if (m.by === 'system') {
       const el = document.createElement('div');
       el.className = 'sys';
@@ -1899,10 +3068,20 @@
       return el;
     }
     if (m.by === 'assistant') return assistantNode(m);
+    if (m.kind === 'team_mention') {
+      const el = document.createElement('div');
+      el.className = 'msg assistant';
+      el.dataset.msgId = m.id || '';
+      const name = m.role_name || '主持';
+      el.innerHTML = `${av(name, 'round', m.role_avatar || '')}
+        <div class="msg-body"><div class="msg-who"><b>${h(name)}</b><span class="msg-meta">@ 指派</span></div>
+        <div class="bubble handoff-bubble">${h(m.content || '')}</div></div>`;
+      return el;
+    }
     const el = document.createElement('div');
     el.className = 'msg user';
     el.dataset.msgId = m.id || '';
-    el.innerHTML = `${av('我', 'round')}<div class="msg-body"><div class="msg-who">我</div><div class="bubble">${h(m.content || '')}</div>${attachmentsHtml(m.attachments)}</div>`;
+    el.innerHTML = `${av('我', 'round')}<div class="msg-body"><div class="msg-who">我</div>${m.content ? `<div class="bubble">${h(m.content)}</div>` : ''}${attachmentsHtml(m.attachments)}</div>`;
     return el;
   }
 
@@ -2034,10 +3213,43 @@
     return `<div class="proc-note"><b>${label}</b>${step.text ? ` · ${h(firstLine(step.text, 160))}` : ''}</div>`;
   }
 
-  // 历史消息：保持 trace 顺序，不再把所有思考 / 工具折到顶部。
-  function assistantFlowHtml(entries) {
+  // 完成 / 失败的一轮：最终答复留在外面，其余步骤按发生顺序折进「过程」。
+  function splitAssistantEntries(entries) {
+    let final = null;
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      if (entries[i].kind === 'text' && entries[i].final) { final = entries[i]; break; }
+    }
+    if (!final) {
+      for (let i = entries.length - 1; i >= 0; i -= 1) {
+        if (entries[i].kind === 'text' && String(entries[i].text || '').trim()) {
+          entries[i].final = true;
+          final = entries[i];
+          break;
+        }
+      }
+    }
+    return { process: entries.filter((entry) => entry !== final), final };
+  }
+
+  function processFoldHtml(m, entries, open = false) {
     if (!entries.length) return '';
-    return `<div class="turn-flow">${entries.map((step) => procStepHtml(step)).join('')}</div>`;
+    const thoughts = entries.filter((x) => x.kind === 'thinking').length;
+    const tools = entries.filter((x) => x.kind === 'tool').length;
+    const meta = [];
+    if (thoughts) meta.push(`思考 ${thoughts}`);
+    if (tools) meta.push(`工具 ${tools}`);
+    const ms = durationText(m.duration_ms);
+    if (ms) meta.push(ms);
+    if (m.interrupted) meta.push('已停止');
+    if (m.error) meta.push('失败');
+    return `<details class="turn-fold history-fold"${open ? ' open' : ''}>
+      <summary class="turn-fold-bar">
+        <span class="fold-caret">›</span>
+        <span class="turn-fold-title">过程</span>
+        <span class="turn-fold-meta">${h(meta.join(' · '))}</span>
+      </summary>
+      <div class="turn-fold-body">${entries.map((step) => procStepHtml(step)).join('')}</div>
+    </details>`;
   }
 
   function assistantNode(m) {
@@ -2046,15 +3258,19 @@
     el.dataset.msgId = m.id || '';
     const entries = traceEntries(m);
     markAssistantFinal(m, entries);
+    const { process, final } = splitAssistantEntries(entries);
     const name = m.role_name || 'AtlasX';
+    const roleSub = [m.role_title, m.role_department].filter(Boolean).join(' · ');
     const meta = [];
     const ms = durationText(m.duration_ms);
     if (ms) meta.push(ms);
     if (m.interrupted) meta.push('已停止');
     if (m.error) meta.push('失败');
-    el.innerHTML = `${av(name, 'round')}
-      <div class="msg-body"><div class="msg-who"><b>${h(name)}</b>${meta.length ? `<span class="msg-meta">${h(meta.join(' · '))}</span>` : ''}</div>
-      ${assistantFlowHtml(entries)}
+    el.innerHTML = `${av(name, 'round', m.role_avatar || '')}
+      <div class="msg-body"><div class="msg-who"><b>${h(name)}</b>${roleSub ? `<span class="msg-role">${h(roleSub)}</span>` : ''}${meta.length ? `<span class="msg-meta">${h(meta.join(' · '))}</span>` : ''}</div>
+      ${processFoldHtml(m, process, !final)}
+      ${final ? procStepHtml(final) : ''}
+      ${attachmentsHtml(m.attachments)}
       ${m.error ? `<div class="run-error">${h(m.error)}</div>` : ''}</div>`;
     return el;
   }
@@ -2092,27 +3308,151 @@
     el.innerHTML = toolHtml(t);
   }
 
-  // 轻量 Markdown：先转义再渲染；支持代码块 / 行内代码 / 标题 / 粗体 / 列表 / 引用。
+  // Markdown → HTML：先转义再按块解析，支持代码块 / 行内代码 / 标题 / 粗斜体 /
+  // 删除线 / 列表 / 引用 / 分割线 / 链接 / 图片 / 表格。会话与附件预览共用。
+  function inlineMd(raw) {
+    const codes = [];
+    let s = h(raw).replace(/`([^`\n]+)`/g, (_, code) => {
+      codes.push(code);
+      return `\u0001${codes.length - 1}\u0001`;
+    });
+    s = s
+      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[\s(（])__([^_\n]+)__/g, '$1<strong>$2</strong>')
+      .replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
+      .replace(/(^|[\s(（])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+      .replace(/(^|[\s(（])_([^_\n]+)_/g, '$1<em>$2</em>');
+    s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
+      (_, alt, src) => `<img src="${src}" alt="${alt}" loading="lazy" />`);
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
+      if (!/^(https?:|mailto:|#|\/)/i.test(url)) return m;
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    });
+    s = s.replace(/\u0001(\d+)\u0001/g, (_, i) => `<code>${codes[Number(i)]}</code>`);
+    return s;
+  }
+
+  function mdPre(code, lang) {
+    const attr = lang ? ` data-lang="${h(lang)}"` : '';
+    return `<pre class="md-pre"${attr}><code>${h(code)}</code></pre>`;
+  }
+
+  function isTableSeparator(line) {
+    return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line);
+  }
+
+  function tableCells(line) {
+    let s = line.trim();
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|')) s = s.slice(0, -1);
+    return s.split('|').map((c) => c.trim());
+  }
+
   function md(text) {
-    return String(text || '').split(/```/).map((seg, i) => {
-      if (i % 2 === 1) {
-        const nl = seg.indexOf('\n');
-        return `<pre class="md-pre">${h(nl >= 0 ? seg.slice(nl + 1) : seg)}</pre>`;
+    const src = String(text || '').replace(/\r\n?/g, '\n');
+    const lines = src.split('\n');
+    const out = [];
+    let para = [];
+    let i = 0;
+
+    const flush = () => {
+      if (!para.length) return;
+      out.push(`<p>${para.map(inlineMd).join('<br>')}</p>`);
+      para = [];
+    };
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      const fence = line.match(/^\s*(```+|~~~+)\s*([\w+.#-]*)\s*$/);
+      if (fence) {
+        flush();
+        const marker = fence[1][0];
+        const lang = fence[2] || '';
+        const buf = [];
+        i += 1;
+        while (i < lines.length && !new RegExp(`^\\s*${marker}{3,}\\s*$`).test(lines[i])) {
+          buf.push(lines[i]);
+          i += 1;
+        }
+        i += 1;
+        out.push(mdPre(buf.join('\n'), lang));
+        continue;
       }
-      let t = h(seg);
-      t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-      t = t.replace(/^### (.+)$/gm, '<h4>$1</h4>')
-        .replace(/^## (.+)$/gm, '<h3>$1</h3>')
-        .replace(/^# (.+)$/gm, '<h2>$1</h2>');
-      t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-      t = t.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-      t = t.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
-      t = t.replace(/(?:<li>.*<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`);
-      t = t.replace(/^\d+\. (.+)$/gm, '<li class="ord">$1</li>');
-      t = t.replace(/(?:<li class="ord">.*<\/li>\n?)+/g, (m) => `<ol>${m.replace(/ class="ord"/g, '')}</ol>`);
-      t = t.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
-      return t.replace(/\n/g, '<br>');
-    }).join('');
+
+      if (!line.trim()) { flush(); i += 1; continue; }
+
+      const heading = line.match(/^\s*(#{1,4})\s+(.+)$/);
+      if (heading) {
+        flush();
+        const level = heading[1].length;
+        out.push(`<h${level}>${inlineMd(heading[2].replace(/\s+#+\s*$/, ''))}</h${level}>`);
+        i += 1;
+        continue;
+      }
+
+      if (/^\s*([-*_])\s*\1\s*\1[\s\-*_]*$/.test(line)) {
+        flush();
+        out.push('<hr>');
+        i += 1;
+        continue;
+      }
+
+      if (/^\s*>/.test(line)) {
+        flush();
+        const buf = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) {
+          buf.push(lines[i].replace(/^\s*>\s?/, ''));
+          i += 1;
+        }
+        out.push(`<blockquote>${buf.map(inlineMd).join('<br>')}</blockquote>`);
+        continue;
+      }
+
+      if (/^\s*[-*+]\s+/.test(line)) {
+        flush();
+        const items = [];
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*[-*+]\s+/, ''));
+          i += 1;
+        }
+        out.push(`<ul>${items.map((x) => `<li>${inlineMd(x)}</li>`).join('')}</ul>`);
+        continue;
+      }
+
+      if (/^\s*\d+[.)]\s+/.test(line)) {
+        flush();
+        const items = [];
+        while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*\d+[.)]\s+/, ''));
+          i += 1;
+        }
+        out.push(`<ol>${items.map((x) => `<li>${inlineMd(x)}</li>`).join('')}</ol>`);
+        continue;
+      }
+
+      if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        flush();
+        const head = tableCells(line);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
+          rows.push(tableCells(lines[i]));
+          i += 1;
+        }
+        out.push('<div class="md-table-wrap"><table><thead><tr>'
+          + head.map((c) => `<th>${inlineMd(c)}</th>`).join('')
+          + '</tr></thead><tbody>'
+          + rows.map((r) => '<tr>' + r.map((c) => `<td>${inlineMd(c)}</td>`).join('') + '</tr>').join('')
+          + '</tbody></table></div>');
+        continue;
+      }
+
+      para.push(line);
+      i += 1;
+    }
+    flush();
+    return out.join('');
   }
 
   function nearBottom(box, threshold = 96) {
@@ -2145,17 +3485,84 @@
   }
 
   /* ── 发送 / 流 ─────────────────────────────────────────── */
+  async function compactConversation(w) {
+    if (!w) return;
+    try {
+      const out = await api(`/conversations/${encodeURIComponent(w.convId)}/compact`, { method: 'POST' });
+      if (out && out.compressed) {
+        toast(`上下文已压缩：${out.before_tokens} → ${out.after_tokens} tokens`, 'ok', 4500);
+      } else {
+        const reason = (out && out.reason) || '';
+        const hint = reason === 'under' ? '上下文还很短，暂时不用压缩'
+          : reason === 'no_window' ? '当前模型没有配置上下文窗口'
+          : '没有可折叠的历史';
+        toast(hint, 'ok', 3000);
+      }
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  // 从正文解析 @成员名：随 run 落库，队列重放 / 非圆桌模式也能直接点名到人。
+  function mentionedNames(text) {
+    const out = [];
+    const re = /@([A-Za-z0-9_\-\u4e00-\u9fff]{1,32})/g;
+    let m;
+    while ((m = re.exec(String(text || ''))) !== null) {
+      const name = m[1].trim();
+      if (name && !out.includes(name)) out.push(name);
+      if (out.length >= 16) break;
+    }
+    return out;
+  }
+
   async function send(w) {
     const ta = $('.composer textarea', w.el);
     const text = String(ta.value || '').trim();
-    if (!text) return;
+    if (!text && !(w.attachments || []).length) return;
+    const action = /^\/(new|compact|clear|work)(?:\s+([\s\S]*))?$/.exec(text);
+    if (action) {
+      ta.value = '';
+      autoGrow(ta);
+      if (action[1] === 'new') { newConversation(); return; }
+      if (action[1] === 'compact') { compactConversation(w); return; }
+      if (action[1] === 'clear') {
+        const scope = String(action[2] || '').trim().toLowerCase() === 'current'
+          ? 'current' : 'all';
+        try {
+          const out = await api(`/conversations/${encodeURIComponent(w.convId)}/clear`, {
+            method: 'POST', body: JSON.stringify({ scope }),
+          });
+          const conv = await api(`/conversations/${encodeURIComponent(w.convId)}`);
+          w.conv = conv;
+          renderHistory(w, conv.messages || [], true);
+          toast(scope === 'all'
+            ? `已清空 ${Number(out && out.cleared) || 0} 个会话的上下文（历史消息保留）`
+            : '当前会话上下文已清空（历史消息保留）', 'ok', 3000);
+        } catch (err) { toast(err.message, 'bad'); }
+        return;
+      }
+      if (action[1] === 'work') {
+        newWorkItem({
+          title: String(action[2] || '').trim(),
+          workspace_id: w.conv.bound_workspace_id || w.conv.workspace_id || null,
+          role_id: w.conv.role_id || null,
+          team_id: w.conv.team_id || null,
+          body: `来自会话「${w.title}」\n\n`,
+        });
+        return;
+      }
+    }
     const sendBtn = $('.send', w.el);
-    const attachments = w.attachments.map((a) => ({ ...a }));
+    const attachments = (w.attachments || []).map((a) => ({ ...a }));
+    const optimisticAtts = attachments.map((a, i) => ({
+      id: a.localId || `local-${i}`,
+      name: a.name, mime: a.mime, size: a.size, kind: a.kind,
+      url: a.preview || '', local: !a.preview,
+    }));
     sendBtn.disabled = true;
     ta.value = '';
     autoGrow(ta);
     const box = $('.msgs', w.el);
-    const userEl = messageNode({ by: 'user', content: text });
+    const userEl = messageNode({ by: 'user', content: text, attachments: optimisticAtts });
     box.appendChild(userEl);
     const live = document.createElement('div');
     live.className = 'msg assistant';
@@ -2171,16 +3578,18 @@
     scrollBottom(box, true);
     ta.focus();
     try {
+      const payloadAttachments = await attachmentPayloads(attachments);
       const run = await api(`/conversations/${encodeURIComponent(w.convId)}/messages/run`, {
         method: 'POST',
         body: JSON.stringify({
           content: text, mode: 'autonomous', auto_execute: w.perm === 'auto',
           thinking_level: w.think || '',
-          attachments: attachments.length ? attachments.map((a) => ({
-            name: a.name, mime: a.mime, size: a.size, data: a.data,
-          })) : undefined,
+          mentions: mentionedNames(text),
+          attachments: payloadAttachments.length ? payloadAttachments : undefined,
         }),
       });
+      // 发送成功后待发送区立即清空；会话区的乐观消息已经带上图片 / 文件卡片。
+      clearAttachments(w);
       // 本窗口没有在跑的 run → 直接跟这条；否则它已进队列，轮询等它开始。
       if (w.streamingNow || w.es) {
         w.queue = (run.queue || []).length ? (run.queue || []) : w.queue;
@@ -2190,6 +3599,12 @@
         startStream(w, run.id);
       }
     } catch (err) {
+      // 失败时撤回乐观消息与占位，把正文留在输入框，附件仍在待发送区。
+      userEl.remove();
+      live.remove();
+      w.live = null;
+      ta.value = text;
+      autoGrow(ta);
       paintError(w, err.message);
       sendBtn.disabled = false;
     }
@@ -2309,6 +3724,9 @@
       w.streamingNow = false;
       loadAll();
       loadAttention();
+      if (S.agentCanvasConv === w.convId && $('#agentCanvas') && !$('#agentCanvas').hidden) {
+        refreshAgentCanvas();
+      }
       setTimeout(() => pollQueue(w), 400);
       setTimeout(async () => {
         try {
@@ -2333,13 +3751,24 @@
       w.unread = true;
       markListDirty();
     }
+    if (evt.subagent_event) {
+      if (S.agentCanvasConv === w.convId && $('#agentCanvas') && !$('#agentCanvas').hidden) {
+        clearTimeout(S.agentCanvasRefreshTimer);
+        S.agentCanvasRefreshTimer = setTimeout(refreshAgentCanvas, 250);
+      }
+      return;
+    }
     if (!w.live) return;
     const host = w.live.flow || $('.live-flow', w.live.el);
     const box = $('.msgs', w.el);
     if (evt.start) {
       const who = $('.msg-who', w.live.el);
-      if (evt.role_name && who) who.innerHTML = `<b>${h(evt.role_name)}</b>`;
-      $('.avatar', w.live.el).outerHTML = av(evt.role_name || 'A', 'round');
+      const role = S.roles.find((r) => r.id === evt.role_id) || null;
+      const roleSub = role ? [role.title, role.department].filter(Boolean).join(' · ') : '';
+      if (evt.role_name && who) {
+        who.innerHTML = `<b>${h(evt.role_name)}</b>${roleSub ? `<span class="msg-role">${h(roleSub)}</span>` : ''}`;
+      }
+      $('.avatar', w.live.el).outerHTML = av(evt.role_name || 'A', 'round', role ? role.avatar : '');
       return;
     }
     if (evt.thinking !== undefined) {
@@ -2396,6 +3825,11 @@
       const el = $(`[data-approval="${evt.approval_decided.id}"]`, w.el);
       if (el) paintApproval(el, evt.approval_decided.status || 'denied');
       loadAttention();
+      return;
+    }
+    if (evt.org_update) {
+      loadAll();
+      toast('组织与部门已更新', 'ok', 1800);
       return;
     }
     if (evt.role_update) {
@@ -2611,41 +4045,193 @@
   }
 
   /* ── 角色 / 群组 ──────────────────────────────────────── */
-  async function openRoleDetail(roleId) {
-    const role = S.roles.find((r) => r.id === roleId);
+  function roleToolName(code) {
+    const tool = (S.toolCatalog || []).find((x) => x.code === code);
+    return tool ? (tool.name || tool.code) : code;
+  }
+
+  function renderRoleDrawer() {
+    const role = roleDrawerRole;
     if (!role) return;
-    const action = await modal({
-      title: role.name,
-      fields: `<div class="role-line">${h(role.expertise || '')}</div>
-        <div class="field"><label>人格 / 说明</label><div class="bubble" style="background:var(--bg-2)">${h(role.persona || '（未填写）')}</div></div>
-        <div class="field"><label>工具</label><div class="chips">${(role.tools || []).map((t) => `<span class="chip">${h(t)}</span>`).join('') || '<span class="chip">无</span>'}</div></div>
-        <div class="field"><label>模型</label><div class="role-line">${h(role.model_code || '跟随全局')}</div></div>`,
-      buttons: [
-        { label: '单聊', primary: true, value: 'chat' },
-        { label: '编辑', value: 'edit' },
-        ...(role.scope === 'temporary' ? [{ label: '存为持久角色', value: 'promote' }] : []),
-        { label: '删除', danger: true, value: 'delete' },
-      ],
-      read: (v) => ({ action: v }),
+    const drawer = $('#sideDrawer');
+    const body = $('#sideDrawerBody');
+    const foot = $('#sideDrawerFoot');
+    if (!drawer || !body || !foot) return;
+    const tools = Array.isArray(role.tools) ? role.tools : [];
+    const skills = S.roleSkillsRoleId === role.id ? S.roleSkills : null;
+    const temporary = role.scope === 'temporary';
+    $('#sideDrawerTitle').textContent = '角色资料';
+    $('#sideDrawerSub').textContent = `${roleLabel(role) || '角色'} · ${temporary ? '临时角色' : '持久角色'}`;
+    body.innerHTML = `<div class="group-identity">
+      ${av(role.name || '角', 'round', role.avatar)}
+      <div class="group-identity-main">
+        <div class="role-detail-name">${h(role.name || '角色')} <span class="tag ${temporary ? 'tmp' : ''}">${temporary ? '临时' : '持久'}</span></div>
+        <div class="role-line"><b>${h(role.title || '未填写岗位')}</b></div>
+        <div class="role-line">${role.department ? `部门：${h(role.department)}` : '<span class="role-warn">未安排部门</span>'}</div>
+        <div class="role-line">${h(role.expertise || '没有填写专长')}</div>
+        <div class="role-line mono">模型：${h(role.model_code || '未指定')}</div>
+      </div>
+    </div>
+    <section class="group-section">
+      <div class="group-section-head"><h3>人格 / 工作方式</h3></div>
+      <div class="work-body">${md(role.persona || '（未填写）')}</div>
+    </section>
+    <section class="group-section">
+      <div class="group-section-head"><h3>工具权限</h3><span>${tools.length ? `${tools.length} 个工具` : '全部工具'}</span></div>
+      <div class="chips">${tools.map((t) => `<span class="chip" title="${h(t)}">${h(roleToolName(t))}</span>`).join('') || '<span class="chip">全部工具</span>'}</div>
+    </section>
+    <section class="group-section">
+      <div class="group-section-head"><h3>专属技能</h3><span>${skills ? `${skills.length} / 20` : '加载中…'}</span></div>
+      <p class="group-mode-hint">只属于「${h(role.name || '当前角色')}」；其他角色看不到，也不会出现在它们的技能清单里。可通过文件、图片、网页搜索等材料整理后创建。</p>
+      ${skills ? (skills.length ? `<div class="role-skill-list">${skills.map((s) => `<div class="role-skill-row">
+        <div class="role-skill-main"><b>${h(s.name)}</b><span>${h(s.description || '无描述')}</span></div>
+        <button class="iconbtn" type="button" data-role-skill-del="${h(s.id)}" title="删除技能" aria-label="删除技能">×</button>
+      </div>`).join('')}</div>` : '<div class="group-empty">还没有专属技能</div>') : ''}
+      <div class="avatar-actions">
+        <button class="btn small" type="button" data-role-skill-new>新建专属技能</button>
+        <button class="btn small" type="button" data-role-skill-merge${skills && skills.length >= 2 ? '' : ' disabled'}>合并所选…</button>
+      </div>
+    </section>
+    <section class="group-section">
+      <div class="group-section-head"><h3>角色信息</h3></div>
+      <div class="work-meta" style="border:0;padding:0">
+        <span>ID <b>${h(role.id)}</b></span>
+        <span>来源 <b>${h(role.source || 'user')}</b></span>
+        <span>创建 <b>${h(role.created_at || '')}</b></span>
+      </div>
+    </section>
+    ${role.system ? '' : `<section class="group-section group-danger">
+      <div class="group-section-head"><h3>删除角色</h3></div>
+      <p class="group-mode-hint">只删除角色本身，已有会话保留；临时角色删除后不可恢复。</p>
+      <button class="btn danger" type="button" data-role-delete>删除角色</button>
+    </section>`}`;
+    foot.innerHTML = `<button class="btn primary" type="button" data-role-chat>单聊</button>
+      <button class="btn" type="button" data-role-edit>编辑</button>
+      <button class="btn" type="button" data-role-superagent>新建工单</button>
+      ${temporary ? '<button class="btn" type="button" data-role-promote>存为持久角色</button>' : ''}
+      <span class="spacer"></span><button class="btn" type="button" data-role-close>关闭</button>`;
+    const newSkill = $('[data-role-skill-new]', body);
+    if (newSkill) newSkill.addEventListener('click', () => openRoleSkillEditor(role));
+    const mergeSkill = $('[data-role-skill-merge]', body);
+    if (mergeSkill) mergeSkill.addEventListener('click', () => mergeRoleSkills(role));
+    $$('[data-role-skill-del]', body).forEach((el) => {
+      el.addEventListener('click', () => deleteRoleSkill(role, el.dataset.roleSkillDel));
     });
-    if (!action) return;
-    if (action.action === 'chat') return openRoleChat(role.id);
-    if (action.action === 'edit') return openRoleEditor(role);
-    if (action.action === 'promote') {
-      try {
-        await api(`/roles/${encodeURIComponent(role.id)}/promote`, { method: 'POST' });
-        await loadAll(); toast('已存为持久角色', 'ok');
-      } catch (err) { toast(err.message, 'bad'); }
-      return;
+    drawer.hidden = false;
+    const scrim = $('#drawerScrim');
+    if (scrim) scrim.hidden = false;
+  }
+
+  function openRoleDetail(roleId) {
+    const role = S.roles.find((r) => r.id === roleId);
+    if (!role) { toast('角色不存在', 'bad'); return; }
+    roleDrawerRole = role;
+    S.roleSkills = [];
+    S.roleSkillsRoleId = null;
+    // 工具显示名按需加载，不阻塞抽屉打开。
+    ensureToolCatalog().then(() => renderRoleDrawer()).catch(() => {});
+    renderRoleDrawer();
+    loadRoleSkills(role.id);
+  }
+
+  async function loadRoleSkills(roleId) {
+    try {
+      const data = await api(`/app/skills?role_id=${encodeURIComponent(roleId)}&include_global=false`);
+      S.roleSkills = data.items || [];
+      S.roleSkillsRoleId = roleId;
+      if (roleDrawerRole && roleDrawerRole.id === roleId) renderRoleDrawer();
+    } catch (err) {
+      S.roleSkills = [];
+      S.roleSkillsRoleId = roleId;
+      if (roleDrawerRole && roleDrawerRole.id === roleId) renderRoleDrawer();
+      toast(err.message, 'bad');
     }
-    if (action.action === 'delete') {
-      if (!confirm(`删除角色「${role.name}」？`)) return;
-      try {
-        await api(`/roles/${encodeURIComponent(role.id)}`, { method: 'DELETE' });
-        await loadAll(); toast('角色已删除', 'ok');
-      } catch (err) { toast(err.message, 'bad'); }
-    }
-    return null;
+  }
+
+  async function openRoleSkillEditor(role) {
+    const saved = await modal({
+      title: `为「${role.name || '角色'}」新建专属技能`,
+      fields: `<div class="field"><label>技能名称</label><input class="input" id="rsName" placeholder="例如：合同条款审阅" /></div>
+        <div class="field"><label>一句话描述</label><input class="input" id="rsDesc" placeholder="什么时候用、能做什么" /></div>
+        <div class="field"><label>SKILL.md 正文</label><textarea class="input mono" id="rsContent" rows="12" placeholder="适用场景、步骤、检查项、注意事项……">${h('')}</textarea></div>
+        <div class="hintline">只能由该角色使用；可先用文件、图片或网页搜索整理材料，再把结论写进正文。</div>`,
+      read: () => ({
+        name: $('#rsName').value.trim(),
+        description: $('#rsDesc').value.trim(),
+        content: $('#rsContent').value.trim(),
+      }),
+    });
+    if (!saved) return;
+    if (!saved.name || !saved.content) { toast('技能名称和正文不能为空', 'bad'); return; }
+    try {
+      await api('/app/skills', {
+        method: 'POST', body: JSON.stringify({ ...saved, role_id: role.id }),
+      });
+      await loadRoleSkills(role.id);
+      toast('专属技能已创建', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function mergeRoleSkills(role) {
+    const skills = S.roleSkillsRoleId === role.id ? S.roleSkills : [];
+    if (skills.length < 2) { toast('至少需要 2 个专属技能才能合并', 'bad'); return; }
+    const saved = await modal({
+      title: `合并「${role.name || '角色'}」的专属技能`,
+      fields: `<div class="field"><label>选择要合并的技能（至少 2 个）</label>
+          <div class="role-skill-picker">${skills.map((s) => `<label class="role-skill-choice"><input type="checkbox" data-rs-pick="${h(s.id)}" /> <span>${h(s.name)}</span><small>${h(s.description || '')}</small></label>`).join('')}</div>
+        </div>
+        <div class="field"><label>合并后的名称</label><input class="input" id="rsMergeName" placeholder="例如：综合审阅技能" /></div>
+        <div class="field"><label>合并后的描述</label><input class="input" id="rsMergeDesc" placeholder="合并后的适用场景" /></div>
+        <div class="hintline">来源技能会被删除，合并后的技能仍只属于该角色。</div>`,
+      read: () => ({
+        skill_ids: $$('[data-rs-pick]:checked').map((el) => el.dataset.rsPick),
+        name: $('#rsMergeName').value.trim(),
+        description: $('#rsMergeDesc').value.trim(),
+      }),
+    });
+    if (!saved) return;
+    if (!saved.name) { toast('合并后的名称不能为空', 'bad'); return; }
+    if (saved.skill_ids.length < 2) { toast('至少选择 2 个技能', 'bad'); return; }
+    try {
+      await api('/app/skills/merge', {
+        method: 'POST', body: JSON.stringify({ ...saved, role_id: role.id }),
+      });
+      await loadRoleSkills(role.id);
+      toast('技能已合并', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function deleteRoleSkill(role, skillId) {
+    const skill = (S.roleSkills || []).find((s) => s.id === skillId);
+    if (!confirm(`删除专属技能「${skill ? skill.name : skillId}」？`)) return;
+    try {
+      await api(`/app/skills/${encodeURIComponent(skillId)}`, { method: 'DELETE' });
+      await loadRoleSkills(role.id);
+      toast('技能已删除', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function promoteRoleDrawer() {
+    if (!roleDrawerRole) return;
+    try {
+      await api(`/roles/${encodeURIComponent(roleDrawerRole.id)}/promote`, { method: 'POST' });
+      await loadAll();
+      const fresh = S.roles.find((r) => r.id === roleDrawerRole.id);
+      if (fresh) { roleDrawerRole = fresh; renderRoleDrawer(); }
+      toast('已存为持久角色', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function deleteRoleDrawer() {
+    if (!roleDrawerRole) return;
+    if (roleDrawerRole.system) { toast('默认角色不能删除', 'bad'); return; }
+    if (!confirm(`删除角色「${roleDrawerRole.name}」？`)) return;
+    try {
+      await api(`/roles/${encodeURIComponent(roleDrawerRole.id)}`, { method: 'DELETE' });
+      closeSideDrawer();
+      await loadAll();
+      toast('角色已删除', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
   }
 
   async function ensureToolCatalog() {
@@ -2677,18 +4263,64 @@
       </div>`;
   }
 
-  async function openRoleEditor(role) {
+  async function openDeptEditor(dept, parentId) {
+    const isNew = !dept;
+    const exclude = dept ? deptSubtree(dept.id) : new Set();
+    const parent = isNew ? (parentId || '') : (dept.parent_id || '');
+    const saved = await modal({
+      title: isNew ? '新建部门' : `编辑部门「${dept.name}」`,
+      fields: `<div class="field"><label>部门头像</label>${avatarFieldHtml('dAvatar', 'department', dept ? dept.avatar : '', dept ? dept.name : '')}</div>
+        <div class="field"><label>部门名称</label><input class="input" id="dName" value="${h(dept ? dept.name : '')}" placeholder="例如：产品部" /></div>
+        <div class="field"><label>上级部门</label><select class="input" id="dParent">${deptOptions(parent, { exclude, emptyLabel: '无（根部门）' })}</select>
+          <small class="role-line">选择某个部门即成为它的子部门；部门支持多层。</small></div>`,
+      onMount: () => bindAvatarField('dAvatar', 'department', dept ? dept.name : ''),
+      read: () => ({
+        name: $('#dName').value.trim(),
+        avatar: $('#dAvatar').value || '',
+        parent_id: $('#dParent').value || null,
+      }),
+    });
+    if (!saved) return;
+    if (!saved.name) { toast('部门名称不能为空', 'bad'); return; }
+    try {
+      if (isNew) await api('/departments', { method: 'POST', body: JSON.stringify(saved) });
+      else await api(`/departments/${encodeURIComponent(dept.id)}`, { method: 'PATCH', body: JSON.stringify(saved) });
+      await loadAll();
+      toast(isNew ? '部门已创建' : '部门已保存', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function deleteDepartment(dept) {
+    if (!confirm(`删除部门「${dept.name}」？\n子部门会移到上一级，部门内角色会变成「未安排」。`)) return;
+    try {
+      const out = await api(`/departments/${encodeURIComponent(dept.id)}`, { method: 'DELETE' });
+      if (S.roleDept === dept.id) S.roleDept = 'all';
+      await loadAll();
+      const moved = Number(out && out.children_moved) || 0;
+      const unassigned = Number(out && out.roles_unassigned) || 0;
+      toast(`部门已删除${moved ? ` · ${moved} 个子部门已上移` : ''}${unassigned ? ` · ${unassigned} 个角色转为未安排` : ''}`, 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function openRoleEditor(role, preset = {}) {
     const isNew = !role;
     const catalog = await ensureToolCatalog();
     const modelCode = (role && role.model_code) || '';
-    const modelOptions = [`<option value="">跟随全局</option>`]
+    const currentDept = role ? (role.department_id || '') : (preset.department_id || '');
+    const modelOptions = [`<option value="">未指定（使用默认）</option>`]
       .concat(S.models.map((m) => `<option value="${h(m.code)}"${m.code === modelCode ? ' selected' : ''}>${h(m.name || m.code)} · ${h(m.code)}</option>`));
     if (modelCode && !S.models.some((m) => m.code === modelCode)) {
       modelOptions.push(`<option value="${h(modelCode)}" selected>${h(modelCode)}</option>`);
     }
     const saved = await modal({
       title: isNew ? '新建角色' : `编辑「${role.name}」`,
-      fields: `<div class="field"><label>名字</label><input class="input" id="rName" value="${h(role ? role.name : '')}" /></div>
+      fields: `<div class="field"><label>角色头像</label>${avatarFieldHtml('rAvatar', 'role', role ? role.avatar : '', role ? role.name : '')}</div>
+        <div class="field"><label>名称（谁）</label><input class="input" id="rName" value="${h(role ? role.name : '')}" placeholder="例如：张三 / 审阅者" /></div>
+        <div class="field"><label>岗位（做什么）</label><input class="input" id="rTitle" value="${h(role ? role.title : '')}" placeholder="例如：后端工程师 / 合同审阅" /></div>
+        <div class="field"><label>所属部门 <span class="role-line">可留空 = 未安排</span></label>
+          <select class="input" id="rDept">${deptOptions(currentDept)}</select>
+          <small class="role-line">部门支持多级；在「组织与角色」里可以新建子部门。</small>
+        </div>
         <div class="field"><label>专长（一句话）</label><input class="input" id="rExpertise" value="${h(role ? role.expertise : '')}" /></div>
         <div class="field"><label>人格 / 工作方式</label><textarea class="input" id="rPersona">${h(role ? role.persona : '')}</textarea></div>
         <div class="field"><label>工具权限 <span class="role-line">不选 = 全部工具</span></label>
@@ -2696,9 +4328,10 @@
         </div>
         <div class="field"><label>模型档案</label>
           <select class="input" id="rModel">${modelOptions.join('')}</select>
-          <small class="role-line">留空则跟随全局模型。</small>
+          <small class="role-line">不指定时使用默认模型；指定后优先使用该角色的模型。</small>
         </div>`,
       onMount: () => {
+        bindAvatarField('rAvatar', 'role', role ? role.name : '');
         const picker = $('#rToolPicker');
         if (!picker) return;
         const count = $('#rToolCount');
@@ -2729,6 +4362,9 @@
         const fallback = $('#rTools');
         return {
           name: $('#rName').value.trim(),
+          avatar: $('#rAvatar').value || '',
+          title: $('#rTitle').value.trim(),
+          department_id: $('#rDept').value || null,
           expertise: $('#rExpertise').value.trim(),
           persona: $('#rPersona').value.trim(),
           tools: fallback
@@ -2747,68 +4383,475 @@
     } catch (err) { toast(err.message, 'bad'); }
   }
 
-  async function openGroupDetail(teamId) {
-    const team = S.teams.find((t) => t.id === teamId);
-    if (!team) return;
-    const members = new Set((team.members || []).map((m) => m.id));
+  /* ── 工单：工单弹框与动作 ───────────────────────── */
+  function workAssignFields(item = {}, opts = {}) {
+    const ws = item.workspace_id || (S.workPolicy && S.workPolicy.default_workspace_id) || '';
+    const role = item.role_id || (S.workPolicy && S.workPolicy.default_role_id) || '';
+    const team = item.team_id || (S.workPolicy && S.workPolicy.default_team_id) || '';
+    const options = (list, current, emptyLabel) => `<option value="">${emptyLabel}</option>` + list.map((x) =>
+      `<option value="${h(x.id)}"${x.id === current ? ' selected' : ''}>${h(x.name || x.id)}</option>`).join('');
+    const priority = opts.priority === false ? '' : `<div class="field"><label>优先级</label><label class="switch"><input type="checkbox" id="wPriority"${Number(item.priority || 0) > 0 ? ' checked' : ''} /><span class="track"></span><span class="switch-label">高优先级</span></label></div>`;
+    return `<div class="work-settings-grid">
+      <label class="field"><label>工作区</label><select class="input" id="wWorkspace">${options(S.workspaces, ws, '默认工作区')}</select></label>
+      <label class="field"><label>角色</label><select class="input" id="wRole">${options(S.roles, role, '默认角色')}</select></label>
+      <label class="field"><label>群组（可选）</label><select class="input" id="wTeam">${options(S.teams, team, '不绑定群组')}</select></label>
+      ${priority}
+    </div>`;
+  }
+
+  function readWorkAssign() {
+    return {
+      workspace_id: $('#wWorkspace').value || null,
+      role_id: $('#wRole').value || null,
+      team_id: $('#wTeam').value || null,
+      priority: $('#wPriority').checked ? 1 : 0,
+    };
+  }
+
+  async function newWorkItem(seed = {}) {
+    const fields = `<div class="field"><label>标题</label><input class="input" id="wTitle" value="${h(seed.title || '')}" placeholder="例如：修复登录超时" /></div>
+      <div class="field"><label>说明</label><textarea class="input" id="wBody" rows="5" placeholder="背景、验收标准、相关链接……">${h(seed.body || '')}</textarea></div>
+      ${workAssignFields(seed)}`;
     const saved = await modal({
-      title: `群组「${team.name}」`,
-      fields: `<div class="field"><label>群名</label><input class="input" id="gName" value="${h(team.name)}" /></div>
-        <div class="field"><label>协作方式</label>
-          <select class="input" id="gMode">
-            <option value="orchestrate"${team.mode === 'orchestrate' ? ' selected' : ''}>主持编排</option>
-            <option value="roundtable"${team.mode === 'roundtable' ? ' selected' : ''}>圆桌</option>
-            <option value="single"${team.mode === 'single' ? ' selected' : ''}>单角色</option>
-          </select></div>
-        <div class="field"><label>成员（从角色库选；可含临时角色）</label>
-          <div style="display:flex;flex-direction:column;gap:6px">
-          ${S.roles.map((r) => `<label class="member"><input type="checkbox" data-member="${h(r.id)}"${members.has(r.id) ? ' checked' : ''} />
-            ${av(r.name, 'round')}<span class="row-main"><span class="row-title">${h(r.name)}</span>
-            <span class="row-sub">${h(r.expertise || '')}</span></span>
-            <span class="tag ${r.scope === 'temporary' ? 'tmp' : ''}">${r.scope === 'temporary' ? '临时' : ''}</span></label>`).join('')}
-          </div></div>
-        <div class="hintline">群组不绑定工作区；每个会话在标题栏单独选择文件上下文。</div>`,
-      buttons: [
-        { label: '打开群聊', value: 'open' },
-        { label: '删除群组', danger: true, value: 'delete' },
-        { label: '保存', primary: true, value: 'save' },
-      ],
-      read: (v) => ({
-        action: v,
-        patch: {
-          name: $('#gName').value.trim(),
-          mode: $('#gMode').value,
-          members: $$('[data-member]').filter((x) => x.checked).map((x) => {
-            const r = S.roles.find((y) => y.id === x.dataset.member);
-            return { id: r.id, name: r.name, expertise: r.expertise };
-          }),
-        },
+      title: '新建工单',
+      fields,
+      read: () => ({
+        title: $('#wTitle').value.trim(),
+        body: $('#wBody').value.trim(),
+        ...readWorkAssign(),
       }),
     });
     if (!saved) return;
-    if (saved.action === 'open') return openGroupChat(team.id);
-    if (saved.action === 'delete') {
-      if (!confirm(`删除群组「${team.name}」？绑定的会话会退回单聊。`)) return;
-      try {
-        await api(`/teams/${encodeURIComponent(team.id)}`, { method: 'DELETE' });
-        await loadAll(); toast('群组已删除', 'ok');
-      } catch (err) { toast(err.message, 'bad'); }
-      return;
-    }
-    if (!saved.patch.name) { toast('群名不能为空', 'bad'); return; }
+    if (!saved.title) { toast('工单标题不能为空', 'bad'); return; }
     try {
-      await api(`/teams/${encodeURIComponent(team.id)}`, { method: 'PATCH', body: JSON.stringify(saved.patch) });
-      await loadAll(); toast('群组已保存', 'ok');
+      const item = await api('/work-items', { method: 'POST', body: JSON.stringify(saved) });
+      S.workSelected = item.id;
+      setSection('work');
+      await loadWorkItems();
+      openWorkDetail(item.id);
+      toast('工单已创建', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function editWorkItem(item) {
+    const saved = await modal({
+      title: '编辑工单',
+      fields: `<label class="field"><label>标题</label><input class="input" id="wTitle" value="${h(item.title || '')}" /></label>
+        <label class="field"><label>说明</label><textarea class="input" id="wBody" rows="6">${h(item.body || '')}</textarea></label>
+        <div class="work-settings-grid">
+          <label class="field"><label>状态</label><select class="input" id="wStatus">${Object.entries(WORK_STATUS).map(([id, label]) => `<option value="${id}"${item.status === id ? ' selected' : ''}>${label}</option>`).join('')}</select></label>
+        </div>
+        ${workAssignFields(item)}`,
+      read: () => ({
+        title: $('#wTitle').value.trim(),
+        body: $('#wBody').value.trim(),
+        status: $('#wStatus').value,
+        ...readWorkAssign(),
+      }),
+    });
+    if (!saved) return;
+    if (!saved.title) { toast('工单标题不能为空', 'bad'); return; }
+    try {
+      await api(`/work-items/${encodeURIComponent(item.id)}`, { method: 'PATCH', body: JSON.stringify(saved) });
+      await loadWorkItems();
+      toast('工单已更新', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function openWorkSettings() {
+    const policy = S.workPolicy || {};
+    const saved = await modal({
+      title: '工单策略',
+      fields: `<div class="work-settings-grid">
+        <label class="field"><label>运行模式</label><select class="input" id="wMode">
+          <option value="off"${policy.mode === 'off' ? ' selected' : ''}>关闭：只手动创建工单</option>
+          <option value="observe"${(!policy.mode || policy.mode === 'observe') ? ' selected' : ''}>观察：只记录，不自动派活</option>
+          <option value="auto"${policy.mode === 'auto' ? ' selected' : ''}>自动：新建工单后自动派活</option>
+        </select></label>
+        <label class="field"><label>新会话权限</label><select class="input" id="wPerm">
+          <option value="auto"${policy.permission_mode === 'auto' ? ' selected' : ''}>自动判断（高危才问）</option>
+          <option value="once"${policy.permission_mode === 'once' ? ' selected' : ''}>每次询问</option>
+          <option value="session"${policy.permission_mode === 'session' ? ' selected' : ''}>会话允许</option>
+          <option value="always"${policy.permission_mode === 'always' ? ' selected' : ''}>完全允许</option>
+        </select></label>
+      </div>
+      <div class="field"><label>默认执行上下文</label>${workAssignFields({ workspace_id: policy.default_workspace_id, role_id: policy.default_role_id, team_id: policy.default_team_id }, { priority: false })}</div>
+      <div class="field"><label>执行策略</label><label class="switch"><input type="checkbox" id="wAutoExecute"${policy.auto_execute ? ' checked' : ''} /><span class="track"></span><span class="switch-label">跳过常规确认直接执行（高风险仍受权限档位约束）</span></label></div>`,
+      read: () => ({
+        mode: $('#wMode').value,
+        permission_mode: $('#wPerm').value,
+        default_workspace_id: $('#wWorkspace').value || null,
+        default_role_id: $('#wRole').value || null,
+        default_team_id: $('#wTeam').value || null,
+        auto_execute: $('#wAutoExecute').checked,
+      }),
+    });
+    if (!saved) return;
+    try {
+      S.workPolicy = await api('/work-items/settings', { method: 'PUT', body: JSON.stringify(saved) });
+      await loadWorkItems();
+      toast('工单策略已保存', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function dispatchWork(item) {
+    try {
+      const out = await api(`/work-items/${encodeURIComponent(item.id)}/dispatch`, { method: 'POST' });
+      S.workSelected = out.id;
+      await loadWorkItems();
+      if (out.status === 'needs_attention') {
+        toast(out.attention_reason || '需要你处理', 'bad', 4000);
+      } else {
+        toast(out.conversation_id ? '已派活；需要你时会出现在「需要你」' : '已派活', 'ok', 2600);
+      }
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  function openWorkConversation(item) {
+    if (!item || !item.conversation_id) return;
+    closeSideDrawer();
+    setSection('conv');
+    openConversation(item.conversation_id);
+  }
+
+  async function patchWorkStatus(item, status) {
+    try {
+      await api(`/work-items/${encodeURIComponent(item.id)}`, {
+        method: 'PATCH', body: JSON.stringify({ status }),
+      });
+      await loadWorkItems();
+      toast(status === 'done' ? '工单已完成' : status === 'closed' ? '工单已关闭' : '工单已重新打开', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  async function deleteWorkItem(item) {
+    if (!confirm(`删除工单「${item.title}」？已创建的会话不会被删除。`)) return;
+    try {
+      await api(`/work-items/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+      S.workSelected = null;
+      if (S.workDrawerId === item.id) closeSideDrawer();
+      await loadWorkItems();
+      toast('工单已删除', 'ok');
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+
+  /* ── QQ 式群聊设置抽屉 ───────────────────────────────── */
+  let groupDrawerTeam = null;
+  let groupDraft = null;
+  let roleDrawerRole = null;
+
+  function groupRoleBrief(role) {
+    return {
+      id: role.id,
+      name: role.name || role.id,
+      title: role.title || '',
+      department: role.department || '',
+      avatar: role.avatar || '',
+      expertise: role.expertise || '',
+      model_code: role.model_code || null,
+    };
+  }
+
+  function openWorkspaceDetail(wsId) {
+    const ws = S.workspaces.find((w) => w.id === wsId);
+    if (!ws) { toast('工作区不存在', 'bad'); return; }
+    if (S.wsDrawerId !== wsId) {
+      S.wsPath = '.';
+      S.wsFiles = null;
+      S.wsPreview = null;
+    }
+    S.wsDrawerId = wsId;
+    S.selectedWs = wsId;
+    renderWorkspaceDrawer();
+    if (!S.wsFiles && !S.wsLoading) loadWsDir(wsId, S.wsPath);
+  }
+
+  function renderWorkspaceDrawer() {
+    const ws = S.workspaces.find((w) => w.id === S.wsDrawerId);
+    const drawer = $('#sideDrawer');
+    const body = $('#sideDrawerBody');
+    const foot = $('#sideDrawerFoot');
+    if (!drawer || !body || !foot) return;
+    if (!ws) { closeSideDrawer(); return; }
+    const files = S.wsFiles || [];
+    const preview = S.wsPreview;
+    const pathLabel = S.wsPath === '.' ? '/' : '/' + S.wsPath;
+    const count = Number(ws.conversation_count || 0);
+    $('#sideDrawerTitle').textContent = '工作区';
+    $('#sideDrawerSub').textContent = `${ws.name} · ${pathLabel}`;
+    body.innerHTML = `<div class="group-identity">
+      <span class="ws-tile-icon lg"><svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z"/></svg></span>
+      <div class="group-identity-main">
+        <div class="role-detail-name">${h(ws.name)}</div>
+        <div class="role-line mono">${h(ws.path || ws.root_path || '托管目录')}</div>
+        <div class="chips"><span class="chip">${count} 个会话</span>${ws.last_conv_updated ? `<span class="chip">最近 ${h(shortTime(ws.last_conv_updated))}</span>` : ''}</div>
+      </div>
+    </div>
+    <section class="group-section">
+      <div class="group-section-head"><h3>目录</h3><span>${h(pathLabel)}</span></div>
+      <div class="ws-browser">
+        <aside class="ws-file-list">
+          ${S.wsPath === '.' ? '' : '<button class="btn small" type="button" data-ws-up>↑ 上一级</button>'}
+          ${S.wsLoading ? '<div class="ws-empty">加载中…</div>' : (files.length ? files.map((f) => `
+            <button class="ws-file-row" type="button" data-ws-item="${h(f.path)}" data-ws-type="${h(f.type)}">
+              <span class="ws-file-ico">${f.type === 'dir' ? '▸' : '·'}</span><span>${h(f.name)}</span>
+            </button>`).join('') : '<div class="ws-empty">空目录</div>')}
+        </aside>
+        <article class="ws-file-preview">
+          ${preview ? `<div class="ws-preview-head"><b>${h(preview.path)}</b><span>${bytes(preview.size)}</span><button class="mini-link" type="button" data-ws-preview-close>关闭</button></div>
+            <pre>${h(preview.text || '')}</pre>`
+            : '<div class="ws-empty">选择左侧文件查看只读预览</div>'}
+        </article>
+      </div>
+    </section>
+    <section class="group-section">
+      <div class="group-section-head"><h3>管理</h3></div>
+      <div class="avatar-actions">
+        <button class="btn small" type="button" data-ws-rename>重命名</button>
+        <button class="btn small" type="button" data-ws-archive>${ws.archived ? '恢复工作区' : '归档工作区'}</button>
+        <button class="btn small danger" type="button" data-ws-delete>删除工作区</button>
+      </div>
+    </section>`;
+    foot.innerHTML = `<button class="btn" type="button" data-ws-bind>绑定到当前窗口</button>
+      <button class="btn" type="button" data-ws-reveal>打开文件夹</button>
+      <button class="btn" type="button" data-ws-superagent>新建工单</button>
+      <span class="spacer"></span><button class="btn" type="button" data-ws-drawer-close>关闭</button>`;
+    drawer.hidden = false;
+    const scrim = $('#drawerScrim');
+    if (scrim) scrim.hidden = false;
+    $$('[data-ws-item]', body).forEach((el) => el.addEventListener('click', () => {
+      if (el.dataset.wsType === 'dir') {
+        S.wsPath = el.dataset.wsItem; S.wsPreview = null; S.wsFiles = null;
+        loadWsDir(ws.id, S.wsPath);
+      } else {
+        openWsFile(ws.id, el.dataset.wsItem);
+      }
+    }));
+    const up = $('[data-ws-up]', body);
+    if (up) up.addEventListener('click', () => {
+      const parts = (S.wsPath === '.' ? [] : S.wsPath.split('/'));
+      parts.pop();
+      S.wsPath = parts.length ? parts.join('/') : '.';
+      S.wsPreview = null; S.wsFiles = null;
+      loadWsDir(ws.id, S.wsPath);
+    });
+    const closePreview = $('[data-ws-preview-close]', body);
+    if (closePreview) closePreview.addEventListener('click', () => { S.wsPreview = null; renderWorkspaceDrawer(); });
+    const rename = $('[data-ws-rename]', body);
+    if (rename) rename.addEventListener('click', () => renameWorkspace(ws));
+    const archive = $('[data-ws-archive]', body);
+    if (archive) archive.addEventListener('click', () => archiveWorkspace(ws));
+    const del = $('[data-ws-delete]', body);
+    if (del) del.addEventListener('click', () => deleteWorkspace(ws));
+    const bind = $('[data-ws-bind]', foot);
+    if (bind) bind.addEventListener('click', () => {
+      const win = S.activeWin;
+      if (!win) { toast('先打开一个会话窗口', 'bad'); return; }
+      bindWorkspaceTo(win, ws.id);
+    });
+    const reveal = $('[data-ws-reveal]', foot);
+    if (reveal) reveal.addEventListener('click', () => revealWorkspace(ws));
+    const superBtn = $('[data-ws-superagent]', foot);
+    if (superBtn) superBtn.addEventListener('click', () => newWorkItem({
+      workspace_id: ws.id, body: `来自工作区「${ws.name}」\n\n`,
+    }));
+    const close = $('[data-ws-drawer-close]', foot);
+    if (close) close.addEventListener('click', closeSideDrawer);
+  }
+
+  function closeSideDrawer() {
+    const drawer = $('#sideDrawer');
+    const scrim = $('#drawerScrim');
+    if (drawer) drawer.hidden = true;
+    if (scrim) scrim.hidden = true;
+    groupDrawerTeam = null;
+    groupDraft = null;
+    roleDrawerRole = null;
+    S.workDrawerId = null;
+    S.wsDrawerId = null;
+  }
+
+  function syncGroupDraft() {
+    if (!groupDraft) return;
+    const name = $('#groupNameInput');
+    const desc = $('#groupDescInput');
+    const mode = $('#groupModeSelect');
+    const speakers = $('#groupSpeakers');
+    const search = $('#groupInviteSearch');
+    const avatar = $('#groupAvatar');
+    if (name) groupDraft.name = name.value;
+    if (avatar) groupDraft.avatar = avatar.value;
+    if (desc) groupDraft.description = desc.value;
+    if (mode) groupDraft.mode = mode.value;
+    if (speakers) groupDraft.max_speakers = Number(speakers.value) || 4;
+    if (search) groupDraft.search = search.value;
+  }
+
+  function groupModeHint(mode, speakers) {
+    if (mode === 'roundtable') return `成员可各自应答，@成员 点名；每条消息最多 ${speakers || 4} 个角色发言。`;
+    if (mode === 'single') return '群只作为角色预设，消息由主持角色单独处理。';
+    return '主持接收消息，按需把子任务委派给成员；只有被委派时成员才行动。';
+  }
+
+  function renderGroupDrawer() {
+    if (!groupDrawerTeam || !groupDraft) return;
+    const drawer = $('#sideDrawer');
+    const body = $('#sideDrawerBody');
+    const foot = $('#sideDrawerFoot');
+    if (!drawer || !body || !foot) return;
+    const leader = groupDraft.leader || null;
+    const members = groupDraft.members || [];
+    const all = [];
+    if (leader && leader.id) all.push({ ...leader, isLeader: true });
+    members.forEach((m) => { if (m && m.id && m.id !== (leader && leader.id)) all.push({ ...m, isLeader: false }); });
+    const used = new Set(all.map((m) => m.id));
+    const q = String(groupDraft.search || '').trim().toLowerCase();
+    const available = S.roles.filter((r) => r && r.id && !used.has(r.id)
+      && (!q || `${r.name || ''} ${r.expertise || ''} ${r.id}`.toLowerCase().includes(q)));
+    const memberRows = all.length ? all.map((m) => `<div class="group-member" data-gm-row="${h(m.id)}">
+      ${av(m.name, 'round', m.avatar)}
+      <div class="group-member-main">
+        <div class="group-member-name"><span>${h(m.name)}</span>${m.isLeader ? '<span class="tag grp">群主</span>' : ''}</div>
+        <div class="group-member-sub">${h([m.title, m.department, m.expertise].filter(Boolean).join(' · ') || (m.model_code ? `模型：${m.model_code}` : '群成员'))}</div>
+      </div>
+      ${m.isLeader ? '' : `<div class="group-member-actions">
+        <button class="btn small ghost" type="button" data-gm-leader="${h(m.id)}">设为主持</button>
+        <button class="iconbtn" type="button" data-gm-remove="${h(m.id)}" title="移出群聊" aria-label="移出群聊"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13"/></svg></button>
+      </div>`}
+    </div>`).join('') : '<div class="group-empty">还没有群成员。从下面邀请一个角色。</div>';
+    const inviteRows = available.length ? available.map((r) => `<div class="group-role-row" data-group-role="${h(r.id)}">
+      ${av(r.name, 'round', r.avatar)}
+      <div class="row-main"><div class="row-title">${h(r.name)}${r.scope === 'temporary' ? ' <span class="tag tmp">临时</span>' : ''}</div>
+        <div class="row-sub">${h([r.title, r.department, r.expertise || r.persona].filter(Boolean).join(' · ') || '没有补充说明')}</div></div>
+      <button class="btn small" type="button" data-gm-invite="${h(r.id)}">邀请</button>
+    </div>`).join('') : `<div class="group-empty">${q ? '没有匹配的角色' : '角色库里的角色都已加入'}</div>`;
+    const canInvite = members.length < 12;
+    $('#sideDrawerSub').textContent = `${groupDrawerTeam.name} · ${all.length} 人`;
+    body.innerHTML = `<div class="group-identity">
+      ${avatarFieldHtml('groupAvatar', 'team', groupDraft.avatar || '', groupDraft.name || groupDrawerTeam.name)}
+      <div class="group-identity-main">
+        <label class="field"><label>群名称</label><input class="input" id="groupNameInput" value="${h(groupDraft.name)}" maxlength="120" /></label>
+        <label class="field"><label>群介绍</label><textarea class="input" id="groupDescInput" rows="2" maxlength="1000" placeholder="这个群一起做什么">${h(groupDraft.description || '')}</textarea></label>
+      </div>
+    </div>
+    <section class="group-section">
+      <div class="group-section-head"><h3>群成员</h3><span>${all.length} / 13 人 · 群主 1 人</span></div>
+      <div class="group-member-list">${memberRows}</div>
+    </section>
+    <section class="group-section">
+      <div class="group-section-head"><h3>邀请成员</h3><span>从角色库添加</span></div>
+      <label class="search group-invite-search">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+        <input id="groupInviteSearch" placeholder="搜索角色…" autocomplete="off" value="${h(groupDraft.search || '')}" />
+      </label>
+      <div class="group-invite-list">${canInvite ? inviteRows : '<div class="group-empty">群成员已达上限（12 个成员 + 1 个主持）</div>'}</div>
+    </section>
+    <section class="group-section">
+      <div class="group-section-head"><h3>群设置</h3><span>协作方式与发言上限</span></div>
+      <label class="field"><label>协作方式</label>
+        <select class="input" id="groupModeSelect">
+          <option value="orchestrate"${groupDraft.mode === 'orchestrate' ? ' selected' : ''}>主持编排（默认）</option>
+          <option value="roundtable"${groupDraft.mode === 'roundtable' ? ' selected' : ''}>圆桌（成员各自应答）</option>
+          <option value="single"${groupDraft.mode === 'single' ? ' selected' : ''}>单角色（只作预设）</option>
+        </select>
+      </label>
+      <label class="field range-field"><span><span>圆桌发言上限</span><output id="groupSpeakersVal">${groupDraft.max_speakers || 4}</output></span>
+        <input class="range-input" type="range" id="groupSpeakers" min="1" max="12" step="1" value="${groupDraft.max_speakers || 4}" />
+      </label>
+      <div class="group-mode-hint" id="groupModeHint">${h(groupModeHint(groupDraft.mode, groupDraft.max_speakers))}</div>
+    </section>
+    <section class="group-section group-danger">
+      <div class="group-section-head"><h3>解散群聊</h3></div>
+      <p class="group-mode-hint">删除群组后，绑定会话会退回单聊；群成员角色本身不会被删除。</p>
+      <button class="btn danger" type="button" data-group-delete>解散群聊</button>
+    </section>`;
+    bindAvatarField('groupAvatar', 'team', groupDraft.name || groupDrawerTeam.name);
+    foot.innerHTML = `<button class="btn" type="button" data-group-open>打开群聊</button><button class="btn" type="button" data-group-superagent>新建工单</button><span class="spacer"></span><button class="btn" type="button" data-group-cancel>取消</button><button class="btn primary" type="button" id="groupSaveBtn">保存修改</button>`;
+    drawer.hidden = false;
+    const scrim = $('#drawerScrim');
+    if (scrim) scrim.hidden = false;
+  }
+
+  function openGroupDetail(teamId) {
+    const team = S.teams.find((t) => t.id === teamId);
+    if (!team) { toast('群组不存在', 'bad'); return; }
+    groupDrawerTeam = team;
+    groupDraft = {
+      name: team.name || '',
+      avatar: team.avatar || '',
+      description: team.description || '',
+      mode: team.mode || 'orchestrate',
+      max_speakers: Number(team.max_speakers) || 4,
+      leader: team.leader ? groupRoleBrief(team.leader) : null,
+      members: (team.members || []).map(groupRoleBrief),
+      search: '',
+    };
+    renderGroupDrawer();
+  }
+
+  async function saveGroupDrawer() {
+    if (!groupDrawerTeam || !groupDraft) return;
+    syncGroupDraft();
+    const name = String(groupDraft.name || '').trim();
+    if (!name) { toast('群名不能为空', 'bad'); return; }
+    const payload = {
+      name,
+      avatar: String(groupDraft.avatar || ''),
+      description: String(groupDraft.description || '').trim(),
+      mode: groupDraft.mode,
+      max_speakers: groupDraft.max_speakers,
+      leader: groupDraft.leader ? groupRoleBrief(groupDraft.leader) : null,
+      members: (groupDraft.members || []).map(groupRoleBrief),
+    };
+    const btn = $('#groupSaveBtn');
+    if (btn) btn.disabled = true;
+    try {
+      await api(`/teams/${encodeURIComponent(groupDrawerTeam.id)}`, {
+        method: 'PATCH', body: JSON.stringify(payload),
+      });
+      const id = groupDrawerTeam.id;
+      closeSideDrawer();
+      await loadAll();
+      toast('群聊设置已保存', 'ok');
+      if (S.section === 'group') S.selectedGroup = id;
+    } catch (err) {
+      toast(err.message, 'bad');
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function deleteGroupDrawer() {
+    if (!groupDrawerTeam) return;
+    if (!confirm(`解散群组「${groupDrawerTeam.name}」？绑定会话会退回单聊。`)) return;
+    try {
+      await api(`/teams/${encodeURIComponent(groupDrawerTeam.id)}`, { method: 'DELETE' });
+      closeSideDrawer();
+      await loadAll();
+      toast('群组已解散', 'ok');
     } catch (err) { toast(err.message, 'bad'); }
   }
 
   /* ── / 斜杠命令 ──────────────────────────────────────── */
+  const ACTION_COMMANDS = [
+    { name: 'new', description: '新建一个会话', action: () => newConversation() },
+    { name: 'compact', description: '压缩当前会话上下文', action: (w) => compactConversation(w) },
+    { name: 'clear', description: '清空模型上下文（历史消息保留，可回看）', argument_hint: '[all|current]' },
+    { name: 'work', description: '交给 工单', argument_hint: '[标题]' },
+  ];
+
   async function ensureCommands() {
     if (S.commands) return;
     try {
       const data = await api(`/app/commands?workspace_id=${encodeURIComponent(S.selectedWs || '')}`);
-      S.commands = data.commands || [];
-    } catch { S.commands = []; }
+      S.commands = [
+        ...ACTION_COMMANDS.map((c) => ({
+          ...c, source: 'action', builtin: true,
+        })),
+        ...(data.commands || []),
+      ];
+    } catch {
+      S.commands = ACTION_COMMANDS.map((c) => ({ ...c, source: 'action', builtin: true }));
+    }
   }
 
   function slashHit(w) {
@@ -2845,10 +4888,14 @@
   function chooseSlash(w, index) {
     const item = w.slash && w.slash.items[index];
     if (!item) return hideSlash(w);
+    hideSlash(w);
+    if (typeof item.action === 'function') {
+      Promise.resolve(item.action(w)).catch((err) => toast(err.message, 'bad'));
+      return;
+    }
     const ta = $('.composer textarea', w.el);
     ta.value = `/${item.name} `;
     try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch { /* ignore */ }
-    hideSlash(w);
     ta.focus();
   }
 
@@ -2878,7 +4925,7 @@
   }
 
   function updateMention(w) {
-    const pop = $('.mention-pop', w.el);
+    const pop = $('.member-pop', w.el);
     if (!pop) return;
     const hit = mentionHit(w);
     if (!hit || !w.members.length) { hideMention(w); return; }
@@ -2887,7 +4934,7 @@
     if (!items.length) { hideMention(w); return; }
     w.mention = { ...hit, items, index: 0 };
     pop.innerHTML = `<div class="mention-head">@ 成员</div>` + items.map((m, i) =>
-      `<button class="mention-item${i === 0 ? ' active' : ''}" data-mention="${i}"><b>${h(m.name)}</b><span>${h(m.expertise || '')}</span></button>`).join('');
+      `<button class="mention-item${i === 0 ? ' active' : ''}" data-mention="${i}">${av(m.name, 'xs round', m.avatar)}<b>${h(m.name)}</b><span>${h([m.title, m.department, m.expertise].filter(Boolean).join(' · '))}</span></button>`).join('');
     pop.hidden = false;
     $$('[data-mention]', pop).forEach((el) => el.addEventListener('mousedown', (e) => {
       e.preventDefault(); chooseMention(w, Number(el.dataset.mention));
@@ -2895,7 +4942,7 @@
   }
 
   function hideMention(w) {
-    const pop = $('.mention-pop', w.el);
+    const pop = $('.member-pop', w.el);
     if (pop) { pop.hidden = true; pop.innerHTML = ''; }
     w.mention = null;
   }
@@ -3005,7 +5052,7 @@
     });
   }
 
-  /* ── 全局 Agent：待授权 / 通知 / 授权管理 ─────────────── */
+  /* ── 工单：待授权 / 通知 / 授权管理 ─────────────── */
   const GA_MODE_LABEL = { auto: '自动判断', once: '每次询问', session: '本会话允许', always: '完全允许' };
   const GA_RISK_LABEL = { low: '低风险', medium: '中风险', high: '高风险' };
 
@@ -3023,7 +5070,7 @@
     if (a) { a.hidden = auth <= 0; a.textContent = auth > 99 ? '99+' : String(auth); }
     if (n) { n.hidden = note <= 0; n.textContent = note > 99 ? '99+' : String(note); }
     const fab = $('#gaFab');
-    if (fab) fab.title = `全局 Agent · 待授权 ${auth} · 未读 ${note} · 运行 ${Number(c.running || 0)}`;
+    if (fab) fab.title = `工单 · 待授权 ${auth} · 未读 ${note} · 运行 ${Number(c.running || 0)}`;
   }
 
   function maybeNotifyAttention(counts) {
@@ -3031,7 +5078,7 @@
     if (S.gaNotifyCount < 0) { S.gaNotifyCount = count; return; }
     if (count > S.gaNotifyCount && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       try {
-        const note = new Notification('AtlasX · 全局 Agent', {
+        const note = new Notification('AtlasX · 工单', {
           body: `${count} 个待授权操作等待处理`, tag: 'atlasx-attention',
         });
         note.onclick = () => { window.focus(); openGlobalAgent(); note.close(); };
@@ -3073,6 +5120,7 @@
       paintGaBadges();
       maybeNotifyAttention(data.counts);
       if (S.gaOpen && changed) renderGaPanel();
+      if (changed && S.section === 'work' && $('#modal').hidden) renderCanvas();
       autoHandleLowRisk(data);
     } catch { /* 全局通知失败不影响主界面 */ }
   }
@@ -3093,7 +5141,7 @@
           await api(`/approvals/${encodeURIComponent(id)}`, {
             method: 'POST', body: JSON.stringify({ action: 'approve_once' }),
           });
-          toast(`全局 Agent 已代批：${a.tool || '低风险工具'}`, 'ok', 1800);
+          toast(`工单已代批：${a.tool || '低风险工具'}`, 'ok', 1800);
         } catch { /* ignore */ }
       }
     } finally {
@@ -3213,7 +5261,7 @@
     let html = `<div class="ga-global">
       <label><span>新会话默认权限</span><select class="input" id="gaDefaultMode">${gaModeOptions(mode)}</select></label>
       <label><span>系统通知</span><button class="btn" id="gaNotifyBtn">${notifyState === 'granted' ? '已开启' : '授权通知'}</button></label>
-      <label class="ga-toggle"><input type="checkbox" id="gaAutoApprove"${S.gaAuto ? ' checked' : ''} /> 全局 Agent 代处理低风险授权</label>
+      <label class="ga-toggle"><input type="checkbox" id="gaAutoApprove"${S.gaAuto ? ' checked' : ''} /> 工单代处理低风险授权</label>
       <div class="ga-note-line">开启后，低风险工具审批自动放行；中 / 高风险仍等你确认。系统通知需要浏览器授权。</div>
     </div>
     <div class="ga-sec-title">会话授权 · ${sessions.length}</div>`;
@@ -3243,7 +5291,7 @@
     else bodyHtml = gaAuthHtml(data);
     panel.innerHTML = `<header class="ga-head">
         <span class="ga-logo"><svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="11" rx="4"/><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6"/></svg></span>
-        <span class="ga-title"><b>全局 Agent</b><span>待授权 ${auth} · 未读 ${note} · 运行 ${Number(counts.running || 0)}</span></span>
+        <span class="ga-title"><b>工单</b><span>待授权 ${auth} · 未读 ${note} · 运行 ${Number(counts.running || 0)}</span></span>
         <button class="ga-close" data-ga-close title="关闭">×</button>
       </header>
       <div class="ga-tabs">
@@ -3325,7 +5373,7 @@
     if (auto) auto.addEventListener('change', () => {
       S.gaAuto = !!auto.checked;
       try { localStorage.setItem('atlasx.ga.auto', S.gaAuto ? '1' : '0'); } catch { /* ignore */ }
-      toast(S.gaAuto ? '全局 Agent 将代处理低风险授权' : '已关闭代处理', 'ok', 1600);
+      toast(S.gaAuto ? '工单将代处理低风险授权' : '已关闭代处理', 'ok', 1600);
       if (S.gaAuto) loadAttention();
     });
     const notifyBtn = $('#gaNotifyBtn', panel);
@@ -3373,20 +5421,140 @@
       if (w) { e.preventDefault(); switchTo(w); }
     }
   });
+  bindAgentCanvas();
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('#agentCanvas') && !$('#agentCanvas').hidden) closeAgentCanvas();
+  });
   const themeToggle = $('#themeToggle');
   if (themeToggle) themeToggle.addEventListener('click', toggleTheme);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) tickTheme();
   });
+
+  // 群聊设置抽屉：成员邀请 / 移出 / 转让主持 / 群资料 / 协作方式。
+  const sideDrawer = $('#sideDrawer');
+  if (sideDrawer) {
+    sideDrawer.addEventListener('click', (e) => {
+      if (e.target.closest('[data-role-close]')) { closeSideDrawer(); return; }
+      if (e.target.closest('[data-role-chat]') && roleDrawerRole) {
+        const id = roleDrawerRole.id;
+        closeSideDrawer();
+        openRoleChat(id);
+        return;
+      }
+      if (e.target.closest('[data-role-edit]') && roleDrawerRole) {
+        const role = roleDrawerRole;
+        closeSideDrawer();
+        openRoleEditor(role);
+        return;
+      }
+      if (e.target.closest('[data-role-superagent]') && roleDrawerRole) {
+        const role = roleDrawerRole;
+        closeSideDrawer();
+        newWorkItem({ role_id: role.id, body: `来自角色「${role.name}」\n\n` });
+        return;
+      }
+      if (e.target.closest('[data-role-promote]')) { promoteRoleDrawer(); return; }
+      if (e.target.closest('[data-role-delete]')) { deleteRoleDrawer(); return; }
+      const remove = e.target.closest('[data-gm-remove]');
+      if (remove && groupDraft) {
+        syncGroupDraft();
+        groupDraft.members = groupDraft.members.filter((m) => m.id !== remove.dataset.gmRemove);
+        renderGroupDrawer();
+        return;
+      }
+      const leader = e.target.closest('[data-gm-leader]');
+      if (leader && groupDraft) {
+        syncGroupDraft();
+        const target = groupDraft.members.find((m) => m.id === leader.dataset.gmLeader);
+        if (!target) return;
+        const old = groupDraft.leader;
+        groupDraft.members = groupDraft.members.filter((m) => m.id !== target.id);
+        if (old && old.id && old.id !== target.id && !groupDraft.members.some((m) => m.id === old.id)) {
+          groupDraft.members.push(old);
+        }
+        groupDraft.leader = target;
+        renderGroupDrawer();
+        return;
+      }
+      const invite = e.target.closest('[data-gm-invite]');
+      if (invite && groupDraft) {
+        syncGroupDraft();
+        if (groupDraft.members.length >= 12) { toast('群成员已达上限', 'bad'); return; }
+        const role = S.roles.find((r) => r.id === invite.dataset.gmInvite);
+        if (!role) return;
+        if (groupDraft.members.some((m) => m.id === role.id) || (groupDraft.leader && groupDraft.leader.id === role.id)) return;
+        groupDraft.members.push(groupRoleBrief(role));
+        renderGroupDrawer();
+        return;
+      }
+      if (e.target.closest('[data-group-delete]')) { deleteGroupDrawer(); return; }
+      if (e.target.closest('[data-group-superagent]') && groupDrawerTeam) {
+        const team = groupDrawerTeam;
+        closeSideDrawer();
+        newWorkItem({ team_id: team.id, body: `来自群组「${team.name}」\n\n` });
+        return;
+      }
+      if (e.target.closest('[data-group-cancel]')) { closeSideDrawer(); return; }
+      if (e.target.closest('[data-group-open]') && groupDrawerTeam) {
+        const id = groupDrawerTeam.id;
+        closeSideDrawer();
+        setSection('group');
+        openGroupChat(id);
+        return;
+      }
+      if (e.target.closest('#groupSaveBtn')) { saveGroupDrawer(); return; }
+    });
+    sideDrawer.addEventListener('input', (e) => {
+      if (!groupDraft) return;
+      if (e.target.id === 'groupInviteSearch') {
+        groupDraft.search = e.target.value;
+        const q = groupDraft.search.trim().toLowerCase();
+        $$('.group-role-row', $('#sideDrawerBody')).forEach((row) => {
+          row.hidden = !!q && !row.textContent.toLowerCase().includes(q);
+        });
+      } else if (e.target.id === 'groupSpeakers') {
+        groupDraft.max_speakers = Number(e.target.value) || 4;
+        const out = $('#groupSpeakersVal');
+        if (out) out.textContent = String(groupDraft.max_speakers);
+        const hint = $('#groupModeHint');
+        if (hint) hint.textContent = groupModeHint(groupDraft.mode, groupDraft.max_speakers);
+      } else if (e.target.id === 'groupNameInput') {
+        groupDraft.name = e.target.value;
+        const sub = $('#sideDrawerSub');
+        if (sub && groupDrawerTeam) sub.textContent = `${e.target.value || groupDrawerTeam.name} · ${(groupDraft.members || []).length + (groupDraft.leader && groupDraft.leader.id ? 1 : 0)} 人`;
+      } else if (e.target.id === 'groupDescInput') {
+        groupDraft.description = e.target.value;
+      }
+    });
+    sideDrawer.addEventListener('change', (e) => {
+      if (!groupDraft) return;
+      if (e.target.id === 'groupModeSelect') {
+        groupDraft.mode = e.target.value;
+        const hint = $('#groupModeHint');
+        if (hint) hint.textContent = groupModeHint(groupDraft.mode, groupDraft.max_speakers);
+      }
+    });
+    const closeBtn = $('#sideDrawerClose');
+    if (closeBtn) closeBtn.addEventListener('click', closeSideDrawer);
+    const scrim = $('#drawerScrim');
+    if (scrim) scrim.addEventListener('click', closeSideDrawer);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && sideDrawer && !sideDrawer.hidden) closeSideDrawer();
+    });
+  }
+
   $('#listAdd').addEventListener('click', () => {
-    if (S.section === 'role') openRoleEditor(null);
+    if (S.section === 'work') newWorkItem();
+    else if (S.section === 'role') openRoleEditor(null);
     else if (S.section === 'group') newGroup();
     else if (S.section === 'conv') newConversation();
     else if (S.section === 'ws') addWorkspace();
     else toast('该入口将在下一阶段迁移');
   });
   $('#listRefresh').addEventListener('click', async () => {
-    await loadAll();
+    if (S.section === 'work') await loadWorkItems();
+    else await loadAll();
     toast('已刷新', 'ok', 1200);
   });
   const gaFab = $('#gaFab');
@@ -3405,15 +5573,18 @@
     const saved = await modal({
       title: '新建群组',
       fields: `<div class="field"><label>群名</label><input class="input" id="ngName" placeholder="例如：研发群" /></div>
+        <div class="field"><label>群头像</label>${avatarFieldHtml('ngAvatar', 'team', '', '群')}</div>
         <div class="field"><label>协作方式</label><select class="input" id="ngMode">
           <option value="orchestrate">主持编排</option><option value="roundtable">圆桌</option><option value="single">单角色</option>
         </select></div>
         <div class="field"><label>成员</label><div style="display:flex;flex-direction:column;gap:6px">
         ${S.roles.map((r) => `<label class="member"><input type="checkbox" data-ng-member="${h(r.id)}" />
-          ${av(r.name, 'round')}<span class="row-main"><span class="row-title">${h(r.name)}</span><span class="row-sub">${h(r.expertise || '')}</span></span></label>`).join('')}
+          ${av(r.name, 'round', r.avatar)}<span class="row-main"><span class="row-title">${h(r.name)}</span><span class="row-sub">${h([r.title, r.department, r.expertise].filter(Boolean).join(' · '))}</span></span></label>`).join('')}
         </div></div>`,
+      onMount: () => bindAvatarField('ngAvatar', 'team', '群'),
       read: () => ({
         name: $('#ngName').value.trim(),
+        avatar: $('#ngAvatar').value || '',
         mode: $('#ngMode').value,
         members: $$('[data-ng-member]').filter((x) => x.checked).map((x) => {
           const r = S.roles.find((y) => y.id === x.dataset.ngMember);
@@ -3424,16 +5595,22 @@
     if (!saved) return;
     if (!saved.name) { toast('群名不能为空', 'bad'); return; }
     try {
-      await api('/teams', { method: 'POST', body: JSON.stringify(saved) });
+      const team = await api('/teams', { method: 'POST', body: JSON.stringify(saved) });
       await loadAll(); toast('群组已创建', 'ok');
+      if (team && team.id) openGroupDetail(team.id);
     } catch (err) { toast(err.message, 'bad'); }
   }
 
   // 初始化（?section=role&conv=conv-xxx 便于深链 / 截图；?pick=ws 直接打开目录选择器）
-  startThemeSchedule();
+  initTheme();
+  applySectionLayout(S.section);
   loadAttention();
+  loadWorkItems({ quiet: true });
+  setInterval(() => { if (!document.hidden) loadWorkItems({ quiet: true }); }, 10000);
+  setInterval(() => { if (!document.hidden) refreshTeamTasks(); }, 2500);
   loadAll().then(() => {
     const p = new URLSearchParams(location.search);
+    if (p.get('work')) S.workSelected = p.get('work');
     if (p.get('section')) setSection(p.get('section'));
     const conv = p.get('conv');
     if (conv) openConversation(conv);
