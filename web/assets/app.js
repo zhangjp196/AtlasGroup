@@ -1249,6 +1249,20 @@
       'mcp.import': 'Import',
       'mcp.enable': 'Enable',
       'mcp.disable': 'Disable',
+      'mcp.enabled': 'Enabled',
+      'mcp.edit': 'Edit',
+      'mcp.editTitle': 'Edit MCP server',
+      'mcp.save': 'Save',
+      'mcp.saved': 'MCP server saved.',
+      'mcp.note': 'Note',
+      'mcp.notePlaceholder': 'What this server is for',
+      'mcp.env': 'Environment variables',
+      'mcp.addVariable': 'Add variable',
+      'mcp.envNote': 'Passed only to this stdio process, e.g. API keys and data paths.',
+      'mcp.headers': 'HTTP headers',
+      'mcp.addHeader': 'Add header',
+      'mcp.headersNote': 'Sent with every request, e.g. Authorization or a tenant header.',
+      'mcp.removePair': 'Remove',
       'mcp.test': 'Test',
       'mcp.delete': 'Delete',
       'mcp.tools': '{n} tools',
@@ -1276,6 +1290,9 @@
       'ext.body': 'Prompt body',
       'ext.event': 'Event',
       'ext.matcher': 'Tool matcher (regex)',
+      'ext.matcherAll': 'All tools',
+      'ext.matcherFiles': 'Files',
+      'ext.matcherShell': 'Shell',
       'ext.command': 'Shell command',
       'ext.timeout': 'Timeout (s)',
       'ext.save': 'Save',
@@ -2381,6 +2398,20 @@
       'mcp.import': '导入',
       'mcp.enable': '启用',
       'mcp.disable': '停用',
+      'mcp.enabled': '启用',
+      'mcp.edit': '编辑',
+      'mcp.editTitle': '编辑 MCP 服务',
+      'mcp.save': '保存',
+      'mcp.saved': 'MCP 服务已保存。',
+      'mcp.note': '备注',
+      'mcp.notePlaceholder': '这个服务用来做什么',
+      'mcp.env': '环境变量',
+      'mcp.addVariable': '添加变量',
+      'mcp.envNote': '只传给这个 stdio 进程，例如 API Key、数据目录。',
+      'mcp.headers': '请求头',
+      'mcp.addHeader': '添加请求头',
+      'mcp.headersNote': '每次请求都会带上，例如 Authorization 或租户标识。',
+      'mcp.removePair': '删除',
       'mcp.test': '测试',
       'mcp.delete': '删除',
       'mcp.tools': '{n} 个工具',
@@ -2408,6 +2439,9 @@
       'ext.body': '提示词正文',
       'ext.event': '事件',
       'ext.matcher': '工具匹配（正则）',
+      'ext.matcherAll': '全部工具',
+      'ext.matcherFiles': '文件',
+      'ext.matcherShell': 'Shell',
       'ext.command': 'Shell 命令',
       'ext.timeout': '超时（秒）',
       'ext.save': '保存',
@@ -10513,10 +10547,13 @@
         ${s.url ? `<span class="mcp-url mono">${escapeHtml(s.url)}</span>` : ''}
         <span class="mcp-tools">${escapeHtml(t('mcp.tools', { n: s.tools || 0 }))}</span>
         ${s.installed ? '<span class="pill" data-tone="success">npm</span>' : ''}
-        ${s.enabled ? '' : '<span class="pill" data-tone="warning">off</span>'}
       </div>
       <div class="mcp-row-actions">
-        <button class="btn small ghost" type="button" data-mcp-toggle="${escAttr(s.id)}">${escapeHtml(s.enabled ? t('mcp.disable') : t('mcp.enable'))}</button>
+        <label class="switch" title="${escAttr(s.enabled ? t('mcp.disable') : t('mcp.enable'))}">
+          <input type="checkbox" data-mcp-enabled="${escAttr(s.id)}"${s.enabled ? ' checked' : ''} />
+          <span class="track"></span>
+        </label>
+        <button class="icon-btn" type="button" data-mcp-edit="${escAttr(s.id)}" title="${escAttr(t('mcp.edit'))}" aria-label="${escAttr(t('mcp.edit'))}"><svg><use href="#i-edit"/></svg></button>
         <button class="btn small ghost" type="button" data-mcp-probe="${escAttr(s.id)}">${escapeHtml(t('mcp.test'))}</button>
         <button class="btn small ghost" type="button" data-mcp-delete="${escAttr(s.id)}"><svg><use href="#i-trash"/></svg></button>
       </div>
@@ -10550,7 +10587,10 @@
         ${(s.files || []).length > 1 ? `<span class="skill-files">${escapeHtml(t('skill.files', { n: (s.files || []).length }))}</span>` : ''}
       </div>
       <div class="skill-row-actions">
-        <button class="btn small ghost" type="button" data-skill-toggle="${escAttr(s.id)}">${escapeHtml(s.enabled ? t('mcp.disable') : t('mcp.enable'))}</button>
+        <label class="switch" title="${escAttr(s.enabled ? t('mcp.disable') : t('mcp.enable'))}">
+          <input type="checkbox" data-skill-enabled="${escAttr(s.id)}"${s.enabled ? ' checked' : ''} />
+          <span class="track"></span>
+        </label>
         <button class="btn small ghost" type="button" data-skill-download="${escAttr(s.id)}"><svg><use href="#i-download"/></svg>${escapeHtml(t('skill.download'))}</button>
         <button class="btn small ghost" type="button" data-skill-delete="${escAttr(s.id)}"><svg><use href="#i-trash"/></svg></button>
       </div>
@@ -10707,6 +10747,22 @@
       });
     }
 
+    const hookTimeoutInput = $('#hookTimeout');
+    const hookTimeoutOutput = $('#hookTimeoutVal');
+    const paintHookTimeout = () => {
+      if (hookTimeoutInput && hookTimeoutOutput) hookTimeoutOutput.textContent = hookTimeoutInput.value;
+    };
+    if (hookTimeoutInput) {
+      hookTimeoutInput.addEventListener('input', paintHookTimeout);
+      paintHookTimeout();
+    }
+    $$('[data-hook-matcher-value]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const input = $('#hookMatcher');
+        if (input) input.value = btn.dataset.hookMatcherValue || '*';
+      });
+    });
+
     const addHook = $('#addHookBtn');
     if (addHook) {
       addHook.addEventListener('click', () => {
@@ -10717,6 +10773,7 @@
           $('#hookMatcher').value = '*';
           $('#hookCommand').value = '';
           $('#hookTimeout').value = '10';
+          paintHookTimeout();
           $('#hookCommand').focus();
         }
       });
@@ -11017,17 +11074,24 @@
 
     const mcpList = $('#mcpList');
     if (mcpList) {
+      mcpList.addEventListener('change', async (e) => {
+        const toggle = e.target.closest('[data-mcp-enabled]');
+        if (!toggle) return;
+        try {
+          await api(`/app/mcp/servers/${encodeURIComponent(toggle.dataset.mcpEnabled)}`, {
+            method: 'PUT', body: JSON.stringify({ enabled: toggle.checked }),
+          });
+          loadMcp();
+        } catch (err) {
+          toggle.checked = !toggle.checked;
+          toast(err.message, 'bad', 4000);
+        }
+      });
       mcpList.addEventListener('click', async (e) => {
-        const toggle = e.target.closest('[data-mcp-toggle]');
-        if (toggle) {
-          const id = toggle.dataset.mcpToggle;
-          const srv = ((state.mcp && state.mcp.servers) || []).find((s) => s.id === id);
-          try {
-            await api(`/app/mcp/servers/${encodeURIComponent(id)}`, {
-              method: 'PUT', body: JSON.stringify({ enabled: !(srv && srv.enabled) }),
-            });
-            loadMcp();
-          } catch (err) { toast(err.message, 'bad', 4000); }
+        const edit = e.target.closest('[data-mcp-edit]');
+        if (edit) {
+          const srv = ((state.mcp && state.mcp.servers) || []).find((s) => s.id === edit.dataset.mcpEdit);
+          if (srv) openEditMcp(srv);
           return;
         }
         const probe = e.target.closest('[data-mcp-probe]');
@@ -11057,6 +11121,40 @@
 
     const mcpModal = $('#addMcpModal');
     let mcpType = 'stdio';
+    let mcpEditingId = '';
+
+    // key-value 行：环境变量 / 请求头共用，避免用户手写 JSON。
+    function kvRowHtml(key = '', value = '') {
+      return `<div class="kv-row">
+        <input class="input mono" data-kv-key placeholder="KEY" value="${escAttr(key)}" spellcheck="false" />
+        <input class="input mono" data-kv-value placeholder="value" value="${escAttr(value)}" spellcheck="false" />
+        <button class="kv-remove" type="button" data-kv-remove title="${escAttr(t('mcp.removePair'))}" aria-label="${escAttr(t('mcp.removePair'))}"><svg><use href="#i-x"/></svg></button>
+      </div>`;
+    }
+    function addKvRow(sel, key = '', value = '') {
+      const host = $(sel);
+      if (!host) return;
+      host.insertAdjacentHTML('beforeend', kvRowHtml(key, value));
+      const row = host.lastElementChild;
+      const input = row && row.querySelector('[data-kv-key]');
+      if (input) input.focus();
+    }
+    function fillKv(sel, obj) {
+      const host = $(sel);
+      if (!host) return;
+      const entries = Object.entries(obj || {}).filter(([k]) => String(k || '').trim());
+      host.innerHTML = entries.map(([k, v]) => kvRowHtml(k, v)).join('');
+      if (!entries.length) addKvRow(sel);
+    }
+    function readKv(sel) {
+      const out = {};
+      $$('.kv-row', $(sel)).forEach((row) => {
+        const key = (row.querySelector('[data-kv-key]').value || '').trim();
+        const value = row.querySelector('[data-kv-value]').value || '';
+        if (key) out[key] = value;
+      });
+      return out;
+    }
 
     function setMcpType(type) {
       mcpType = type === 'http' ? 'http' : 'stdio';
@@ -11070,7 +11168,7 @@
       if (stdioFields) stdioFields.hidden = mcpType !== 'stdio';
       if (httpFields) httpFields.hidden = mcpType !== 'http';
       const installBtn = $('#mcpInstallBtn');
-      if (installBtn) installBtn.hidden = mcpType !== 'stdio';
+      if (installBtn) installBtn.hidden = !!mcpEditingId || mcpType !== 'stdio';
     }
 
     function mcpBody() {
@@ -11082,18 +11180,70 @@
         url: ($('#mcpUrl').value || '').trim(),
         command: ($('#mcpCommand').value || '').trim(),
         args: ($('#mcpArgs').value || '').split(/\s+/).filter(Boolean),
+        env: readKv('#mcpEnvRows'),
+        headers: readKv('#mcpHeaderRows'),
+        enabled: $('#mcpEnabled') ? $('#mcpEnabled').checked : true,
+        note: ($('#mcpNote') ? $('#mcpNote').value : '').trim(),
       };
+    }
+
+    function setMcpMode(editing, server = {}) {
+      mcpEditingId = editing ? String(server.id || '') : '';
+      const title = $('#addMcpTitle');
+      if (title) title.textContent = mcpEditingId ? t('mcp.editTitle') : t('mcp.addTitle');
+      const addBtn = $('#mcpAddBtn');
+      if (addBtn) addBtn.textContent = mcpEditingId ? t('mcp.save') : t('mcp.add');
+      setMcpType(server.type || 'stdio');
     }
 
     function openAddMcp() {
       if (!mcpModal) return;
-      mcpModal.hidden = false;
-      setMcpType(mcpType);
+      ['#mcpName', '#mcpPackage', '#mcpInstallCommand', '#mcpCommand', '#mcpArgs', '#mcpUrl', '#mcpNote']
+        .forEach((sel) => { const el = $(sel); if (el) el.value = ''; });
+      const enabled = $('#mcpEnabled');
+      if (enabled) enabled.checked = true;
+      fillKv('#mcpEnvRows', {});
+      fillKv('#mcpHeaderRows', {});
+      setMcpMode(false);
       const note = $('#mcpAddNote');
       if (note) note.textContent = '';
+      mcpModal.hidden = false;
       const name = $('#mcpName');
       if (name) name.focus();
     }
+
+    function openEditMcp(server) {
+      if (!mcpModal) return;
+      $('#mcpName').value = server.name || '';
+      $('#mcpPackage').value = server.package || '';
+      $('#mcpInstallCommand').value = server.install_command || '';
+      $('#mcpCommand').value = server.command || '';
+      $('#mcpArgs').value = (server.args || []).join(' ');
+      $('#mcpUrl').value = server.url || '';
+      $('#mcpNote').value = server.note || '';
+      const enabled = $('#mcpEnabled');
+      if (enabled) enabled.checked = server.enabled !== false;
+      fillKv('#mcpEnvRows', server.env || {});
+      fillKv('#mcpHeaderRows', server.headers || {});
+      setMcpMode(true, server);
+      const note = $('#mcpAddNote');
+      if (note) note.textContent = '';
+      mcpModal.hidden = false;
+      const name = $('#mcpName');
+      if (name) name.focus();
+    }
+
+    if (mcpModal) mcpModal.addEventListener('click', (e) => {
+      const add = e.target.closest('[data-kv-add]');
+      if (add) { addKvRow(add.dataset.kvAdd); return; }
+      const rm = e.target.closest('[data-kv-remove]');
+      if (rm) {
+        const row = rm.closest('.kv-row');
+        const host = row && row.parentElement;
+        row.remove();
+        if (host && !host.querySelector('.kv-row')) addKvRow('#' + host.id);
+      }
+    });
 
     if (mcpModal) {
       const openBtn = $('#addMcpBtn');
@@ -11162,7 +11312,14 @@
             return;
           }
           try {
-            await api('/app/mcp/servers', { method: 'POST', body: JSON.stringify(body) });
+            if (mcpEditingId) {
+              await api(`/app/mcp/servers/${encodeURIComponent(mcpEditingId)}`, {
+                method: 'PUT', body: JSON.stringify(body),
+              });
+              toast(t('mcp.saved'), 'ok', 2000);
+            } else {
+              await api('/app/mcp/servers', { method: 'POST', body: JSON.stringify(body) });
+            }
             loadMcp();
             mcpModal.hidden = true;
           } catch (err) { toast(err.message, 'bad', 4000); }
@@ -11188,19 +11345,20 @@
 
     const skillList = $('#skillList');
     if (skillList) {
-      skillList.addEventListener('click', async (e) => {
-        const toggle = e.target.closest('[data-skill-toggle]');
-        if (toggle) {
-          const id = toggle.dataset.skillToggle;
-          const skill = (state.skills || []).find((s) => s.id === id);
-          try {
-            await api(`/app/skills/${encodeURIComponent(id)}`, {
-              method: 'PUT', body: JSON.stringify({ enabled: !(skill && skill.enabled) }),
-            });
-            loadSkills();
-          } catch (err) { toast(err.message, 'bad', 4000); }
-          return;
+      skillList.addEventListener('change', async (e) => {
+        const toggle = e.target.closest('[data-skill-enabled]');
+        if (!toggle) return;
+        try {
+          await api(`/app/skills/${encodeURIComponent(toggle.dataset.skillEnabled)}`, {
+            method: 'PUT', body: JSON.stringify({ enabled: toggle.checked }),
+          });
+          loadSkills();
+        } catch (err) {
+          toggle.checked = !toggle.checked;
+          toast(err.message, 'bad', 4000);
         }
+      });
+      skillList.addEventListener('click', async (e) => {
         const dl = e.target.closest('[data-skill-download]');
         if (dl) {
           window.open(`${API}/skills/${encodeURIComponent(dl.dataset.skillDownload)}/download`, '_blank');
@@ -13804,27 +13962,35 @@
     onField($('#themeDayStart'), 'dayStart', (v) => (v || '06:00'));
     onField($('#themeNightStart'), 'nightStart', (v) => (v || '19:00'));
     onField($('#themeRotateInterval'), 'interval', (v) => parseInt(v, 10) || 15);
-    const sidebarWInput = $('#uiSidebarW');
-    if (sidebarWInput) {
-      sidebarWInput.addEventListener('change', (e) => {
-        const w = Math.min(420, Math.max(180, parseInt(e.target.value, 10) || 276));
-        state.ui.sidebarW = w;
-        const app = $('#app');
-        if (app && !state.ui.sidebarCollapsed) app.style.setProperty('--sidebar-w', w + 'px');
-        saveUi();
-      });
-    }
-    const dockWInput = $('#uiDockW');
-    if (dockWInput) {
-      dockWInput.addEventListener('change', (e) => {
-        const max = dockMaxWidth();
-        const w = Math.min(max, Math.max(220, parseInt(e.target.value, 10) || 340));
-        state.ui.dockW = w;
-        e.target.value = String(Math.round(w));
-        applyDockWidth();
-        saveUi();
-      });
-    }
+    // 宽度用滑杆：拖动时即时预览，松手才落盘；右侧数字是当前值。
+    const bindRange = (inputSel, outputSel, min, max, apply) => {
+      const input = $(inputSel);
+      if (!input) return;
+      const output = $(outputSel);
+      const paint = () => {
+        if (!output) return;
+        output.textContent = String(Math.round(Number(input.value) || 0));
+      };
+      const set = (value, persist) => {
+        const bound = Math.min(max(), Math.max(min, Math.round(Number(value) || min)));
+        input.value = String(bound);
+        apply(bound);
+        paint();
+        if (persist) saveUi();
+      };
+      input.addEventListener('input', () => set(input.value, false));
+      input.addEventListener('change', () => set(input.value, true));
+      paint();
+    };
+    bindRange('#uiSidebarW', '#uiSidebarWVal', 180, () => 420, (w) => {
+      state.ui.sidebarW = w;
+      const app = $('#app');
+      if (app && !state.ui.sidebarCollapsed) app.style.setProperty('--sidebar-w', w + 'px');
+    });
+    bindRange('#uiDockW', '#uiDockWVal', 220, () => dockMaxWidth(), (w) => {
+      state.ui.dockW = w;
+      applyDockWidth();
+    });
     const bindToggle = (sel, apply) => {
       const el = $(sel);
       if (!el) return;
@@ -13904,8 +14070,15 @@
   function syncAppearanceControls() {
     const setVal = (sel, v) => { const el = $(sel); if (el) el.value = v; };
     const setChk = (sel, v) => { const el = $(sel); if (el) el.checked = !!v; };
-    setVal('#uiSidebarW', state.ui.sidebarW || 276);
-    setVal('#uiDockW', Math.round(Math.min(state.ui.dockW || 340, dockMaxWidth())));
+    const setOut = (sel, v) => { const el = $(sel); if (el) el.textContent = String(Math.round(v)); };
+    const sidebarW = Math.round(state.ui.sidebarW || 276);
+    const dockW = Math.round(Math.min(state.ui.dockW || 340, dockMaxWidth()));
+    const dockInput = $('#uiDockW');
+    if (dockInput) dockInput.max = String(Math.round(dockMaxWidth()));
+    setVal('#uiSidebarW', sidebarW);
+    setVal('#uiDockW', dockW);
+    setOut('#uiSidebarWVal', sidebarW);
+    setOut('#uiDockWVal', dockW);
     setChk('#uiSidebarCollapsed', state.ui.sidebarCollapsed);
     setChk('#uiQueueBar', !state.ui.queueCollapsed);
     setChk('#uiViewerWrap', state.ui.viewerWrap);

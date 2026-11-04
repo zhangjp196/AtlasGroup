@@ -1393,6 +1393,7 @@ def list_mcp():
             "package": s.get("package") or "", "command": s.get("command") or "",
             "args": s.get("args") or [], "url": s.get("url") or "",
             "install_command": s.get("install_command") or "",
+            "env": s.get("env") or {}, "headers": s.get("headers") or {},
             "enabled": s.get("enabled", True), "installed": s.get("installed", False),
             "note": s.get("note") or "", "tools": len(cached.get("tools") or []),
             "tool_names": [t.get("name") for t in (cached.get("tools") or [])][:40],

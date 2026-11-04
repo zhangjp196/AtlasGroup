@@ -7,9 +7,9 @@
   <meta name="theme-color" content="#0d0d0e" />
   <title>AtlasX</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <script src="/assets/theme.js?v=3.3.8-1"></script>
+  <script src="/assets/theme.js?v=3.3.9-1"></script>
   <link rel="stylesheet" href="/assets/vendor/codemirror/codemirror.css" />
-  <link rel="stylesheet" href="/assets/app.css?v=3.3.8-1" />
+  <link rel="stylesheet" href="/assets/app.css?v=3.3.9-1" />
 </head>
 <body>
   <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
@@ -702,10 +702,18 @@
                   <option value="Stop">Stop</option>
                 </select>
               </label>
-              <label class="field"><span data-i18n="ext.matcher">Tool matcher (regex)</span><input class="input" id="hookMatcher" placeholder="shell|fs" autocomplete="off" /></label>
+              <label class="field"><span data-i18n="ext.matcher">Tool matcher (regex)</span><input class="input" id="hookMatcher" placeholder="shell|fs" autocomplete="off" />
+                <div class="quick-chips">
+                  <button class="quick-chip" type="button" data-hook-matcher-value="*" data-i18n="ext.matcherAll">All tools</button>
+                  <button class="quick-chip" type="button" data-hook-matcher-value="fs|write|edit" data-i18n="ext.matcherFiles">Files</button>
+                  <button class="quick-chip" type="button" data-hook-matcher-value="shell|exec" data-i18n="ext.matcherShell">Shell</button>
+                </div>
+              </label>
             </div>
             <label class="field"><span data-i18n="ext.command">Shell command</span><input class="input" id="hookCommand" placeholder="python3 .atlas/hooks/guard.py" autocomplete="off" /></label>
-            <label class="field"><span data-i18n="ext.timeout">Timeout (s)</span><input class="input" type="number" id="hookTimeout" min="1" max="120" step="1" value="10" /></label>
+            <label class="field range-field"><span><span data-i18n="ext.timeout">Timeout (s)</span><output id="hookTimeoutVal" for="hookTimeout">10</output></span>
+              <input class="range-input" type="range" id="hookTimeout" min="1" max="120" step="1" value="10" />
+            </label>
             <div class="panel-actions">
               <button class="btn small primary" type="button" id="hookSaveBtn" data-i18n="ext.save">Save</button>
               <button class="btn small ghost" type="button" id="hookCancelBtn" data-i18n="ext.cancel">Cancel</button>
@@ -741,14 +749,38 @@
             <p class="field-note" id="themeScheduleNote"></p>
           </div>
           <h4 data-i18n="appearance.details">Interface details</h4>
-          <div class="appearance-fields">
-            <label class="field"><span data-i18n="appearance.sidebarWidth">Sidebar width</span><input class="input" type="number" id="uiSidebarW" min="180" max="420" step="4" /></label>
-            <label class="field"><span data-i18n="appearance.dockWidth">Dock width</span><input class="input" type="number" id="uiDockW" min="220" max="1280" step="4" /></label>
+          <div class="appearance-fields appearance-ranges">
+            <label class="field range-field">
+              <span><span data-i18n="appearance.sidebarWidth">Sidebar width</span><output id="uiSidebarWVal" for="uiSidebarW">276</output></span>
+              <input class="range-input" type="range" id="uiSidebarW" min="180" max="420" step="4" />
+            </label>
+            <label class="field range-field">
+              <span><span data-i18n="appearance.dockWidth">Dock width</span><output id="uiDockWVal" for="uiDockW">340</output></span>
+              <input class="range-input" type="range" id="uiDockW" min="220" max="1280" step="4" />
+            </label>
           </div>
           <div class="appearance-fields appearance-toggles">
-            <label class="field checkbox-field"><span data-i18n="appearance.sidebarCollapsed">Collapsed sidebar</span><input type="checkbox" id="uiSidebarCollapsed" /></label>
-            <label class="field checkbox-field"><span data-i18n="appearance.queueBar">Queue bar expanded</span><input type="checkbox" id="uiQueueBar" /></label>
-            <label class="field checkbox-field"><span data-i18n="appearance.viewerWrap">Wrap lines in viewer</span><input type="checkbox" id="uiViewerWrap" /></label>
+            <div class="field switch-field">
+              <span data-i18n="appearance.sidebarCollapsed">Collapsed sidebar</span>
+              <label class="switch">
+                <input type="checkbox" id="uiSidebarCollapsed" />
+                <span class="track"></span>
+              </label>
+            </div>
+            <div class="field switch-field">
+              <span data-i18n="appearance.queueBar">Queue bar expanded</span>
+              <label class="switch">
+                <input type="checkbox" id="uiQueueBar" />
+                <span class="track"></span>
+              </label>
+            </div>
+            <div class="field switch-field">
+              <span data-i18n="appearance.viewerWrap">Wrap lines in viewer</span>
+              <label class="switch">
+                <input type="checkbox" id="uiViewerWrap" />
+                <span class="track"></span>
+              </label>
+            </div>
           </div>
           <h4><svg><use href="#i-globe"/></svg> <span data-i18n="language.title">Language</span></h4>
           <div class="seg lang-seg" id="langSeg" role="group" aria-label="Language" data-i18n-aria-label="language.title">
@@ -1030,6 +1062,13 @@
           <button type="button" data-mcp-type="stdio" class="active" data-i18n="mcp.typeStdio">stdio · local</button>
           <button type="button" data-mcp-type="http" data-i18n="mcp.typeHttp">http / sse · remote</button>
         </div>
+        <div class="field switch-field">
+          <span data-i18n="mcp.enabled">Enabled</span>
+          <label class="switch">
+            <input type="checkbox" id="mcpEnabled" checked />
+            <span class="track"></span>
+          </label>
+        </div>
         <div id="mcpStdioFields">
           <label class="field">
             <span data-i18n="mcp.package">npm package</span>
@@ -1048,13 +1087,33 @@
             <span data-i18n="mcp.args">Arguments</span>
             <input class="input mono" id="mcpArgs" type="text" placeholder="/absolute/path  (space separated)" spellcheck="false" />
           </label>
+          <div class="field">
+            <span data-i18n="mcp.env">Environment variables</span>
+            <div class="kv-editor" id="mcpEnvRows"></div>
+            <button class="btn small ghost kv-add" type="button" data-kv-add="mcpEnvRows">
+              <svg><use href="#i-plus"/></svg><span data-i18n="mcp.addVariable">Add variable</span>
+            </button>
+            <small data-i18n="mcp.envNote">Passed only to this stdio process, e.g. API keys and data paths.</small>
+          </div>
         </div>
         <div id="mcpHttpFields" hidden>
           <label class="field">
             <span data-i18n="mcp.url">URL</span>
             <input class="input mono" id="mcpUrl" type="text" placeholder="https://…/mcp" spellcheck="false" />
           </label>
+          <div class="field">
+            <span data-i18n="mcp.headers">HTTP headers</span>
+            <div class="kv-editor" id="mcpHeaderRows"></div>
+            <button class="btn small ghost kv-add" type="button" data-kv-add="mcpHeaderRows">
+              <svg><use href="#i-plus"/></svg><span data-i18n="mcp.addHeader">Add header</span>
+            </button>
+            <small data-i18n="mcp.headersNote">Sent with every request, e.g. Authorization or a tenant header.</small>
+          </div>
         </div>
+        <label class="field">
+          <span data-i18n="mcp.note">Note</span>
+          <textarea class="input" id="mcpNote" rows="2" placeholder="What this server is for" data-i18n-placeholder="mcp.notePlaceholder"></textarea>
+        </label>
         <p class="field-note" data-i18n="mcp.addNote">Installed packages land under data/agent_zero/mcp. Tools show up as mcp__server__tool.</p>
       </div>
       <div class="modal-foot">
@@ -1253,6 +1312,6 @@
 
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
-  <script src="/assets/app.js?v=3.3.8-1" defer></script>
+  <script src="/assets/app.js?v=3.3.9-1" defer></script>
 </body>
 </html>

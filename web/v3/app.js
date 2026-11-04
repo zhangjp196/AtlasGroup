@@ -48,7 +48,7 @@
     windows: new Map(), activeWin: null, z: 100, models: [], activeModel: '', commands: null, 
     globalWin: null,
     selectedWs: null, wsPath: '.', wsFiles: null, wsPreview: null, wsLoading: false,
-    settingsTab: 'models', settings: null, draft: null,
+    settingsTab: 'models', settings: null, draft: null, toolCatalog: null,
     attention: null, gaTab: 'auth', gaOpen: false, gaTimer: null,
     gaAuto: false, gaAutoHandled: new Set(), gaNotifyCount: -1,
   };
@@ -2648,22 +2648,95 @@
     return null;
   }
 
+  async function ensureToolCatalog() {
+    if (Array.isArray(S.toolCatalog)) return S.toolCatalog;
+    try {
+      const data = await api('/app/tools');
+      S.toolCatalog = (data && data.items) || [];
+    } catch { S.toolCatalog = []; }
+    return S.toolCatalog;
+  }
+
+  function roleToolPickerHtml(role, catalog) {
+    const picked = new Set((role && role.tools) || []);
+    if (!catalog.length) {
+      return `<input class="input mono" id="rTools" value="${h(role ? (role.tools || []).join(', ') : '')}" placeholder="read_file, shell（留空 = 全部）" />`;
+    }
+    return `<input class="input" id="rToolSearch" placeholder="搜索工具…" autocomplete="off" />
+      <div class="tool-picker" id="rToolPicker">
+        ${catalog.map((tool) => `<label class="tool-choice" title="${h(tool.description || '')}">
+          <input type="checkbox" data-role-tool="${h(tool.code)}"${picked.has(tool.code) ? ' checked' : ''} />
+          <span>${h(tool.name || tool.code)}</span>
+          <span class="tool-choice-code">${h(tool.code)}</span>
+        </label>`).join('')}
+      </div>
+      <div class="tool-picker-actions">
+        <button class="mini-link" type="button" data-tools-all>全选</button>
+        <button class="mini-link" type="button" data-tools-none>清空</button>
+        <span id="rToolCount">${picked.size ? `已选 ${picked.size} 个` : '未选 = 全部工具'}</span>
+      </div>`;
+  }
+
   async function openRoleEditor(role) {
     const isNew = !role;
+    const catalog = await ensureToolCatalog();
+    const modelCode = (role && role.model_code) || '';
+    const modelOptions = [`<option value="">跟随全局</option>`]
+      .concat(S.models.map((m) => `<option value="${h(m.code)}"${m.code === modelCode ? ' selected' : ''}>${h(m.name || m.code)} · ${h(m.code)}</option>`));
+    if (modelCode && !S.models.some((m) => m.code === modelCode)) {
+      modelOptions.push(`<option value="${h(modelCode)}" selected>${h(modelCode)}</option>`);
+    }
     const saved = await modal({
       title: isNew ? '新建角色' : `编辑「${role.name}」`,
       fields: `<div class="field"><label>名字</label><input class="input" id="rName" value="${h(role ? role.name : '')}" /></div>
         <div class="field"><label>专长（一句话）</label><input class="input" id="rExpertise" value="${h(role ? role.expertise : '')}" /></div>
         <div class="field"><label>人格 / 工作方式</label><textarea class="input" id="rPersona">${h(role ? role.persona : '')}</textarea></div>
-        <div class="field"><label>工具（逗号分隔，留空 = 全部）</label><input class="input" id="rTools" value="${h(role ? (role.tools || []).join(', ') : '')}" /></div>
-        <div class="field"><label>模型档案（可空）</label><input class="input" id="rModel" value="${h(role ? role.model_code : '')}" placeholder="fast / deep / 具体模型编码" /></div>`,
-      read: () => ({
-        name: $('#rName').value.trim(),
-        expertise: $('#rExpertise').value.trim(),
-        persona: $('#rPersona').value.trim(),
-        tools: $('#rTools').value.split(',').map((x) => x.trim()).filter(Boolean),
-        model_code: $('#rModel').value.trim() || null,
-      }),
+        <div class="field"><label>工具权限 <span class="role-line">不选 = 全部工具</span></label>
+          ${roleToolPickerHtml(role, catalog)}
+        </div>
+        <div class="field"><label>模型档案</label>
+          <select class="input" id="rModel">${modelOptions.join('')}</select>
+          <small class="role-line">留空则跟随全局模型。</small>
+        </div>`,
+      onMount: () => {
+        const picker = $('#rToolPicker');
+        if (!picker) return;
+        const count = $('#rToolCount');
+        const paint = () => {
+          const n = $$('[data-role-tool]:checked', picker).length;
+          if (count) count.textContent = n ? `已选 ${n} 个` : '未选 = 全部工具';
+        };
+        picker.addEventListener('change', paint);
+        const search = $('#rToolSearch');
+        if (search) search.addEventListener('input', () => {
+          const q = search.value.trim().toLowerCase();
+          $$('.tool-choice', picker).forEach((el) => {
+            el.hidden = !!q && !el.textContent.toLowerCase().includes(q);
+          });
+        });
+        const all = $('[data-tools-all]');
+        if (all) all.addEventListener('click', () => {
+          $$('[data-role-tool]', picker).forEach((el) => { el.checked = true; });
+          paint();
+        });
+        const none = $('[data-tools-none]');
+        if (none) none.addEventListener('click', () => {
+          $$('[data-role-tool]', picker).forEach((el) => { el.checked = false; });
+          paint();
+        });
+      },
+      read: () => {
+        const fallback = $('#rTools');
+        return {
+          name: $('#rName').value.trim(),
+          expertise: $('#rExpertise').value.trim(),
+          persona: $('#rPersona').value.trim(),
+          tools: fallback
+            ? fallback.value.split(',').map((x) => x.trim()).filter(Boolean)
+            : $$('[data-role-tool]:checked').map((el) => el.dataset.roleTool),
+          model_code: $('#rModel').value || null,
+        };
+      },
     });
     if (!saved) return;
     if (!saved.name) { toast('角色名不能为空', 'bad'); return; }
@@ -2894,7 +2967,7 @@
   }
 
   /* ── 通用模态框 ───────────────────────────────────────── */
-  function modal({ title, fields, buttons, read }) {
+  function modal({ title, fields, buttons, read, onMount }) {
     return new Promise((resolve) => {
       const back = $('#modal');
       $('#modalTitle').textContent = title;
@@ -2924,6 +2997,9 @@
       const closeBtn = $('#modalClose');
       if (closeBtn) closeBtn.onclick = () => { close(); resolve(null); };
       back.hidden = false;
+      if (onMount) {
+        try { onMount(); } catch (err) { console.warn('modal mount failed', err); }
+      }
       const first = $('#modalBody input, #modalBody textarea');
       if (first) setTimeout(() => first.focus(), 30);
     });

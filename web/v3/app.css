@@ -152,6 +152,15 @@ html[data-theme-mode="light"] .theme-toggle .theme-moon{display:block}
 .editor{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:16px;display:flex;flex-direction:column;gap:12px;max-width:760px}
 .field{display:flex;flex-direction:column;gap:5px}
 .field label{font-size:10.5px;color:var(--faint)}
+.field > small{font-size:10px;color:var(--faint);line-height:1.5}
+.tool-picker{display:flex;flex-wrap:wrap;gap:6px;max-height:190px;overflow:auto;border:1px solid var(--line-soft);border-radius:10px;background:var(--bg-2);padding:8px}
+.tool-choice{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--dim);padding:4px 7px;font-size:10.5px;cursor:pointer;white-space:nowrap}
+.tool-choice input{width:13px;height:13px;accent-color:var(--accent);margin:0}
+.tool-choice:has(input:checked){border-color:color-mix(in srgb,var(--accent) 48%,var(--line));background:color-mix(in srgb,var(--accent) 13%,var(--panel));color:var(--text)}
+.tool-choice-code{font:9.5px var(--mono);color:var(--faint)}
+.tool-choice:has(input:checked) .tool-choice-code{color:var(--accent-ink)}
+.tool-picker-actions{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--faint)}
+.tool-picker-actions .mini-link{font-size:10px;padding:2px 4px}
 .input,select.input,textarea.input{background:var(--bg-2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px 10px;font:12px var(--font);width:100%}
 textarea.input{resize:vertical;min-height:70px}
 .member{display:flex;align-items:center;gap:9px;padding:8px;border:1px solid var(--line-soft);border-radius:9px;background:var(--bg-2)}
