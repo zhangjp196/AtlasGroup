@@ -4681,14 +4681,12 @@
     const desc = $('#groupDescInput');
     const mode = $('#groupModeSelect');
     const speakers = $('#groupSpeakers');
-    const search = $('#groupInviteSearch');
     const avatar = $('#groupAvatar');
     if (name) groupDraft.name = name.value;
     if (avatar) groupDraft.avatar = avatar.value;
     if (desc) groupDraft.description = desc.value;
     if (mode) groupDraft.mode = mode.value;
     if (speakers) groupDraft.max_speakers = Number(speakers.value) || 4;
-    if (search) groupDraft.search = search.value;
   }
 
   function groupModeHint(mode, speakers) {
@@ -4708,13 +4706,6 @@
     const all = [];
     if (leader && leader.id) all.push({ ...leader, isLeader: true });
     members.forEach((m) => { if (m && m.id && m.id !== (leader && leader.id)) all.push({ ...m, isLeader: false }); });
-    const used = new Set(all.map((m) => m.id));
-    const usedNames = new Set(all.map((m) => roleNameKey(m.name)).filter(Boolean));
-    const q = String(groupDraft.search || '').trim().toLowerCase();
-    // 邀请列表排除已在群里的成员：id 相同或名字相同都算已加入，避免同名角色重复出现。
-    const available = S.roles.filter((r) => r && r.id && !used.has(r.id)
-      && !usedNames.has(roleNameKey(r.name))
-      && (!q || `${r.name || ''} ${r.expertise || ''} ${r.id}`.toLowerCase().includes(q)));
     const memberRows = all.length ? all.map((m) => `<div class="group-member" data-gm-row="${h(m.id)}">
       ${av(m.name, 'round', m.avatar)}
       <div class="group-member-main">
@@ -4725,14 +4716,7 @@
         <button class="btn small ghost" type="button" data-gm-leader="${h(m.id)}">设为主持</button>
         <button class="iconbtn" type="button" data-gm-remove="${h(m.id)}" title="移出群聊" aria-label="移出群聊"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13"/></svg></button>
       </div>`}
-    </div>`).join('') : '<div class="group-empty">还没有群成员。从下面邀请一个角色。</div>';
-    const inviteRows = available.length ? available.map((r) => `<div class="group-role-row" data-group-role="${h(r.id)}">
-      ${av(r.name, 'round', r.avatar)}
-      <div class="row-main"><div class="row-title">${h(r.name)}${r.scope === 'temporary' ? ' <span class="tag tmp">临时</span>' : ''}</div>
-        <div class="row-sub">${h([r.title, r.department, r.expertise || r.persona].filter(Boolean).join(' · ') || '没有补充说明')}</div></div>
-      <button class="btn small" type="button" data-gm-invite="${h(r.id)}">邀请</button>
-    </div>`).join('') : `<div class="group-empty">${q ? '没有匹配的角色' : '角色库里的角色都已加入'}</div>`;
-    const canInvite = members.length < 12;
+    </div>`).join('') : '<div class="group-empty">还没有群成员。点击「添加成员」从角色库邀请。</div>';
     $('#sideDrawerSub').textContent = `${groupDrawerTeam.name} · ${all.length} 人`;
     body.innerHTML = `<div class="group-identity">
       ${avatarFieldHtml('groupAvatar', 'team', groupDraft.avatar || '', groupDraft.name || groupDrawerTeam.name)}
@@ -4742,16 +4726,10 @@
       </div>
     </div>
     <section class="group-section">
-      <div class="group-section-head"><h3>群成员</h3><span>${all.length} / 13 人 · 群主 1 人</span></div>
+      <div class="group-section-head"><h3>群成员</h3><span>${all.length} / 13 人 · 群主 1 人</span>
+        <button class="btn small" type="button" data-gm-add>＋ 添加成员</button>
+      </div>
       <div class="group-member-list">${memberRows}</div>
-    </section>
-    <section class="group-section">
-      <div class="group-section-head"><h3>邀请成员</h3><span>从角色库添加</span></div>
-      <label class="search group-invite-search">
-        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
-        <input id="groupInviteSearch" placeholder="搜索角色…" autocomplete="off" value="${h(groupDraft.search || '')}" />
-      </label>
-      <div class="group-invite-list">${canInvite ? inviteRows : '<div class="group-empty">群成员已达上限（12 个成员 + 1 个主持）</div>'}</div>
     </section>
     <section class="group-section">
       <div class="group-section-head"><h3>群设置</h3><span>协作方式与发言上限</span></div>
@@ -4777,6 +4755,75 @@
     drawer.hidden = false;
     const scrim = $('#drawerScrim');
     if (scrim) scrim.hidden = false;
+  }
+
+  /** 群成员「添加成员」弹框：从角色库选择，已在群里的（id / 同名）不再列出。 */
+  async function addGroupMembersDialog() {
+    if (!groupDraft) return;
+    const leader = groupDraft.leader;
+    const usedIds = new Set();
+    const usedNames = new Set();
+    if (leader && leader.id) {
+      usedIds.add(leader.id);
+      const n = roleNameKey(leader.name);
+      if (n) usedNames.add(n);
+    }
+    (groupDraft.members || []).forEach((m) => {
+      if (m && m.id) usedIds.add(m.id);
+      const n = roleNameKey(m && m.name);
+      if (n) usedNames.add(n);
+    });
+    const available = (S.roles || []).filter((r) => r && r.id && !usedIds.has(r.id)
+      && !usedNames.has(roleNameKey(r.name)));
+    const remaining = Math.max(0, 12 - (groupDraft.members || []).length);
+    if (remaining <= 0) { toast('群成员已达上限', 'bad'); return; }
+    if (!available.length) { toast('角色库里的角色都已加入', 'ok', 2200); return; }
+    const rows = available.map((r) => `<label class="member member-pick" data-pick-name="${h(`${r.name || ''} ${r.title || ''} ${r.department || ''} ${r.expertise || ''}`.toLowerCase())}">
+      <input type="checkbox" data-pick-role="${h(r.id)}" />
+      ${av(r.name, 'round', r.avatar)}
+      <span class="row-main"><span class="row-title">${h(r.name)}</span><span class="row-sub">${h([r.title, r.department, r.expertise || r.persona].filter(Boolean).join(' · ') || '没有补充说明')}</span></span>
+    </label>`).join('');
+    const saved = await modal({
+      title: '添加群成员',
+      fields: `<div class="field"><label>从角色库选择成员</label>
+          <label class="search group-invite-search">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+            <input id="gmPickSearch" placeholder="搜索角色…" autocomplete="off" />
+          </label>
+        </div>
+        <div class="member-pick-list" id="gmPickList">${rows}</div>
+        <p class="group-mode-hint">还可添加 ${remaining} 个成员；已在群里的角色不会出现在这里。</p>`,
+      buttons: [{ label: '添加', primary: true, value: 'save' }],
+      onMount: () => {
+        const input = $('#gmPickSearch');
+        if (!input) return;
+        input.addEventListener('input', () => {
+          const q = input.value.trim().toLowerCase();
+          $$('#gmPickList .member-pick').forEach((el) => {
+            el.hidden = !!q && !String(el.dataset.pickName || '').includes(q);
+          });
+        });
+      },
+      read: () => $$('#gmPickList [data-pick-role]:checked').map((el) => el.dataset.pickRole),
+    });
+    if (!saved || !saved.length) return;
+    let added = 0;
+    for (const id of saved) {
+      if (added >= remaining) { toast(`最多还能添加 ${remaining} 个成员`, 'bad'); break; }
+      const role = (S.roles || []).find((r) => r.id === id);
+      if (!role) continue;
+      const key = roleNameKey(role.name);
+      if ((groupDraft.members || []).some((m) => m.id === role.id
+        || (key && roleNameKey(m.name) === key))) continue;
+      if (groupDraft.leader && (groupDraft.leader.id === role.id
+        || (key && roleNameKey(groupDraft.leader.name) === key))) continue;
+      groupDraft.members.push(groupRoleBrief(role));
+      added += 1;
+    }
+    if (added) {
+      renderGroupDrawer();
+      toast(`已添加 ${added} 个成员`, 'ok', 1800);
+    }
   }
 
   function openGroupDetail(teamId) {
@@ -4807,7 +4854,6 @@
       max_speakers: Number(team.max_speakers) || 4,
       leader,
       members,
-      search: '',
     };
     renderGroupDrawer();
   }
@@ -5494,6 +5540,11 @@
       }
       if (e.target.closest('[data-role-promote]')) { promoteRoleDrawer(); return; }
       if (e.target.closest('[data-role-delete]')) { deleteRoleDrawer(); return; }
+      if (e.target.closest('[data-gm-add]') && groupDraft) {
+        syncGroupDraft();
+        addGroupMembersDialog();
+        return;
+      }
       const remove = e.target.closest('[data-gm-remove]');
       if (remove && groupDraft) {
         syncGroupDraft();
@@ -5512,22 +5563,6 @@
           groupDraft.members.push(old);
         }
         groupDraft.leader = target;
-        renderGroupDrawer();
-        return;
-      }
-      const invite = e.target.closest('[data-gm-invite]');
-      if (invite && groupDraft) {
-        syncGroupDraft();
-        if (groupDraft.members.length >= 12) { toast('群成员已达上限', 'bad'); return; }
-        const role = S.roles.find((r) => r.id === invite.dataset.gmInvite);
-        if (!role) return;
-        const key = roleNameKey(role.name);
-        const leader = groupDraft.leader;
-        if ((groupDraft.members || []).some((m) => m.id === role.id
-              || (key && roleNameKey(m.name) === key))
-            || (leader && (leader.id === role.id
-              || (key && roleNameKey(leader.name) === key)))) return;
-        groupDraft.members.push(groupRoleBrief(role));
         renderGroupDrawer();
         return;
       }
@@ -5550,13 +5585,7 @@
     });
     sideDrawer.addEventListener('input', (e) => {
       if (!groupDraft) return;
-      if (e.target.id === 'groupInviteSearch') {
-        groupDraft.search = e.target.value;
-        const q = groupDraft.search.trim().toLowerCase();
-        $$('.group-role-row', $('#sideDrawerBody')).forEach((row) => {
-          row.hidden = !!q && !row.textContent.toLowerCase().includes(q);
-        });
-      } else if (e.target.id === 'groupSpeakers') {
+      if (e.target.id === 'groupSpeakers') {
         groupDraft.max_speakers = Number(e.target.value) || 4;
         const out = $('#groupSpeakersVal');
         if (out) out.textContent = String(groupDraft.max_speakers);

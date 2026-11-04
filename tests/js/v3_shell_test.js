@@ -49,7 +49,7 @@ check('@/工具行 / 任务卡渲染', JS.includes('function toolNode(') && JS.i
 check('角色创建 / 编辑', JS.includes('openRoleEditor') && JS.includes("api('/roles', { method: 'POST'"));
 check('群组创建 / 编辑', JS.includes("api('/teams', { method: 'POST'") && JS.includes("method: 'PATCH'"));
 check('群聊设置是 QQ 式抽屉', HTML.includes('id="sideDrawer"')
-  && JS.includes('function renderGroupDrawer(') && JS.includes('data-gm-invite')
+  && JS.includes('function renderGroupDrawer(') && JS.includes('data-gm-add')
   && JS.includes('data-gm-remove') && JS.includes('data-gm-leader')
   && CSS.includes('.side-drawer') && CSS.includes('.group-member'));
 check('会话信息不再弹框，直接进群设置', JS.includes('function openConversationInfo(w)')
