@@ -7,8 +7,9 @@
   <meta name="theme-color" content="#0d0d0e" />
   <title>AtlasX</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <script src="/assets/theme.js?v=3.3.8-1"></script>
   <link rel="stylesheet" href="/assets/vendor/codemirror/codemirror.css" />
-  <link rel="stylesheet" href="/assets/app.css?v=3.3.7-1" />
+  <link rel="stylesheet" href="/assets/app.css?v=3.3.8-1" />
 </head>
 <body>
   <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
@@ -725,6 +726,8 @@
             <div class="theme-schedule-fields" id="themeDayNightFields" hidden>
               <label class="field"><span data-i18n="appearance.dayTheme">Day theme</span><select class="input" id="themeDayTheme"></select></label>
               <label class="field"><span data-i18n="appearance.nightTheme">Night theme</span><select class="input" id="themeNightTheme"></select></label>
+              <label class="field"><span data-i18n="appearance.dayStart">Day starts</span><input class="input" type="time" id="themeDayStart" /></label>
+              <label class="field"><span data-i18n="appearance.nightStart">Night starts</span><input class="input" type="time" id="themeNightStart" /></label>
             </div>
             <div class="theme-schedule-fields" id="themeRotateFields" hidden>
               <label class="field"><span data-i18n="appearance.rotateEvery">Rotate every</span><select class="input" id="themeRotateInterval">
@@ -1250,6 +1253,6 @@
 
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
-  <script src="/assets/app.js?v=3.3.7-1" defer></script>
+  <script src="/assets/app.js?v=3.3.8-1" defer></script>
 </body>
 </html>

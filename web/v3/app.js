@@ -54,6 +54,105 @@
   };
   try { S.gaAuto = localStorage.getItem('atlasx.ga.auto') === '1'; } catch { /* ignore */ }
 
+  /* ── 主题：暗 / 亮 + 按系统时间自动切换 ─────────────────── */
+  const THEME_LABELS = {
+    dark: '深色', light: '浅色', midnight: '午夜', slate: '石板',
+    ocean: '海洋', forest: '森林', sepia: '复古', violet: '紫罗兰',
+  };
+  const themeCore = window.AtlasTheme || null;
+  S.theme = themeCore ? themeCore.readTheme() : 'dark';
+  S.themeSchedule = themeCore ? themeCore.readSchedule() : {
+    mode: 'manual', day: 'light', night: 'dark', interval: 15, dayStart: '06:00', nightStart: '19:00',
+  };
+  S.themeTimer = null;
+
+  function applyTheme(theme, opts = {}) {
+    S.theme = themeCore ? themeCore.apply(theme) : theme;
+    const auto = S.themeSchedule.mode !== 'manual';
+    const btn = $('#themeToggle');
+    if (btn) {
+      const label = THEME_LABELS[S.theme] || S.theme;
+      btn.title = auto
+        ? `主题：${label} · 按系统时间自动切换（设置 → 外观可调整）`
+        : `主题：${label}（点击切换明暗）`;
+      btn.setAttribute('aria-label', btn.title);
+      btn.classList.toggle('auto', auto);
+    }
+    const badge = $('#themeAuto');
+    if (badge) badge.hidden = !auto;
+    if (opts.persist !== false) persistThemePrefs();
+    return S.theme;
+  }
+
+  function persistThemePrefs() {
+    if (themeCore) themeCore.writePrefs(S.theme, S.themeSchedule);
+  }
+
+  function scheduledTheme() {
+    if (!themeCore) return S.theme;
+    return themeCore.scheduledTheme(S.themeSchedule, S.theme);
+  }
+
+  function tickTheme() {
+    if (S.themeSchedule.mode === 'manual') return;
+    const next = scheduledTheme();
+    if (next !== S.theme) {
+      applyTheme(next);
+      broadcastThemeToSettings();
+    }
+  }
+
+  function startThemeSchedule() {
+    if (S.themeTimer) { clearInterval(S.themeTimer); S.themeTimer = null; }
+    tickTheme();
+    if (S.themeSchedule.mode !== 'manual') {
+      S.themeTimer = setInterval(tickTheme, 20000);
+    }
+    applyTheme(S.theme, { persist: false });
+  }
+
+  function toggleTheme() {
+    // 快捷按钮只在明 / 暗之间切换；要自动切换请到「设置 → 外观」。
+    const wasAuto = S.themeSchedule.mode !== 'manual';
+    const next = (themeCore ? themeCore.modeOf(S.theme) : 'dark') === 'light' ? 'dark' : 'light';
+    S.themeSchedule.mode = 'manual';
+    applyTheme(next);
+    startThemeSchedule();
+    broadcastThemeToSettings();
+    toast(wasAuto
+      ? `已切换为${THEME_LABELS[next] || next}主题，按时间自动切换已关闭`
+      : `已切换到${THEME_LABELS[next] || next}主题`, 'ok', wasAuto ? 2200 : 1400);
+  }
+
+  function broadcastThemeToSettings() {
+    const frame = $('.settings-frame');
+    if (!frame || !frame.contentWindow) return;
+    try {
+      frame.contentWindow.postMessage({
+        type: 'atlasx:theme-apply', theme: S.theme, schedule: S.themeSchedule,
+      }, location.origin);
+    } catch { /* ignore */ }
+  }
+
+  // 内嵌设置页改了主题 / 定时设置时同步外壳。
+  window.addEventListener('message', (event) => {
+    if (event.origin !== location.origin) return;
+    const data = event.data || {};
+    if (data.type !== 'atlasx:theme') return;
+    if (data.schedule && themeCore) S.themeSchedule = themeCore.normalizeSchedule(data.schedule);
+    if (data.theme) applyTheme(data.theme);
+    startThemeSchedule();
+  });
+
+  // 另一个标签页 / 窗口改了设置时也跟随。
+  window.addEventListener('storage', (event) => {
+    if (!themeCore || (event.key !== themeCore.KEYS.theme && event.key !== themeCore.KEYS.schedule)) return;
+    S.theme = themeCore.readTheme();
+    S.themeSchedule = themeCore.readSchedule();
+    startThemeSchedule();
+    broadcastThemeToSettings();
+  });
+
   // 一个会话是群聊的唯一判据：绑定的团队真的有成员。
   // 旧版本会把「只有主持」的默认团队绑到单聊上；那种不算群聊，
   // 否则单聊会被显示成「默认群聊」并出现 @成员 / 主持口吻。
@@ -1807,13 +1906,39 @@
     return el;
   }
 
-  /* 助手一轮 = 可折叠的「过程」+ 最终答复。
-     后端把思考 / 工具 / 中间正文按发生顺序落在 trace；这里按时间线还原，
-     完成后过程自动折叠，最终正文始终留在外面。 */
+  /* 助手一轮 = 按真实发生顺序交错的时间线：思考 / 工具 / 中间正文 / 最终答复。
+     后端把过程按发生顺序落在 trace；这里不再把所有过程折到最上面，
+     每一步都留在它发生的位置，思考块各自可折叠。 */
+  function normalizeTrace(trace) {
+    const items = [];
+    const tools = new Map();
+    (trace || []).forEach((raw) => {
+      if (!raw || typeof raw !== 'object') return;
+      const s = { ...raw };
+      if (s.kind === 'tool') {
+        // 后端把工具拆成 start / end 两条：按 id 合并成一条，位置留在开始处。
+        if (s.id && tools.has(s.id)) {
+          Object.assign(tools.get(s.id), s);
+          return;
+        }
+        if (s.status === undefined) {
+          s.status = (s.phase === 'end' || s.ok !== undefined || s.duration_ms !== undefined)
+            ? 'done' : 'running';
+        }
+        items.push(s);
+        if (s.id) tools.set(s.id, s);
+      } else {
+        items.push(s);
+      }
+    });
+    const timed = items.every((s) => Number.isFinite(Number(s.ts)));
+    if (timed) items.sort((a, b) => Number(a.ts) - Number(b.ts));
+    return items;
+  }
+
   function traceEntries(m) {
     const entries = [];
-    const trace = Array.isArray(m.trace) ? m.trace : [];
-    trace.forEach((s) => {
+    normalizeTrace(Array.isArray(m.trace) ? m.trace : []).forEach((s) => {
       if (!s || !s.kind) return;
       if (s.kind === 'thinking') {
         const text = String(s.text || '').trim();
@@ -1831,6 +1956,8 @@
         entries.push({ kind: s.kind, text: String(s.text || '') });
       }
     });
+    // 旧数据只有 reasoning、没有 trace 里的 thinking：它发生在答复之前，
+    // 留在时间线开头；已有 trace 的顺序不受影响。
     if (m.reasoning && !entries.some((e) => e.kind === 'thinking')) {
       entries.unshift({ kind: 'thinking', text: String(m.reasoning) });
     }
@@ -1840,28 +1967,27 @@
     return entries;
   }
 
-  function assistantFinal(m, entries) {
+  // 把最终答复接回时间线：已经在 trace 末尾的 text 块只打 final 标记，
+  // 没有的话追加到末尾。最终答复因此总在它该出现的位置，而不是另起一块。
+  function markAssistantFinal(m, entries) {
     const body = String(m.content || '').trim();
     if (body) {
-      // 后端常把最终答复同时写进 trace 的最后一个 text step；正文单独展示，
-      // 过程里就不再重复一份。
       for (let i = entries.length - 1; i >= 0; i -= 1) {
         const e = entries[i];
         if (e.kind === 'text' && String(e.text || '').trim() === body) {
-          entries.splice(i, 1);
-          break;
+          e.final = true;
+          return;
         }
       }
-      return body;
+      entries.push({ kind: 'text', text: body, final: true });
+      return;
     }
     for (let i = entries.length - 1; i >= 0; i -= 1) {
       if (entries[i].kind === 'text' && String(entries[i].text || '').trim()) {
-        const text = String(entries[i].text).trim();
-        entries.splice(i, 1);
-        return text;
+        entries[i].final = true;
+        return;
       }
     }
-    return '';
   }
 
   function toolHtml(t) {
@@ -1890,38 +2016,28 @@
     return `<details class="tool-args"><summary>${t.display && t.display.diff ? '改动' : '参数'}</summary><pre>${h(text)}</pre></details>`;
   }
 
-  function procStepHtml(step) {
+  function procStepHtml(step, opts = {}) {
     if (step.kind === 'thinking') {
-      return `<details class="think-step" open><summary><span class="proc-caret">›</span><b>深度思考</b><span class="think-brief">${h(firstLine(step.text, 120))}</span></summary>
+      return `<details class="think-step"${opts.open ? ' open' : ''}><summary><span class="proc-caret">›</span><b>深度思考</b><span class="think-brief">${h(firstLine(step.text, 120))}</span>${opts.live ? '<span class="live-dots"><i></i><i></i><i></i></span>' : ''}</summary>
         <div class="think-body">${h(step.text || '')}</div></details>`;
     }
     if (step.kind === 'tool') {
       return `<div class="proc-tool"><div class="tool-line">${toolHtml(step)}</div>${toolDetailHtml(step)}</div>`;
     }
     if (step.kind === 'text') {
-      return `<div class="proc-text">${md(step.text || '')}</div>`;
+      if (step.final) {
+        return `<div class="bubble assistant-text">${md(step.text || '')}${opts.streaming ? '<span class="streaming-caret"></span>' : ''}</div>`;
+      }
+      return `<div class="proc-text">${md(step.text || '')}${opts.streaming ? '<span class="streaming-caret"></span>' : ''}</div>`;
     }
     const label = step.kind === 'retry' ? '自动重试' : '上下文压缩';
     return `<div class="proc-note"><b>${label}</b>${step.text ? ` · ${h(firstLine(step.text, 160))}` : ''}</div>`;
   }
 
-  function processFoldHtml(m, entries, forceOpen = false) {
+  // 历史消息：保持 trace 顺序，不再把所有思考 / 工具折到顶部。
+  function assistantFlowHtml(entries) {
     if (!entries.length) return '';
-    const thoughts = entries.filter((x) => x.kind === 'thinking').length;
-    const tools = entries.filter((x) => x.kind === 'tool').length;
-    const meta = [];
-    if (thoughts) meta.push(`深度思考 ${thoughts}`);
-    if (tools) meta.push(`工具 ${tools}`);
-    const ms = durationText(m.duration_ms);
-    if (ms) meta.push(ms);
-    return `<details class="turn-fold"${forceOpen ? ' open' : ''}>
-      <summary class="turn-fold-bar">
-        <span class="fold-caret">›</span>
-        <span class="turn-fold-title">过程</span>
-        <span class="turn-fold-meta">${h(meta.join(' · '))}</span>
-      </summary>
-      <div class="turn-fold-body">${entries.map(procStepHtml).join('')}</div>
-    </details>`;
+    return `<div class="turn-flow">${entries.map((step) => procStepHtml(step)).join('')}</div>`;
   }
 
   function assistantNode(m) {
@@ -1929,7 +2045,7 @@
     el.className = 'msg assistant';
     el.dataset.msgId = m.id || '';
     const entries = traceEntries(m);
-    const final = assistantFinal(m, entries);
+    markAssistantFinal(m, entries);
     const name = m.role_name || 'AtlasX';
     const meta = [];
     const ms = durationText(m.duration_ms);
@@ -1938,8 +2054,7 @@
     if (m.error) meta.push('失败');
     el.innerHTML = `${av(name, 'round')}
       <div class="msg-body"><div class="msg-who"><b>${h(name)}</b>${meta.length ? `<span class="msg-meta">${h(meta.join(' · '))}</span>` : ''}</div>
-      ${processFoldHtml(m, entries, !final)}
-      ${final ? `<div class="bubble assistant-text">${md(final)}</div>` : ''}
+      ${assistantFlowHtml(entries)}
       ${m.error ? `<div class="run-error">${h(m.error)}</div>` : ''}</div>`;
     return el;
   }
@@ -2045,17 +2160,13 @@
     const live = document.createElement('div');
     live.className = 'msg assistant';
     live.innerHTML = `${av('A', 'round')}<div class="msg-body"><div class="msg-who"><b>AtlasX</b></div>
-      <details class="turn-fold live-fold" hidden>
-        <summary class="turn-fold-bar"><span class="fold-caret">›</span><span class="turn-fold-title">深度思考中</span><span class="live-dots"><i></i><i></i><i></i></span></summary>
-        <div class="turn-fold-body"><div class="think-body live-think"></div></div>
-      </details>
-      <div class="tools live-tools"></div>
-      <div class="bubble"></div></div>`;
+      <div class="turn-flow live-flow"></div></div>`;
     box.appendChild(live);
+    const liveFlow = $('.live-flow', live);
     w.live = {
-      el: live, text: '', think: '', tools: new Map(),
-      thinkFold: $('.live-fold', live), thinkBody: $('.live-think', live),
-      toolHost: $('.live-tools', live),
+      el: live, flow: liveFlow, toolHost: liveFlow, tools: new Map(),
+      text: '', textEl: null, textRound: null,
+      thinkEl: null, thinkText: '', thinkRound: null, lastKind: '',
     };
     scrollBottom(box, true);
     ta.focus();
@@ -2095,11 +2206,11 @@
 
   function paintError(w, msg) {
     if (!w.live) return;
-    const tools = $('.tools', w.live.el);
+    const host = w.live.flow || $('.live-flow', w.live.el);
     const el = document.createElement('div');
     el.className = 'tool-line';
     el.innerHTML = `<span class="fail">!</span><span>${h(msg)}</span>`;
-    tools.appendChild(el);
+    if (host) host.appendChild(el);
     $('.send', w.el).disabled = false;
   }
 
@@ -2223,8 +2334,7 @@
       markListDirty();
     }
     if (!w.live) return;
-    const body = $('.bubble', w.live.el);
-    const tools = w.live.toolHost || $('.tools', w.live.el);
+    const host = w.live.flow || $('.live-flow', w.live.el);
     const box = $('.msgs', w.el);
     if (evt.start) {
       const who = $('.msg-who', w.live.el);
@@ -2234,27 +2344,12 @@
     }
     if (evt.thinking !== undefined) {
       const piece = String(evt.thinking || '');
-      if (piece) {
-        w.live.think += piece;
-        const fold = w.live.thinkFold;
-        if (fold) {
-          fold.hidden = false;
-          fold.open = true;
-          const title = $('.turn-fold-title', fold);
-          if (title) title.textContent = '深度思考中';
-        }
-        if (w.live.thinkBody) w.live.thinkBody.textContent = w.live.think;
-        scrollInner($('.turn-fold-body', fold));
-        scrollInner(w.live.thinkBody);
-        scrollBottom(box);
-      }
+      if (piece) liveAppendThinking(w, piece, evt.round);
       return;
     }
     if (evt.delta !== undefined) {
-      w.live.text += String(evt.delta || '');
-      body.textContent = w.live.text;
-      if (!body.classList.contains('streaming')) body.classList.add('streaming');
-      scrollBottom(box);
+      const piece = String(evt.delta || '');
+      if (piece) liveAppendText(w, piece, evt.round);
       return;
     }
     const tc = evt.tool_call;
@@ -2262,9 +2357,12 @@
       const id = tc.id || tc.name;
       let line = w.live.tools.get(id);
       if (!line) {
+        liveCloseThinking(w);
+        liveCloseText(w);
         line = toolNode({ id, name: tc.name, status: tc.status || 'running', ok: true });
         w.live.tools.set(id, line);
-        tools.appendChild(line);
+        host.appendChild(line);
+        w.live.lastKind = 'tool';
       } else {
         paintTool(line, { ...tc, status: tc.status || 'running', ok: true });
       }
@@ -2274,12 +2372,17 @@
     const tr = evt.tool_result;
     if (tr) {
       const id = tr.id || tr.name;
-      const line = w.live.tools.get(id);
+      let line = w.live.tools.get(id);
+      if (!line && id) {
+        line = toolNode({ id, name: tr.name, status: 'done', ok: tr.ok !== false, duration_ms: tr.duration_ms });
+        w.live.tools.set(id, line);
+        host.appendChild(line);
+      }
       if (line) paintTool(line, { ...tr, status: 'done', ok: tr.ok !== false, duration_ms: tr.duration_ms });
       return;
     }
     if (evt.todo_update) {
-      renderTasks(tools, evt.todo_update.items || []);
+      renderTasks(host, evt.todo_update.items || []);
       scrollBottom(box);
       return;
     }
@@ -2323,22 +2426,105 @@
     }
     if (evt.done) {
       const content = evt.content || evt.text;
-      if (content) body.innerHTML = md(content);
-      body.classList.remove('streaming');
-      collapseLiveThinking(w);
+      const live = w.live;
+      if (content) {
+        if (!live.textEl || live.lastKind !== 'text') {
+          liveCloseThinking(w);
+          liveCloseText(w);
+          const el = document.createElement('div');
+          el.className = 'bubble assistant-text';
+          live.flow.appendChild(el);
+          live.textEl = el;
+          live.textRound = evt.round;
+          live.lastKind = 'text';
+        }
+        live.text = content;
+        live.textEl.innerHTML = md(content);
+        live.textEl.classList.remove('streaming');
+      }
+      liveCloseThinking(w);
+      if (live.textEl) live.textEl.classList.remove('streaming');
       $('.send', w.el).disabled = false;
       scrollBottom(box);
     }
   }
 
-  function collapseLiveThinking(w) {
-    const fold = w && w.live && w.live.thinkFold;
-    if (!fold) return;
-    fold.open = false;
-    const dots = $('.live-dots', fold);
+  // 新的思考片段：接在当前时间线后面；上一段思考 / 正文先收起来。
+  function liveAppendThinking(w, piece, round) {
+    const live = w.live;
+    if (!live || !live.flow) return;
+    if (!live.thinkEl || live.lastKind !== 'thinking' || live.thinkRound !== round) {
+      liveCloseText(w);
+      liveCloseThinking(w);
+      const el = document.createElement('details');
+      el.className = 'think-step';
+      el.open = true;
+      el.innerHTML = `<summary><span class="proc-caret">›</span><b>深度思考中</b><span class="think-brief"></span><span class="live-dots"><i></i><i></i><i></i></span></summary>
+        <div class="think-body"></div>`;
+      live.flow.appendChild(el);
+      live.thinkEl = el;
+      live.thinkText = '';
+      live.thinkRound = round;
+      live.lastKind = 'thinking';
+    }
+    live.thinkText += piece;
+    const body = $('.think-body', live.thinkEl);
+    if (body) body.textContent = live.thinkText;
+    const brief = $('.think-brief', live.thinkEl);
+    if (brief) brief.textContent = firstLine(live.thinkText, 120);
+    scrollInner(body);
+    scrollBottom($('.msgs', w.el));
+  }
+
+  // 正文增量：同一轮接到当前 text 块，换轮 / 被工具或思考打断后另起一块。
+  function liveAppendText(w, piece, round) {
+    const live = w.live;
+    if (!live || !live.flow) return;
+    if (!live.textEl || live.lastKind !== 'text' || live.textRound !== round) {
+      liveCloseThinking(w);
+      liveCloseText(w);
+      const el = document.createElement('div');
+      el.className = 'bubble assistant-text streaming';
+      live.flow.appendChild(el);
+      live.textEl = el;
+      live.text = '';
+      live.textRound = round;
+      live.lastKind = 'text';
+    }
+    live.text += piece;
+    live.textEl.textContent = live.text;
+    if (!live.textEl.classList.contains('streaming')) live.textEl.classList.add('streaming');
+    scrollBottom($('.msgs', w.el));
+  }
+
+  function liveCloseThinking(w) {
+    const live = w && w.live;
+    if (!live || !live.thinkEl) return;
+    live.thinkEl.open = false;
+    const dots = $('.live-dots', live.thinkEl);
     if (dots) dots.remove();
-    const title = $('.turn-fold-title', fold);
+    const title = $('b', live.thinkEl);
     if (title) title.textContent = '深度思考';
+    if (live.lastKind === 'thinking') live.lastKind = '';
+    live.thinkEl = null;
+    live.thinkText = '';
+    live.thinkRound = null;
+  }
+
+  function liveCloseText(w) {
+    const live = w && w.live;
+    if (!live || !live.textEl) return;
+    live.textEl.classList.remove('streaming');
+    if (live.lastKind === 'text') live.lastKind = '';
+    live.textEl = null;
+    live.text = '';
+    live.textRound = null;
+  }
+
+  function collapseLiveThinking(w) {
+    liveCloseThinking(w);
+    const live = w && w.live;
+    if (live && live.textEl) live.textEl.classList.remove('streaming');
   }
 
   function approvalCard(w, a) {
@@ -3111,6 +3297,11 @@
       if (w) { e.preventDefault(); switchTo(w); }
     }
   });
+  const themeToggle = $('#themeToggle');
+  if (themeToggle) themeToggle.addEventListener('click', toggleTheme);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) tickTheme();
+  });
   $('#listAdd').addEventListener('click', () => {
     if (S.section === 'role') openRoleEditor(null);
     else if (S.section === 'group') newGroup();
@@ -3163,6 +3354,7 @@
   }
 
   // 初始化（?section=role&conv=conv-xxx 便于深链 / 截图；?pick=ws 直接打开目录选择器）
+  startThemeSchedule();
   loadAttention();
   loadAll().then(() => {
     const p = new URLSearchParams(location.search);

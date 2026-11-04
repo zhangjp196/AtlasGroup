@@ -62,12 +62,17 @@ check('斜杠命令', JS.includes('function updateSlash(') && JS.includes('/app/
 check('附件上传 / 展示', JS.includes('function addAttachments(') && JS.includes('attachmentsHtml(m.attachments)'));
 check('思考档位', JS.includes('function thinkingOptions(') && JS.includes('data-think'));
 check('深度思考流式显示并自动折叠', JS.includes('evt.thinking') && JS.includes('function collapseLiveThinking(')
-  && CSS.includes('.turn-fold') && CSS.includes('.think-step'));
-check('历史过程折叠（思考 / 工具 / 最终正文）', JS.includes('function traceEntries(')
-  && JS.includes('function processFoldHtml(') && JS.includes('reasoning'));
+  && JS.includes('function liveAppendThinking(') && CSS.includes('.turn-fold') && CSS.includes('.think-step'));
+check('流式思考 / 正文按发生顺序追加', JS.includes('function liveAppendText(')
+  && JS.includes('live.flow.appendChild') && CSS.includes('.turn-flow'));
+check('历史时间线按发生顺序（思考 / 工具 / 正文）', JS.includes('function traceEntries(')
+  && JS.includes('function assistantFlowHtml(') && JS.includes('function markAssistantFinal(')
+  && JS.includes('function normalizeTrace(') && JS.includes('reasoning')
+  && !JS.includes('function processFoldHtml('));
 check('自动贴底 / 回到底部', JS.includes('function nearBottom(') && JS.includes('function scrollBottom(')
   && JS.includes('data-scroll-bottom') && CSS.includes('.scroll-down'));
-check('流式时内部思考 / 过程也自动滚到底', JS.includes('function scrollInner(') && JS.includes('scrollInner($(\'.turn-fold-body\', fold))'));
+check('流式时内部思考 / 过程也自动滚到底', JS.includes('function scrollInner(')
+  && JS.includes('function liveAppendThinking(') && JS.includes('scrollInner(body)'));
 check('正文自动滚动的是 .win-body（不是 .msgs）', JS.includes("box.closest('.win-body')")
   && JS.includes("const scroller = $('.win-body', w.el) || box"));
 check('全局 Agent 悬浮入口 + 多角标', HTML.includes('id="gaFab"') && HTML.includes('id="gaPanel"')

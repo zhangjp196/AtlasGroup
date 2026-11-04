@@ -108,8 +108,9 @@
     filter: '',
     mode: 'autonomous',
     permMode: 'once',
-    theme: localStorage.getItem('az-theme') || 'dark',
-    themeSchedule: loadJson('az-theme-schedule', { mode: 'manual', day: 'light', night: 'dark', interval: 15 }),
+    theme: (window.AtlasTheme ? AtlasTheme.readTheme() : (localStorage.getItem('az-theme') || 'dark')),
+    themeSchedule: (window.AtlasTheme ? AtlasTheme.readSchedule()
+      : loadJson('az-theme-schedule', { mode: 'manual', day: 'light', night: 'dark', interval: 15, dayStart: '06:00', nightStart: '19:00' })),
     scheduleTimer: null,
     ui: (() => {
       const ui = loadJson('az-ui', {
@@ -220,6 +221,8 @@
       'appearance.scheduleRotate': 'Rotate',
       'appearance.dayTheme': 'Day theme',
       'appearance.nightTheme': 'Night theme',
+      'appearance.dayStart': 'Day starts',
+      'appearance.nightStart': 'Night starts',
       'appearance.rotateEvery': 'Rotate every',
       'dock.tabWorkspace': 'Workspace',
       'dock.tabViewer': 'Viewer',
@@ -230,7 +233,7 @@
       'appearance.resetLayout': 'Reset layout',
       'appearance.layoutNote': "Each panel opened from a workspace, memory, version control, or task action gets its own tab. Drag tabs to reorder; use a tab's close button to close it. The chevron in the tab bar collapses the dock, and the arrow on the rail expands it. Drag the dock or sidebar edge to resize. All interface settings are saved globally on the server (with a local browser copy as fallback).",
       'appearance.noteManual': 'Theme stays as selected.',
-      'appearance.noteDayNight': 'Auto-switches to {day} from 06:00 to 19:00, otherwise {night}.',
+      'appearance.noteDayNight': 'Uses {day} from {dayStart} to {nightStart}, otherwise {night}.',
       'appearance.noteRotate': 'Cycles through all themes every {interval} minutes.',
       'appearance.layoutReset': 'Layout reset',
       'appearance.details': 'Interface details',
@@ -1352,6 +1355,8 @@
       'appearance.scheduleRotate': '轮换',
       'appearance.dayTheme': '日间主题',
       'appearance.nightTheme': '夜间主题',
+      'appearance.dayStart': '白天开始',
+      'appearance.nightStart': '夜间开始',
       'appearance.rotateEvery': '轮换间隔',
       'dock.tabWorkspace': '工作区',
       'dock.tabViewer': '预览',
@@ -1362,7 +1367,7 @@
       'appearance.resetLayout': '重置布局',
       'appearance.layoutNote': '工作区、记忆、版本控制、任务等功能每打开一个面板都会新增一个标签页；标签页可拖拽重排，也可点击关闭按钮关闭。标签栏上的箭头可把 dock 收缩到边栏，边栏上的箭头可展开；拖拽 dock 或侧栏边缘可调整宽度。所有界面设置都会全局保存到服务器（浏览器本地有一份备份）。',
       'appearance.noteManual': '主题保持当前选择。',
-      'appearance.noteDayNight': '06:00-19:00 自动切换为 {day}，其余时间为 {night}。',
+      'appearance.noteDayNight': '{dayStart}-{nightStart} 使用 {day}，其余时间自动切换为 {night}。',
       'appearance.noteRotate': '每 {interval} 分钟轮换一次主题。',
       'appearance.layoutReset': '布局已重置',
       'appearance.details': '界面细节',
@@ -1373,7 +1378,7 @@
       'appearance.workspaceSection': '工作区列表展开',
       'appearance.queueBar': '队列条展开',
       'appearance.viewerWrap': '预览自动换行',
-      'theme.midnight': '午夜', 'theme.slate': '石板', 'theme.ocean': '海洋', 'theme.forest': '森林', 'theme.sepia': '复古', 'theme.violet': '紫罗兰',
+      'theme.dark': '深色', 'theme.light': '浅色', 'theme.midnight': '午夜', 'theme.slate': '石板', 'theme.ocean': '海洋', 'theme.forest': '森林', 'theme.sepia': '复古', 'theme.violet': '紫罗兰',
       'sidebar.open': '打开侧边栏',
       'newConversation': '新建对话',
       'search.placeholder': '搜索对话',
@@ -11666,6 +11671,11 @@
     const saveBtn = $('#saveSettingsBtn');
     if (saveBtn) saveBtn.hidden = active !== 'models';
     if (active === 'usage') loadUsageStats();
+    if (active === 'appearance') {
+      renderThemeGrid();
+      syncThemeScheduleControls();
+      renderThemeScheduleNote();
+    }
     if (active === 'extensions') { loadExtensions(); }
     if (active === 'tools') renderToolsCatalog();
     if (active === 'runtime') {
@@ -13728,9 +13738,36 @@
     const note = $('#themeScheduleNote');
     if (!note) return;
     const sc = state.themeSchedule;
-    if (sc.mode === 'daynight') note.textContent = t('appearance.noteDayNight', { day: themeLabel(sc.day), night: themeLabel(sc.night) });
-    else if (sc.mode === 'rotate') note.textContent = t('appearance.noteRotate', { interval: sc.interval });
+    if (sc.mode === 'daynight') {
+      note.textContent = t('appearance.noteDayNight', {
+        day: themeLabel(sc.day),
+        night: themeLabel(sc.night),
+        dayStart: sc.dayStart || '06:00',
+        nightStart: sc.nightStart || '19:00',
+      });
+    } else if (sc.mode === 'rotate') note.textContent = t('appearance.noteRotate', { interval: sc.interval });
     else note.textContent = t('appearance.noteManual');
+  }
+
+  function syncThemeScheduleControls() {
+    const sc = state.themeSchedule;
+    $$('#themeScheduleSeg [data-schedule-mode]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.scheduleMode === sc.mode);
+    });
+    const dayFields = $('#themeDayNightFields');
+    const rotateFields = $('#themeRotateFields');
+    if (dayFields) dayFields.hidden = sc.mode !== 'daynight';
+    if (rotateFields) rotateFields.hidden = sc.mode !== 'rotate';
+    const setVal = (sel, value) => {
+      const el = $(sel);
+      if (el && value) el.value = value;
+    };
+    setVal('#themeDayTheme', sc.day);
+    setVal('#themeNightTheme', sc.night);
+    setVal('#themeDayStart', sc.dayStart || '06:00');
+    setVal('#themeNightStart', sc.nightStart || '19:00');
+    const intervalSel = $('#themeRotateInterval');
+    if (intervalSel) intervalSel.value = String(sc.interval || 15);
   }
 
   function bindAppearanceSettings() {
@@ -13743,16 +13780,11 @@
     };
     fillThemes($('#themeDayTheme'), state.themeSchedule.day);
     fillThemes($('#themeNightTheme'), state.themeSchedule.night);
-    const intervalSel = $('#themeRotateInterval');
-    if (intervalSel) intervalSel.value = String(state.themeSchedule.interval || 15);
+    syncThemeScheduleControls();
     $$('#themeScheduleSeg [data-schedule-mode]').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.themeSchedule.mode = btn.dataset.scheduleMode;
-        $$('#themeScheduleSeg [data-schedule-mode]').forEach((b) => b.classList.toggle('active', b === btn));
-        const dayFields = $('#themeDayNightFields');
-        const rotateFields = $('#themeRotateFields');
-        if (dayFields) dayFields.hidden = state.themeSchedule.mode !== 'daynight';
-        if (rotateFields) rotateFields.hidden = state.themeSchedule.mode !== 'rotate';
+        syncThemeScheduleControls();
         saveThemeSchedule();
         renderThemeScheduleNote();
         startThemeSchedule();
@@ -13769,6 +13801,8 @@
     };
     onField($('#themeDayTheme'), 'day');
     onField($('#themeNightTheme'), 'night');
+    onField($('#themeDayStart'), 'dayStart', (v) => (v || '06:00'));
+    onField($('#themeNightStart'), 'nightStart', (v) => (v || '19:00'));
     onField($('#themeRotateInterval'), 'interval', (v) => parseInt(v, 10) || 15);
     const sidebarWInput = $('#uiSidebarW');
     if (sidebarWInput) {
@@ -14740,37 +14774,47 @@
 
   /* ── theme ───────────────────────────────────────────────────────────── */
 
-  function applyTheme(theme) {
+  // V3 主壳与内嵌设置页共用一个页面来源：主题变化时把结果广播给父页面，
+  // 让外壳和设置页不会一边亮、一边暗。
+  function notifyThemeToParent() {
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({
+          type: 'atlasx:theme',
+          theme: state.theme,
+          schedule: state.themeSchedule,
+        }, location.origin);
+      }
+    } catch { /* 普通浏览器里没有父页面时忽略 */ }
+  }
+
+  function applyTheme(theme, opts = {}) {
     const id = THEMES.some((th) => th.id === theme) ? theme : 'dark';
     state.theme = id;
-    document.documentElement.dataset.theme = id;
-    document.documentElement.dataset.themeMode = THEME_MODE[id] || 'dark';
+    if (window.AtlasTheme) {
+      AtlasTheme.apply(id);
+    } else {
+      document.documentElement.dataset.theme = id;
+      document.documentElement.dataset.themeMode = THEME_MODE[id] || 'dark';
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.content = THEME_BG[id] || '#0d0d0e';
+    }
     localStorage.setItem('az-theme', id);
-    const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.content = THEME_BG[id] || '#0d0d0e';
     saveUi();
     renderThemeGrid();
+    if (opts.notify !== false) notifyThemeToParent();
   }
 
   function scheduledTheme() {
-    const sc = state.themeSchedule;
-    if (sc.mode === 'manual') return state.theme;
-    const now = new Date();
-    if (sc.mode === 'daynight') {
-      const h = now.getHours();
-      return h >= 6 && h < 19 ? sc.day : sc.night;
-    }
-    if (sc.mode === 'rotate') {
-      const step = Math.max(5, sc.interval || 15);
-      const idx = Math.floor(now.getTime() / (step * 60000)) % THEMES.length;
-      return THEMES[idx].id;
-    }
-    return state.theme;
+    if (!window.AtlasTheme) return state.theme;
+    return AtlasTheme.scheduledTheme(state.themeSchedule, state.theme);
   }
 
   function saveThemeSchedule() {
+    if (window.AtlasTheme) state.themeSchedule = AtlasTheme.normalizeSchedule(state.themeSchedule);
     localStorage.setItem('az-theme-schedule', JSON.stringify(state.themeSchedule));
     saveUi();
+    notifyThemeToParent();
   }
 
   function startThemeSchedule() {
@@ -14783,6 +14827,23 @@
       if (next !== state.theme) applyTheme(next);
     }, 20000);
   }
+
+  // 外壳（V3）手动切换主题时，设置页跟着更新，避免内嵌页显示旧主题。
+  window.addEventListener('message', (event) => {
+    if (event.origin !== location.origin) return;
+    const data = event.data || {};
+    if (data.type !== 'atlasx:theme-apply') return;
+    if (data.schedule) {
+      state.themeSchedule = window.AtlasTheme
+        ? AtlasTheme.normalizeSchedule(data.schedule)
+        : { ...state.themeSchedule, ...data.schedule };
+      localStorage.setItem('az-theme-schedule', JSON.stringify(state.themeSchedule));
+    }
+    if (data.theme) applyTheme(data.theme, { notify: false });
+    syncThemeScheduleControls();
+    renderThemeScheduleNote();
+    startThemeSchedule();
+  });
 
   function themeLabel(id) {
     const th = THEMES.find((x) => x.id === id);
@@ -14805,6 +14866,7 @@
         state.themeSchedule.mode = 'manual';
         saveThemeSchedule();
         applyTheme(btn.dataset.themeId);
+        syncThemeScheduleControls();
         renderThemeGrid();
         renderThemeScheduleNote();
       });
@@ -16530,7 +16592,7 @@
     const bootTabs = state.ui.openTabs.slice();
     const bootActive = state.ui.active;
 
-    applyTheme(state.theme);
+    applyTheme(scheduledTheme());
     applyLanguage(state.langMode, { persist: false });
     applyUi();
     bindEvents();
