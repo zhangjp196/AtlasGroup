@@ -593,6 +593,13 @@ textarea.input{resize:vertical;min-height:70px}
 .mention-item b{font-size:11.5px;font-weight:600;color:var(--accent)}
 .mention-item span{font-size:10.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* Markdown 容器会继承聊天气泡的 pre-wrap；HTML 块之间的换行会被当成空行渲染出来。 */
+.md{white-space:normal;overflow-wrap:anywhere}
+.md > :first-child{margin-top:0}
+.md > :last-child{margin-bottom:0}
+.md p{margin:4px 0}
+.md ul,.md ol{margin:4px 0;padding-left:18px}
+.md li{margin:2px 0}
 .bubble p{margin:4px 0}
 .bubble h2,.bubble h3,.bubble h4{margin:8px 0 4px;line-height:1.35}
 .bubble h2{font-size:15px}.bubble h3{font-size:13.5px}.bubble h4{font-size:12.5px}
