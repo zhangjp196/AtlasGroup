@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
 import Modal from '@/components/Modal.vue'
@@ -37,6 +37,10 @@ const perm = ref('ask')
 const thinking = ref('')
 const commands = ref<SlashCommand[]>(BUILTIN_COMMANDS)
 const scroller = ref<HTMLElement | null>(null)
+const msgsEl = ref<HTMLElement | null>(null)
+const stickToBottom = ref(true)
+let scrollRaf = 0
+let resizeObserver: ResizeObserver | null = null
 const bindOpen = ref(false)
 const bindWorkspaceId = ref('')
 const tempOpen = ref(false)
@@ -91,8 +95,17 @@ function endDrag(): void {
   }
 }
 
+onMounted(() => {
+  if (!msgsEl.value || typeof ResizeObserver === 'undefined') return
+  resizeObserver = new ResizeObserver(() => scheduleScroll())
+  resizeObserver.observe(msgsEl.value)
+})
+
 onBeforeUnmount(() => {
   window.removeEventListener('pointermove', onDrag)
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  if (scrollRaf) cancelAnimationFrame(scrollRaf)
 })
 
 const convId = computed(() => props.conversationId)
@@ -184,20 +197,41 @@ watch(convId, async (id) => {
   scrollToBottom(true)
 }, { immediate: true })
 
-watch([() => chat.messages.value.length, () => chat.entries.value.length, () => chat.approvals.value.length], async () => {
-  await nextTick()
-  scrollToBottom()
-})
+watch(
+  [
+    () => chat.messages.value,
+    () => chat.entries.value,
+    () => chat.tasks.value,
+    () => chat.approvals.value,
+    () => chat.questions.value,
+    () => chat.streaming.value,
+  ],
+  async () => {
+    await nextTick()
+    scheduleScroll()
+  },
+  { deep: true },
+)
 
-function scrollToBottom(force = false): void {
+function onScroll(): void {
   const el = scroller.value
   if (!el) return
-  const near = el.scrollHeight - el.scrollTop - el.clientHeight < 140
-  if (force || near) {
-    requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight
-    })
-  }
+  stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+}
+
+function scheduleScroll(force = false): void {
+  if (force) stickToBottom.value = true
+  if (!stickToBottom.value) return
+  if (scrollRaf) cancelAnimationFrame(scrollRaf)
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0
+    const el = scroller.value
+    if (el && stickToBottom.value) el.scrollTop = el.scrollHeight
+  })
+}
+
+function scrollToBottom(force = false): void {
+  scheduleScroll(force)
 }
 
 async function loadCommands(workspaceId: string): Promise<void> {
@@ -287,7 +321,10 @@ async function onSend(): Promise<void> {
     }
   }
   const ok = await chat.send(text, { perm: perm.value, thinking: thinking.value, model: model.value })
-  if (ok) draft.value = ''
+  if (ok) {
+    draft.value = ''
+    scheduleScroll(true)
+  }
 }
 
 async function createConversation(): Promise<void> {
@@ -427,8 +464,8 @@ async function deleteConversation(): Promise<void> {
       <GlobalInbox full @open="openGlobalConversation" />
     </div>
 
-    <div v-show="!globalAgent || globalTab === 'chat'" ref="scroller" class="win-body">
-      <div class="msgs">
+    <div v-show="!globalAgent || globalTab === 'chat'" ref="scroller" class="win-body" @scroll.passive="onScroll">
+      <div ref="msgsEl" class="msgs">
         <div v-if="chat.loading.value" class="chat-empty"><b>正在打开会话…</b></div>
         <div v-else-if="!chat.messages.value.length && !chat.entries.value.length && !chat.streaming.value" class="chat-empty">
           <Avatar :name="title" :avatar="avatar" :round="meta.kind !== '群聊'" />
