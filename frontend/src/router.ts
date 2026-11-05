@@ -1,11 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import AboutView from '@/views/AboutView.vue'
-import ConversationsView from '@/views/ConversationsView.vue'
-import RolesView from '@/views/RolesView.vue'
-import SettingsView from '@/views/SettingsView.vue'
-import TeamsView from '@/views/TeamsView.vue'
-import WorkspacesView from '@/views/WorkspacesView.vue'
-import WorkView from '@/views/WorkView.vue'
+
+const WorkView = () => import('@/views/WorkView.vue')
+const ConversationsView = () => import('@/views/ConversationsView.vue')
+const WorkspacesView = () => import('@/views/WorkspacesView.vue')
+const RolesView = () => import('@/views/RolesView.vue')
+const TeamsView = () => import('@/views/TeamsView.vue')
+const SettingsView = () => import('@/views/SettingsView.vue')
+const AboutView = () => import('@/views/AboutView.vue')
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),

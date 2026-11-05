@@ -199,18 +199,17 @@ watch(convId, async (id) => {
 
 watch(
   [
-    () => chat.messages.value,
-    () => chat.entries.value,
-    () => chat.tasks.value,
-    () => chat.approvals.value,
-    () => chat.questions.value,
+    () => chat.messages.value.length,
+    () => chat.entries.value.length,
+    () => chat.tasks.value.length,
+    () => chat.approvals.value.length,
+    () => chat.questions.value.length,
     () => chat.streaming.value,
   ],
   async () => {
     await nextTick()
     scheduleScroll()
   },
-  { deep: true },
 )
 
 function onScroll(): void {

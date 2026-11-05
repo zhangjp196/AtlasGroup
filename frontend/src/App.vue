@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import AppRail from '@/components/AppRail.vue'
-import ChatPanel from '@/components/chat/ChatPanel.vue'
 import { api } from '@/api/client'
 import type { Conversation } from '@/api/types'
 import { useAppStore } from '@/stores/app'
@@ -15,6 +15,7 @@ const attention = useAttentionStore()
 const route = useRoute()
 const router = useRouter()
 
+const ChatPanel = defineAsyncComponent(() => import('@/components/chat/ChatPanel.vue'))
 const globalAgentId = ref('')
 
 const chatId = computed(() => {
@@ -51,6 +52,7 @@ onMounted(async () => {
 </script>
 
 <template>
+  <el-config-provider :locale="zhCn">
   <div class="app flat">
     <AppRail />
     <main class="canvas">
@@ -83,5 +85,5 @@ onMounted(async () => {
     <span v-if="Number(attention.counts.authorizations || 0) > 0" class="ga-badge ga-auth">{{ Number(attention.counts.authorizations) > 99 ? '99+' : attention.counts.authorizations }}</span>
     <span v-if="Number(attention.counts.unread || 0) > 0" class="ga-badge ga-note">{{ Number(attention.counts.unread) > 99 ? '99+' : attention.counts.unread }}</span>
   </button>
-
+  </el-config-provider>
 </template>

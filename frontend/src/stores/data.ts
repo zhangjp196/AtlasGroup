@@ -47,14 +47,24 @@ export const useDataStore = defineStore('data', () => {
         api<ListResponse<Department>>('/departments').catch(() => ({ items: [] })),
         api<ModelsResponse>('/app/models').catch(() => ({ items: [], active: '', subscriptions: [] })),
       ])
-      workspaces.value = ws.items || []
-      conversations.value = conv.items || []
-      roles.value = roleList.items || []
-      teams.value = teamList.items || []
-      departments.value = deptList.items || []
-      models.value = modelData.items || []
-      activeModel.value = modelData.active || ''
-      subscriptions.value = modelData.subscriptions || []
+      const next = {
+        workspaces: ws.items || [],
+        conversations: conv.items || [],
+        roles: roleList.items || [],
+        teams: teamList.items || [],
+        departments: deptList.items || [],
+        models: modelData.items || [],
+        subscriptions: modelData.subscriptions || [],
+      }
+      // 只替换真正变化的列表，避免每次 loadAll 都让整页组件重渲染。
+      if (JSON.stringify(workspaces.value) !== JSON.stringify(next.workspaces)) workspaces.value = next.workspaces
+      if (JSON.stringify(conversations.value) !== JSON.stringify(next.conversations)) conversations.value = next.conversations
+      if (JSON.stringify(roles.value) !== JSON.stringify(next.roles)) roles.value = next.roles
+      if (JSON.stringify(teams.value) !== JSON.stringify(next.teams)) teams.value = next.teams
+      if (JSON.stringify(departments.value) !== JSON.stringify(next.departments)) departments.value = next.departments
+      if (JSON.stringify(models.value) !== JSON.stringify(next.models)) models.value = next.models
+      if (JSON.stringify(subscriptions.value) !== JSON.stringify(next.subscriptions)) subscriptions.value = next.subscriptions
+      if (activeModel.value !== (modelData.active || '')) activeModel.value = modelData.active || ''
     } finally {
       loading.value = false
     }
@@ -62,10 +72,14 @@ export const useDataStore = defineStore('data', () => {
 
   async function loadWork(): Promise<void> {
     try {
-      const data = await api<WorkItemsResponse>('/work-items?limit=120')
-      workItems.value = data.items || []
-      workStats.value = data.stats || {}
-      workPolicy.value = data.policy || {}
+      const next = await api<WorkItemsResponse>('/work-items?limit=120')
+      const items = next.items || []
+      const stats = next.stats || {}
+      const policy = next.policy || {}
+      // 后台轮询很频繁，数据没变时保持旧引用，避免整页重复渲染。
+      if (JSON.stringify(items) !== JSON.stringify(workItems.value)) workItems.value = items
+      if (JSON.stringify(stats) !== JSON.stringify(workStats.value)) workStats.value = stats
+      if (JSON.stringify(policy) !== JSON.stringify(workPolicy.value)) workPolicy.value = policy
     } catch (error) {
       lastError.value = error instanceof Error ? error.message : String(error)
     }

@@ -17,9 +17,15 @@ export default defineConfig({
     chunkSizeWarningLimit: 1200,
     rollupOptions: {
       output: {
-        manualChunks: {
-          'element-plus': ['element-plus'],
-          vue: ['vue', 'vue-router', 'pinia'],
+        // 不要用包名手动切 element-plus，否则会把整包都塞进 chunk，按需导入失效。
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return
+          if (id.includes('/node_modules/vue/')
+            || id.includes('/node_modules/@vue/')
+            || id.includes('/node_modules/vue-router/')
+            || id.includes('/node_modules/pinia/')) {
+            return 'vue'
+          }
         },
       },
     },

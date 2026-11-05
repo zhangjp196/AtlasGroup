@@ -52,7 +52,9 @@ export const useAttentionStore = defineStore('attention', () => {
   async function load(): Promise<void> {
     loading.value = true
     try {
-      data.value = await api<AttentionData>('/app/attention?limit=100')
+      const next = await api<AttentionData>('/app/attention?limit=100')
+      // 轮询结果没变时不要替换引用，避免全局组件每 5 秒重渲染一遍。
+      if (JSON.stringify(next) !== JSON.stringify(data.value)) data.value = next
     } catch {
       /* 全局通知失败不影响主界面 */
     } finally {
