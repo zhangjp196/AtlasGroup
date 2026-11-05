@@ -540,7 +540,13 @@ textarea.input{resize:vertical;min-height:70px}
 .live-dots i{width:4px;height:4px;border-radius:50%;background:var(--accent);animation:tabPulse 1.2s infinite}
 .live-dots i:nth-child(2){animation-delay:.15s}.live-dots i:nth-child(3){animation-delay:.3s}
 
-/* 回到底部：只在用户上滑离开底部时出现 */
+/* 会话侧边：回到顶部 / 回到底部 */
+.scroll-rail{position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:6;display:flex;flex-direction:column;gap:6px}
+.scroll-side{width:32px;height:32px;border-radius:50%;border:1px solid var(--line);background:color-mix(in srgb,var(--panel-2) 92%,transparent);color:var(--dim);display:grid;place-items:center;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.28);backdrop-filter:blur(6px)}
+.scroll-side:hover{color:var(--text);border-color:var(--line-strong);background:var(--panel-2)}
+.scroll-side svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.ga-win .scroll-rail{right:8px}
+@media (max-width:520px){.scroll-rail{right:6px}.scroll-side{width:30px;height:30px}}
 .scroll-down{position:absolute;right:78px;bottom:116px;z-index:5;width:30px;height:30px;border-radius:50%;border:1px solid var(--line);background:var(--panel-2);color:var(--dim);display:grid;place-items:center;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.35)}
 .scroll-down:hover{color:var(--text);border-color:var(--line-strong)}
 .scroll-down svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}

@@ -39,8 +39,12 @@ const commands = ref<SlashCommand[]>(BUILTIN_COMMANDS)
 const scroller = ref<HTMLElement | null>(null)
 const msgsEl = ref<HTMLElement | null>(null)
 const stickToBottom = ref(true)
+const canScroll = ref(false)
+const atTop = ref(true)
+const atBottom = ref(true)
 let scrollRaf = 0
 let resizeObserver: ResizeObserver | null = null
+let settleTimers: number[] = []
 const bindOpen = ref(false)
 const bindWorkspaceId = ref('')
 const tempOpen = ref(false)
@@ -96,8 +100,12 @@ function endDrag(): void {
 }
 
 onMounted(() => {
+  if (chat.messages.value.length || chat.entries.value.length) settleBottom()
   if (!msgsEl.value || typeof ResizeObserver === 'undefined') return
-  resizeObserver = new ResizeObserver(() => scheduleScroll())
+  resizeObserver = new ResizeObserver(() => {
+    updateScrollState()
+    scheduleScroll()
+  })
   resizeObserver.observe(msgsEl.value)
 })
 
@@ -106,6 +114,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
+  clearSettleTimers()
 })
 
 const convId = computed(() => props.conversationId)
@@ -194,7 +203,7 @@ watch(convId, async (id) => {
   }
   await loadCommands(conv?.bound_workspace_id || conv?.workspace_id || '')
   await nextTick()
-  scrollToBottom(true)
+  settleBottom()
 }, { immediate: true })
 
 watch(
@@ -212,10 +221,38 @@ watch(
   },
 )
 
-function onScroll(): void {
+watch(() => chat.loading.value, async (loading) => {
+  if (loading) return
+  await nextTick()
+  settleBottom()
+})
+
+function updateScrollState(): void {
   const el = scroller.value
   if (!el) return
+  canScroll.value = el.scrollHeight > el.clientHeight + 2
+  atTop.value = el.scrollTop <= 2
+  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 2
   stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+}
+
+function onScroll(): void {
+  updateScrollState()
+}
+
+function clearSettleTimers(): void {
+  for (const timer of settleTimers) window.clearTimeout(timer)
+  settleTimers = []
+}
+
+function settleBottom(): void {
+  stickToBottom.value = true
+  scheduleScroll(true)
+  clearSettleTimers()
+  // Markdown/图片/代码块会在下一两帧继续撑高内容，补几次贴底。
+  for (const delay of [60, 180, 360]) {
+    settleTimers.push(window.setTimeout(() => scheduleScroll(), delay))
+  }
 }
 
 function scheduleScroll(force = false): void {
@@ -225,12 +262,22 @@ function scheduleScroll(force = false): void {
   scrollRaf = requestAnimationFrame(() => {
     scrollRaf = 0
     const el = scroller.value
-    if (el && stickToBottom.value) el.scrollTop = el.scrollHeight
+    if (el && stickToBottom.value) {
+      el.scrollTop = el.scrollHeight
+      updateScrollState()
+    }
   })
 }
 
 function scrollToBottom(force = false): void {
   scheduleScroll(force)
+}
+
+function scrollToTop(): void {
+  stickToBottom.value = false
+  const el = scroller.value
+  if (!el) return
+  el.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
 async function loadCommands(workspaceId: string): Promise<void> {
@@ -499,6 +546,15 @@ async function deleteConversation(): Promise<void> {
           @answer="chat.answerQuestion"
         />
       </div>
+    </div>
+
+    <div v-if="canScroll && (!globalAgent || globalTab === 'chat')" class="scroll-rail">
+      <button v-if="!atTop" class="scroll-side" type="button" title="回到顶部" aria-label="回到顶部" @click="scrollToTop">
+        <svg viewBox="0 0 24 24"><path d="m6 14 6-6 6 6" /></svg>
+      </button>
+      <button v-if="!atBottom" class="scroll-side" type="button" title="回到底部" aria-label="回到底部" @click="scrollToBottom(true)">
+        <svg viewBox="0 0 24 24"><path d="m6 10 6 6 6-6" /></svg>
+      </button>
     </div>
 
     <div v-if="queued.length && (!globalAgent || globalTab === 'chat')" class="queue-bar">
