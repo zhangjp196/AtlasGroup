@@ -1,8 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#111112"/>
-  <g fill="none" stroke="#f5f5f5" stroke-width="3.4" stroke-linejoin="round" stroke-linecap="round">
-    <path d="M14 50 32 14l18 36"/>
-    <path d="M24.6 35h14.8"/>
-    <path d="M32 5.5v3.4"/>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a1122"/>
+      <stop offset="1" stop-color="#191633"/>
+    </linearGradient>
+    <radialGradient id="glow-blue" cx="0.2" cy="0.15" r="0.8">
+      <stop offset="0" stop-color="#348fff" stop-opacity=".34"/>
+      <stop offset="1" stop-color="#348fff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-violet" cx="0.86" cy="0.9" r="0.75">
+      <stop offset="0" stop-color="#7c54ff" stop-opacity=".3"/>
+      <stop offset="1" stop-color="#7c54ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4ecbff"/>
+      <stop offset="1" stop-color="#f7faff"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <rect width="64" height="64" rx="14" fill="url(#glow-blue)"/>
+  <rect width="64" height="64" rx="14" fill="url(#glow-violet)"/>
+  <g fill="none" stroke="url(#mark)" stroke-width="5.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18.75 50.75 32 15l13.25 35.75"/>
+    <path d="M23.88 37.5h16.24"/>
   </g>
+  <path d="M32 4 33.7 8.4 38.1 10.1 33.7 11.8 32 16.2 30.3 11.8 25.9 10.1 30.3 8.4Z" fill="url(#mark)"/>
+  <rect x=".7" y=".7" width="62.6" height="62.6" rx="13.4" fill="none" stroke="#82a6ea" stroke-opacity=".3" stroke-width=".9"/>
 </svg>
