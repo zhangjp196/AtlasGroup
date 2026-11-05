@@ -36,15 +36,6 @@ def test_python_not_in_default_tools():
     assert not unknown, f"默认工具清单里有 registry 不存在的工具：{unknown}"
 
 
-def test_frontend_has_no_python_tool_labels():
-    js = Path("web/assets/app.js").read_text(encoding="utf-8")
-    assert "tool.python" not in js
-    labels = re.search(r"const TOOL_LABELS = \{(.*?)\};", js, re.S).group(1)
-    icons = re.search(r"const TOOL_ICONS = \{(.*?)\};", js, re.S).group(1)
-    assert not re.search(r"^\s*python:", labels, re.M)
-    assert not re.search(r"^\s*python:", icons, re.M)
-
-
 def test_codegraph_invalidation_whitelist_has_no_python():
     from services.agent_zero.runtime.zero import dispatch
 

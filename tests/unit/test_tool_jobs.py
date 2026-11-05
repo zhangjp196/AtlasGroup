@@ -384,39 +384,3 @@ def test_tool_activity_tracks_foreground_and_clears():
     assert tool_activity.list_active("conv-live") == []
     assert [r["id"] for r in tool_activity.list_active("conv-other")] == [c]
     tool_activity.end(c)
-
-
-def test_process_panel_frontend_contract():
-    """前端进程面板的关键钩子不能丢（自动隐藏 / 收缩 / 单独停止）。"""
-    import os
-
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    with open(os.path.join(root, "web", "index.html"), encoding="utf-8") as fh:
-        html = fh.read()
-    with open(os.path.join(root, "web", "assets", "app.js"), encoding="utf-8") as fh:
-        js = fh.read()
-
-    assert 'id="processPanel"' in html and 'id="processList"' in html
-    assert "processSectionToggle" in html
-    # 进程面板在对话区左侧，不再放在左侧栏
-    assert 'class="chat-shell"' in html
-    assert html.index('id="processPanel"') > html.index('</header>')
-    assert html.index('id="processPanel"') < html.index('id="chatScroll"')
-    # 行可点开详情、可在详情里停止
-    assert 'data-process-open' in js and 'processDetailModal' in html
-    assert 'function openProcessDetail' in js and 'function renderProcessDetail' in js
-    assert 'id="processDetailStop"' in html
-    # 没有进程时整块隐藏（自动隐藏 / 跑完消失）
-    assert "box.hidden = true" in js
-    # 进程面板与任务清单同处对话区左上角的浮动列（任务清单在其下方）
-    assert 'id="chatFloats"' in html
-    assert html.index('id="chatFloats"') < html.index('id="processPanel"')
-    assert html.index('id="processPanel"') < html.index('id="todoPanel"')
-    assert "function renderProcesses" in js
-    assert "function refreshProcesses" in js
-    # 停单个进程走 /processes/{id}/stop，停会话才走 /runs/{id}/stop
-    assert "/processes/" in js and "stop?kind=" in js
-    # 前台工具没有独立句柄：不显示单条停止键，避免误停整轮
-    assert "it.stoppable === false" in js
-    # 收缩状态只由点击改变，没有自动收缩
-    assert "processCollapsed = !state.ui.processCollapsed" in js

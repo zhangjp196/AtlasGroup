@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -228,7 +228,7 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
 
     app = FastAPI(
         title=APP_NAME,
-        description="本地单用户 Agent（sqlite / 静态前端）",
+        description="本地单用户 Agent（sqlite / Vue 前端）",
         version=APP_VERSION,
         lifespan=lifespan,
         docs_url="/api/docs",
@@ -260,40 +260,44 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
         data = metrics_service.health()
         return JSONResponse(data, status_code=200 if data.get("ok") else 503)
 
-    assets_dir = os.path.join(web_dir, "assets")
-    if os.path.isdir(assets_dir):
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+    # 3.7 起唯一前端：Vue + Vite，构建产物在 web/dist。
+    # 旧 V3 / 旧设置页 / /classic / /next 全部移除，不再保留兼容入口。
+    frontend_dir = os.path.join(web_dir, "dist")
+    frontend_index = os.path.join(frontend_dir, "index.html")
+    if os.path.isdir(frontend_dir) and os.path.exists(frontend_index):
+        static_dir = os.path.join(frontend_dir, "static")
+        if os.path.isdir(static_dir):
+            app.mount("/static", StaticFiles(directory=static_dir),
+                      name="frontend-static")
 
-    # V3 新界面（工作区 / 角色 / 群组独立 + 悬浮窗）：旧界面仍保留在 /
-    v3_dir = os.path.join(web_dir, "v3")
-    if os.path.isdir(v3_dir):
-        @app.get("/v3", include_in_schema=False)
-        def v3_index():
-            return FileResponse(os.path.join(v3_dir, "index.html"))
+        @app.get("/", include_in_schema=False)
+        def index_page():
+            return FileResponse(frontend_index)
 
-        app.mount("/v3", StaticFiles(directory=v3_dir, html=True), name="v3")
+        @app.get("/favicon.svg", include_in_schema=False)
+        def favicon():
+            path = os.path.join(frontend_dir, "favicon.svg")
+            if os.path.exists(path):
+                return FileResponse(path)
+            raise HTTPException(status_code=404)
 
-    # V3.2：默认入口切到新壳；旧界面保留在 /classic，方便还没迁移的设置页。
-    v3_index = os.path.join(web_dir, "v3", "index.html")
-
-    @app.get("/", include_in_schema=False)
-    def index_page():
-        if os.path.exists(v3_index):
-            return FileResponse(v3_index)
-        return FileResponse(os.path.join(web_dir, "index.html"))
-
-    @app.get("/classic", include_in_schema=False)
-    def classic_page(request: Request):
-        # 仅用于内嵌 V2 设置（?settings=1）；直接访问旧界面仍然 410。
-        if not request.query_params.get("settings"):
-            return JSONResponse(status_code=410, content={
-                "detail": "旧界面已移除；仅 /classic?settings=1 作为设置页内嵌。",
+        @app.get("/{path:path}", include_in_schema=False)
+        def spa_fallback(path: str = ""):
+            # API / 健康检查 / 静态资源 / 已删除的旧入口不能被 SPA 吞掉。
+            if (path.startswith(("api/", "static/", "v3/", "assets/", "next/", "classic/"))
+                    or path in {"health", "healthz", "classic", "v3", "next"}):
+                raise HTTPException(status_code=404)
+            return FileResponse(frontend_index)
+    else:
+        @app.get("/", include_in_schema=False)
+        @app.get("/{path:path}", include_in_schema=False)
+        def frontend_missing(path: str = ""):
+            if (path.startswith(("api/", "static/", "v3/", "assets/", "next/", "classic/"))
+                    or path in {"health", "healthz", "classic", "v3", "next"}):
+                raise HTTPException(status_code=404)
+            return JSONResponse(status_code=503, content={
+                "detail": "前端尚未构建：cd frontend && npm run build",
             })
-        return FileResponse(os.path.join(web_dir, "index.html"))
-
-    @app.get("/favicon.svg", include_in_schema=False)
-    def favicon():
-        return FileResponse(os.path.join(web_dir, "favicon.svg"))
 
     return app
 

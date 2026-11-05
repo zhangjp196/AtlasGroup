@@ -346,25 +346,17 @@ def test_dispatch_pack_error_is_returned_to_model():
 # ── 设置 → 运行时：展示的是包 + 独立工具，不是一长串工具 ────────────────
 
 def test_frontend_has_labels_for_every_pack():
-    """前端 i18n / 图标必须覆盖后端所有包，否则设置页会显示成原始 code。
-
-    包结构这次大改（拆 code、并 agent），最容易漏的就是这两张表——它们不会
-    报错，只是静默显示成 `tools.pack.xxx` 这样的键名 / 退回默认图标。
-    """
+    """设置页必须覆盖后端所有工具包的显示名。"""
     import re
     from pathlib import Path
 
-    js = Path("web/assets/app.js").read_text(encoding="utf-8")
-    block = re.search(r"const PACK_ICONS = \{(.*?)\};", js, re.S)
-    assert block, "找不到 PACK_ICONS"
-    icons = set(re.findall(r"(\w+)\s*:\s*'", block.group(1)))
+    src = Path("frontend/src/views/SettingsView.vue").read_text(encoding="utf-8")
+    block = re.search(r"const PACK_LABELS[^=]*= \{(.*?)\n\}", src, re.S)
+    assert block, "找不到 PACK_LABELS"
+    labels = set(re.findall(r"^\s*(\w+):", block.group(1), re.M))
     for pack in packs.PACKS:
-        key = f"'tools.pack.{pack.code}'"
-        assert js.count(key) == 2, f"{pack.code} 的中英文文案不齐（{js.count(key)} 处）"
-        assert pack.code in icons, f"PACK_ICONS 缺少 {pack.code}"
-    # 已拆掉的包不能在文案 / 图标里留残影（留着会让人以为还有这个包）
-    assert "'tools.pack.code'" not in js and "'tools.pack.agent'" not in js
-    assert not ({"code", "agent"} & icons), f"残留图标：{sorted({'code','agent'} & icons)}"
+        assert pack.code in labels, f"PACK_LABELS 缺少 {pack.code}"
+    assert not ({"code", "agent"} & labels), f"残留包：{sorted({'code','agent'} & labels)}"
 
 
 def test_tool_names_show_packs(monkeypatch):
@@ -451,26 +443,3 @@ def test_chat_seq_calls_names_are_resolvable():
     assert registry.canonical("todo") == "todo_write"
     assert not (conversation._SEQ_CALLS_LEGACY & known), (
         "历史兼容名单里出现了仍在 registry 的工具，应该移到 _SEQ_CALLS_TOOLS")
-
-
-def test_frontend_labels_cover_every_registry_tool():
-    """时间线的工具名由 TOOL_LABELS 决定：registry 有、前端缺，就会显示成原始 code。"""
-    import re
-    from pathlib import Path
-
-    js = Path("web/assets/app.js").read_text(encoding="utf-8")
-    block = re.search(r"const TOOL_LABELS = \{(.*?)\};", js, re.S)
-    assert block, "找不到 TOOL_LABELS"
-    labelled = set(re.findall(r"^\s*(\w+):\s*'", block.group(1), re.M))
-    missing = set(registry.known_codes()) - labelled
-    # read_document / read_pdf 是 read_office 的别名（历史消息里会出现）
-    missing -= {"read_document", "read_pdf"}
-    assert not missing, f"TOOL_LABELS 缺少：{sorted(missing)}"
-    # python 工具已彻底下线：registry、默认清单、前端映射里都不该再有它
-    assert "python" not in registry.known_codes()
-    assert "python" not in labelled
-    assert "tool.python" not in js, "前端还留着 python 工具的文案 / 映射"
-    assert "python" not in zero_store.DEFAULT_TOOLS, "默认工具清单里还留着 python"
-    # 引用的 i18n 键必须都真的有中英文案
-    for key in re.findall(r":\s*'((?:tool|tools)\.[a-z_0-9]+)'", block.group(1)):
-        assert js.count(f"'{key}':") == 2, f"{key} 的中英文案不齐"

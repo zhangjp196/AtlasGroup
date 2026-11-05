@@ -72,8 +72,9 @@ def test_identifier_layer_keeps_legacy_names():
     secret = (ROOT / "services" / "agent_zero" / "stores" / "secret_store.py").read_text(
         encoding="utf-8")
     assert 'SERVICE = "com.atlas.agentzero"' in secret
-    web = (ROOT / "web" / "assets" / "app.js").read_text(encoding="utf-8")
-    assert "const API = '/api/agent-zero'" in web
+    client = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(
+        encoding="utf-8")
+    assert "API_PREFIX = '/api/agent-zero'" in client
 
 
 def test_packaging_artifacts_are_branded():

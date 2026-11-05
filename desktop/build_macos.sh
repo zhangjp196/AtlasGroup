@@ -19,6 +19,22 @@ if ! "$PY" -c "import PyInstaller" >/dev/null 2>&1; then
   "$PY" -m pip install --trusted-host mirrors.tuna.tsinghua.edu.cn pyinstaller
 fi
 
+# 前端必须先构建，PyInstaller 会把 web/dist 一起收进 .app；避免打包到旧产物。
+if ! command -v npm >/dev/null 2>&1; then
+  echo "找不到 npm：打包前需要 Node（仅构建期）来构建 frontend/。" >&2
+  exit 1
+fi
+if [ ! -d "$ROOT/frontend/node_modules" ]; then
+  echo "安装前端依赖 …"
+  (cd "$ROOT/frontend" && npm ci --no-audit --no-fund)
+fi
+echo "构建前端 …"
+(cd "$ROOT/frontend" && npm run build)
+if [ ! -f "$ROOT/web/dist/index.html" ]; then
+  echo "前端构建产物缺失：web/dist/index.html" >&2
+  exit 1
+fi
+
 if [ ! -f "$ROOT/desktop/Atlas.icns" ]; then
   "$PY" "$ROOT/desktop/make_icon.py"
 fi

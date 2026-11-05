@@ -1,34 +1,30 @@
-"""V3 新界面静态入口：/v3 默认入口，会话为嵌入式多标签。"""
+"""3.7 唯一前端入口：Vue/Vite 产物，旧 V3 / classic / next 全部移除。"""
 from __future__ import annotations
 
+import os
 
-def test_v3_shell_is_served(client):
-    res = client.get("/v3/")
+
+def test_root_serves_vue_index(client):
+    res = client.get("/")
+    if res.status_code == 503:
+        # 干净检出尚未构建前端时允许明确提示，但不能回退到旧页面
+        assert "前端尚未构建" in res.text
+        return
     assert res.status_code == 200
     assert "AtlasX" in res.text
-    assert "/v3/app.js" in res.text
-    assert "chatShellV3" in res.text
+    assert "/static/" in res.text
+    assert "chatShellV3" not in res.text
 
 
-def test_v3_assets_are_served(client):
-    assert client.get("/v3/app.js").status_code == 200
-    assert client.get("/v3/app.css").status_code == 200
+def test_old_frontend_routes_are_gone(client):
+    for path in ("/classic", "/classic?settings=1", "/v3", "/v3/", "/next", "/next/", "/v3/app.js", "/assets/app.js"):
+        assert client.get(path).status_code == 404, path
 
 
-def test_default_entry_is_v3(client):
-    res = client.get("/")
+def test_spa_fallback_serves_vue_index(client):
+    if not os.path.exists("web/dist/index.html"):
+        return
+    res = client.get("/conv/example")
     assert res.status_code == 200
-    assert "/v3/app.js" in res.text
-    assert "chatShellV3" in res.text
-
-
-def test_old_shell_is_gone(client):
-    res = client.get("/classic")
-    assert res.status_code == 410
-    assert "旧界面已移除" in res.text
-
-
-def test_v2_settings_host_is_available(client):
-    res = client.get("/classic?settings=1")
-    assert res.status_code == 200
-    assert "/assets/app.js" in res.text
+    assert "/static/" in res.text
+    assert "chatShellV3" not in res.text

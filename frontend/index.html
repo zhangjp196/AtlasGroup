@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0c0e12" />
+    <link rel="icon" href="/favicon.svg" />
+    <title>AtlasX</title>
+    <script>
+      // 尽早应用主题，避免首屏闪烁；键名与旧前端保持一致。
+      (() => {
+        try {
+          const t = localStorage.getItem('az-theme');
+          if (t) {
+            const mode = ['light', 'ocean', 'sepia'].includes(t) ? 'light' : 'dark';
+            document.documentElement.dataset.theme = t;
+            document.documentElement.dataset.themeMode = mode;
+            document.documentElement.classList.toggle('dark', mode === 'dark');
+          }
+        } catch (_) { /* ignore */ }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

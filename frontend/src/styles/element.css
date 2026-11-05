@@ -1,0 +1,163 @@
+/* Element Plus 主题变量映射到 AtlasX 现有设计 token。
+   这样 8 套主题、暗亮切换和自定义聊天卡片能共用一套颜色。 */
+:root,
+html.dark {
+  --el-color-primary: var(--accent);
+  --el-color-primary-light-3: color-mix(in srgb, var(--accent) 70%, var(--bg));
+  --el-color-primary-light-5: color-mix(in srgb, var(--accent) 50%, var(--bg));
+  --el-color-primary-light-7: color-mix(in srgb, var(--accent) 30%, var(--bg));
+  --el-color-primary-light-8: color-mix(in srgb, var(--accent) 20%, var(--bg));
+  --el-color-primary-light-9: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  --el-color-primary-dark-2: color-mix(in srgb, var(--accent) 82%, #000);
+  --el-color-success: var(--ok);
+  --el-color-warning: var(--warn);
+  --el-color-danger: var(--danger);
+  --el-color-error: var(--danger);
+  --el-color-info: var(--dim);
+  --el-bg-color: var(--panel);
+  --el-bg-color-page: var(--bg);
+  --el-bg-color-overlay: var(--panel-2);
+  --el-fill-color: var(--panel);
+  --el-fill-color-light: var(--panel);
+  --el-fill-color-lighter: var(--panel-2);
+  --el-fill-color-extra-light: var(--bg-2);
+  --el-fill-color-dark: var(--panel-3);
+  --el-fill-color-darker: var(--panel-3);
+  --el-fill-color-blank: var(--bg-2);
+  --el-text-color-primary: var(--text);
+  --el-text-color-regular: var(--dim);
+  --el-text-color-secondary: var(--faint);
+  --el-text-color-placeholder: var(--faint);
+  --el-text-color-disabled: var(--faint);
+  --el-border-color: var(--line);
+  --el-border-color-light: var(--line-soft);
+  --el-border-color-lighter: var(--line-soft);
+  --el-border-color-extra-light: var(--line-soft);
+  --el-border-color-dark: var(--line-strong);
+  --el-border-color-darker: var(--line-strong);
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-border-radius-round: 999px;
+  --el-font-family: var(--font);
+  --el-font-size-base: 13px;
+  --el-box-shadow-light: var(--shadow);
+  --el-box-shadow: var(--shadow);
+  --el-mask-color: color-mix(in srgb, #000 50%, transparent);
+  --el-mask-color-extra-light: color-mix(in srgb, #000 20%, transparent);
+}
+
+/* 让 el 组件融进当前面板，而不是白底直角块 */
+.el-button {
+  --el-button-bg-color: var(--panel);
+  --el-button-border-color: var(--line);
+  --el-button-text-color: var(--text);
+  --el-button-hover-bg-color: var(--panel-2);
+  --el-button-hover-border-color: var(--line-strong);
+  --el-button-hover-text-color: var(--text);
+}
+.el-button--primary {
+  --el-button-bg-color: var(--accent);
+  --el-button-border-color: var(--accent);
+  --el-button-text-color: var(--on-accent);
+  --el-button-hover-bg-color: color-mix(in srgb, var(--accent) 86%, var(--text));
+  --el-button-hover-border-color: color-mix(in srgb, var(--accent) 86%, var(--text));
+  --el-button-hover-text-color: var(--on-accent);
+}
+.el-button--danger {
+  --el-button-bg-color: transparent;
+  --el-button-border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  --el-button-text-color: var(--danger);
+}
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  background: var(--bg-2);
+  box-shadow: 0 0 0 1px var(--line) inset;
+  border-radius: 8px;
+}
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.el-dialog {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+.el-dialog__header {
+  margin-right: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.el-dialog__title {
+  font-size: 14px;
+  color: var(--text);
+}
+.el-dialog__body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.el-dialog__footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--line-soft);
+}
+.el-card {
+  --el-card-bg-color: var(--panel);
+  --el-card-border-color: var(--line);
+  border-radius: 12px;
+}
+.el-tag {
+  --el-tag-bg-color: var(--panel);
+  --el-tag-border-color: var(--line);
+  --el-tag-text-color: var(--dim);
+}
+.el-tabs__item {
+  color: var(--faint);
+}
+.el-tabs__item.is-active {
+  color: var(--accent);
+}
+.el-tabs__active-bar {
+  background: var(--accent);
+}
+.el-tabs__nav-wrap::after {
+  background: var(--line-soft);
+}
+.el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: var(--panel);
+  --el-table-row-hover-bg-color: var(--panel-2);
+  --el-table-border-color: var(--line-soft);
+  --el-table-text-color: var(--text);
+  --el-table-header-text-color: var(--faint);
+}
+.el-empty__description p {
+  color: var(--faint);
+}
+.el-overlay {
+  backdrop-filter: blur(2px);
+}
+.atlas-form .el-form-item{margin-bottom:12px}
+.atlas-form .el-form-item__label{font-size:11.5px;color:var(--faint);padding-bottom:4px;line-height:1.4}
+.settings-tabs.el-radio-group{gap:6px;flex-wrap:wrap}
+.settings-tabs .el-radio-button__inner{border:1px solid var(--line);background:var(--panel);color:var(--dim);border-radius:8px!important;box-shadow:none!important;padding:7px 10px;font-size:11.5px}
+.settings-tabs .el-radio-button__original-radio:checked + .el-radio-button__inner{background:color-mix(in srgb,var(--accent) 12%,var(--panel));border-color:color-mix(in srgb,var(--accent) 45%,var(--line));color:var(--accent)}
+.org-tree .el-tree{background:transparent;color:var(--dim);--el-tree-node-hover-bg-color:var(--panel-2);--el-tree-text-color:var(--dim)}
+.org-tree .el-tree-node__content{height:30px;border-radius:8px;padding-right:4px}
+.org-tree .el-tree-node__content:hover{background:var(--panel-2)}
+.org-tree .el-tree-node.is-current > .el-tree-node__content{background:color-mix(in srgb,var(--accent) 12%,var(--panel-2));color:var(--text)}
+.org-tree .el-tree-node__expand-icon{color:var(--faint)}
+.org-tree .el-tree-node__label{display:flex;align-items:center;gap:6px;min-width:0;width:100%}
+.atlas-stat .el-card__body{padding:12px 14px}
+.atlas-stat .el-statistic__head{font-size:10.5px;color:var(--faint);margin-bottom:2px}
+.atlas-stat .el-statistic__number{font-size:21px;font-weight:650;color:var(--text);letter-spacing:-.02em}
+.atlas-stat .el-statistic__content{font-variant-numeric:tabular-nums}
+.canvas-head .el-breadcrumb{display:flex;align-items:center;font-size:12px}
+.canvas-head .el-breadcrumb__inner{color:var(--dim);font-weight:400}
+.canvas-head .el-breadcrumb__item:last-child .el-breadcrumb__inner{color:var(--text);font-weight:600}
+.canvas-head .el-tag{margin-left:2px}

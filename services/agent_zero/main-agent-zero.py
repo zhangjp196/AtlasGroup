@@ -1,6 +1,6 @@
 """AtlasX 本地服务入口。
 
-- 静态前端：`web/`（无 npm / 无构建）
+- 前端：`frontend/`（Vue 3 + Element Plus，构建到 `web/dist`，唯一入口 `/`）
 - API：`/api/agent-zero`
 - 数据库：`data/agent_zero/agent_zero.db`（sqlite，唯一数据源）
 - 端口：默认 10210；被占用时按配置自动顺延

@@ -36,3 +36,8 @@ desktop/Atlas.iconset/
 data/agent_zero/backups/
 data/agent_zero/*.corrupt-*
 .atlas/
+
+# 3.7 前端（Vue + Vite）
+frontend/node_modules/
+frontend/.vite/
+web/dist/
