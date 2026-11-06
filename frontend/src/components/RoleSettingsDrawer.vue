@@ -24,6 +24,8 @@ const tools = ref<ToolItem[]>([])
 const skills = ref<Skill[]>([])
 const skillsLoading = ref(false)
 const deleting = ref(false)
+const workspaceSaving = ref(false)
+const workspaceDraft = ref('')
 
 const skillOpen = ref(false)
 const skillSaving = ref(false)
@@ -37,10 +39,6 @@ const mergeForm = reactive({ name: '', description: '' })
 const toolsLoaded = ref(false)
 
 const temporary = computed(() => props.role?.scope === 'temporary')
-const roleWorkspace = computed(() => {
-  const wsId = String(props.role?.workspace_id || '')
-  return data.workspaces.find((ws) => ws.id === wsId) || null
-})
 const toolNames = computed(() => {
   const map = new Map<string, string>()
   for (const tool of tools.value) {
@@ -56,10 +54,16 @@ function toolName(code: string): string {
 
 watch(() => [props.open, props.role?.id], () => {
   if (!props.open || !props.role) return
+  workspaceDraft.value = String(props.role.workspace_id || '')
   skills.value = []
   void loadSkills(props.role.id)
   if (!toolsLoaded.value) void loadTools()
 }, { immediate: true })
+
+// 外部（编辑弹窗 / 其他页面）改了绑定工作区时，选择器保持同步。
+watch(() => props.role?.workspace_id, (id) => {
+  workspaceDraft.value = String(id || '')
+})
 
 async function loadTools(): Promise<void> {
   try {
@@ -82,6 +86,34 @@ async function loadSkills(roleId: string): Promise<void> {
   } finally {
     skillsLoading.value = false
   }
+}
+
+async function switchWorkspace(event: Event): Promise<void> {
+  const role = props.role
+  if (!role || workspaceSaving.value) return
+  const wsId = (event.target as HTMLSelectElement).value
+  const previous = String(role.workspace_id || '')
+  if (wsId === previous) return
+  workspaceSaving.value = true
+  try {
+    await api(`/roles/${encodeURIComponent(role.id)}`, {
+      method: 'PATCH',
+      body: { workspace_id: wsId },
+    })
+    await data.loadAll()
+    emit('saved')
+    app.toast(wsId ? `工作区已切换为「${workspaceName(wsId)}」` : '已改为默认工作区')
+  } catch (error) {
+    workspaceDraft.value = previous
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  } finally {
+    workspaceSaving.value = false
+  }
+}
+
+function workspaceName(id?: string): string {
+  const wsId = String(id || '')
+  return data.workspaces.find((ws) => ws.id === wsId)?.name || '默认工作区'
 }
 
 function close(): void {
@@ -254,7 +286,24 @@ async function removeRole(): Promise<void> {
             </div>
             <div class="role-line">{{ role.expertise || '没有填写专长' }}</div>
             <div class="role-line mono">模型：{{ role.model_code || '未指定' }}</div>
-            <div class="role-line">工作区：{{ roleWorkspace?.name || '默认工作区' }}</div>
+            <div class="role-line role-ws-line">
+              <span>工作区</span>
+              <select
+                class="role-ws-select"
+                :value="workspaceDraft"
+                :disabled="workspaceSaving"
+                :title="workspaceSaving ? '正在切换工作区…' : '直接切换角色绑定的工作区'"
+                @change="switchWorkspace"
+              >
+                <option value="">默认工作区（不绑定）</option>
+                <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
+                <option
+                  v-if="workspaceDraft && !data.activeWorkspaces.some((ws) => ws.id === workspaceDraft)"
+                  :value="workspaceDraft"
+                >{{ workspaceName(workspaceDraft) }}（已归档）</option>
+              </select>
+              <span v-if="workspaceSaving" class="role-line">切换中…</span>
+            </div>
           </div>
         </div>
 

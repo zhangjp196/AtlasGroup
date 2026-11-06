@@ -72,6 +72,11 @@ async function loadTools(): Promise<void> {
   }
 }
 
+function workspaceLabel(id?: string): string {
+  const wsId = String(id || '')
+  return data.workspaces.find((ws) => ws.id === wsId)?.name || wsId
+}
+
 function toggleTool(code?: string): void {
   if (!code) return
   form.tools = form.tools.includes(code)
@@ -145,6 +150,10 @@ async function save(): Promise<void> {
       <select v-model="form.workspace_id" class="input">
         <option value="">不绑定（使用默认工作区）</option>
         <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
+        <option
+          v-if="form.workspace_id && !data.activeWorkspaces.some((ws) => ws.id === form.workspace_id)"
+          :value="form.workspace_id"
+        >{{ workspaceLabel(form.workspace_id) }}（已归档）</option>
       </select>
       <small class="role-line">会话使用这个角色时，会自动在该工作区里运行。</small>
     </div>

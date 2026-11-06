@@ -523,11 +523,13 @@ TOOL_DEFS: List[ToolDef] = [
         name="角色库",
         description=(
             "管理角色库：列出 / 创建 / 修改 / 删除角色，或把临时角色转为持久角色。\n"
-            "角色是独立人格（不属于工作区）；群组只是角色集合。会话内按需创建的角色默认"
+            "角色是独立人格；可绑定一个工作区作为文件 / 终端上下文，群组只是角色集合。"
+            "会话内按需创建的角色默认"
             "为**临时角色**（只属于当前会话，会话删除即销毁），并自动加入当前群聊；"
             "需要跨会话复用时用 action=promote 存为持久角色。\n"
             "创建时给出 name（谁）/ title（岗位）/ department_id（部门，可空）/ "
-            "expertise / persona / tools（工具子集，不填=默认全集）。"
+            "workspace_id（绑定的工作区，可空）/ expertise / persona / tools（工具子集，不填=默认全集）。"
+            "切换工作区用 action=update 并带上 workspace_id（空字符串 = 不绑定）。"
         ),
         parameters=_obj({
             "action": {"type": "string",
@@ -538,6 +540,9 @@ TOOL_DEFS: List[ToolDef] = [
             "title": {"type": "string", "description": "岗位（做什么），与名称分离"},
             "department_id": {"type": "string",
                               "description": "所属部门 id（可空 = 未安排）"},
+            "workspace_id": {"type": "string",
+                             "description": ("角色绑定的工作区 id（可空 = 不绑定 / 默认工作区）；"
+                                             "切换工作区时更新该字段")},
             "expertise": {"type": "string", "description": "一句话专长"},
             "persona": {"type": "string", "description": "人格 / 工作方式"},
             "tools": {"type": "array", "items": {"type": "string"},

@@ -327,6 +327,31 @@ def test_detach_global_agent_conversations_clears_legacy_binding(app_env):
     assert ts.get_team(team["id"]) is not None
 
 
+def test_team_update_keeps_member_role_workspace(app_env):
+    """保存群组不能把成员角色自己绑定的工作区冲回群组工作区。"""
+    ws = _init(app_env)
+    zero_store.create_workspace("group", "ws-role-own", "角色自己的工作区", "local",
+                                root_path=str(app_env["tmp"] / "ws-role-own"))
+    zero_store.create_workspace("group", "ws-team-new", "群组新工作区", "local",
+                                root_path=str(app_env["tmp"] / "ws-team-new"))
+    role = zero_store.upsert_role({
+        "id": "role-own-ws", "group_id": "ws-role-own", "name": "独立工作区角色",
+        "envelope": zero_store.DEFAULT_ENVELOPE,
+    })
+    team = ts.create_team(ws, "工作区群", leader={"name": "主持"},
+                          members=[{"id": role["id"], "name": role["name"]}])
+    assert zero_store.get_role(role["id"])["group_id"] == "ws-role-own"
+
+    # 普通保存（改成员 / 模式）保持角色自己的工作区。
+    ts.update_team(team["id"], members=[
+        {"id": role["id"], "name": role["name"]}, {"name": "新成员"}])
+    assert zero_store.get_role(role["id"])["group_id"] == "ws-role-own"
+
+    # 群组显式切换工作区时，成员角色才跟随迁移。
+    ts.update_team(team["id"], workspace_id="ws-team-new")
+    assert zero_store.get_role(role["id"])["group_id"] == "ws-team-new"
+
+
 def test_shared_role_survives_team_delete(app_env):
     """两个团队共用同一角色时，删一个团队不能把角色删掉。"""
     ws = _init(app_env)

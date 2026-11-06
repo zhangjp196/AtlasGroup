@@ -127,7 +127,10 @@ def _ensure_role(ws_id: str, role_id: str, name: str, expertise: str,
     clean_expertise = str(expertise or "").strip()
     payload: Dict[str, Any] = {
         "id": role_id,
-        "group_id": ws_id,
+        # 新角色跟随群组工作区；已有角色保留自己绑定，避免每次保存群组
+        # 都把成员角色刚切换的工作区冲回群组工作区。
+        # （群组显式切换工作区时，update_team 会统一迁移成员角色。）
+        "group_id": current.get("group_id") if not is_new else ws_id,
         "name": name or current.get("name") or role_id,
         # persona 在 upsert 里是无条件写入，已有角色必须显式回填。
         "persona": current.get("persona") or "",

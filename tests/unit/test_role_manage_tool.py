@@ -49,6 +49,35 @@ def test_promote_and_delete_role(app_env):
     assert deleted["ok"] and zero_store.get_role(role["id"]) is None
 
 
+def test_role_can_switch_workspace_and_syncs_conversations(app_env):
+    conv, _ = _setup(app_env)
+    zero_store.create_workspace("group", "ws-role-target", "目标工作区", "local",
+                                root_path=str(app_env["tmp"] / "ws-role-target"))
+    (app_env["tmp"] / "ws-role-target").mkdir(parents=True, exist_ok=True)
+
+    role = conversation._exec_role_manage(conv, {
+        "action": "create", "name": "换工作区角色",
+        "scope": "persistent", "workspace_id": "ws-role-target"})["role"]
+    assert role["workspace_id"] == "ws-role-target"
+
+    single = conversation.create_conversation(
+        "", "local", role_id=role["id"])
+    assert single["workspace_id"] == "ws-role-target"
+
+    switched = conversation._exec_role_manage(conv, {
+        "action": "update", "role_id": role["id"], "workspace_id": ""})["role"]
+    assert switched["workspace_id"] == ""
+    assert zero_store.get_role(role["id"])["group_id"] is None
+    assert conversation.get_conversation(single["id"])["workspace_id"] == zero_store.DEFAULT_WORKSPACE_ID
+
+    bad = conversation._exec_role_manage(conv, {
+        "action": "update", "role_id": role["id"], "workspace_id": "ws-not-exist"})
+    assert "不存在" in bad["error"]
+
+    listed = conversation._exec_role_manage(conv, {"action": "list"})["roles"]
+    assert any(item["id"] == role["id"] and "workspace_id" in item for item in listed)
+
+
 def test_default_role_cannot_be_deleted_and_bad_action_errors(app_env):
     conv, _ = _setup(app_env)
     out = conversation._exec_role_manage(conv, {

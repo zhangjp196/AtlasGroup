@@ -21,6 +21,13 @@ const settingsOpen = ref(false)
 const manageConv = ref<Conversation | null>(null)
 const menu = reactive({ open: false, x: 0, y: 0, conv: null as Conversation | null })
 
+// 会话卡片筛选：工作区标签 + 单聊 / 群聊 + 未读 / 运行中 + 关键词。
+const filterWorkspace = ref('')
+const filterKind = ref<'all' | 'single' | 'group'>('all')
+const unreadOnly = ref(false)
+const runningOnly = ref(false)
+const keyword = ref('')
+
 const menuItems = computed<ContextMenuItem[]>(() => {
   const conv = menu.conv
   return [
@@ -125,6 +132,60 @@ const conversations = computed(() => {
   })
 })
 
+// 只列出会话实际用到的工作区，避免筛选器里塞满空工作区。
+const workspaceOptions = computed(() => {
+  const used = new Set(conversations.value.map((conv) => String(conv.workspace_id || '')))
+  return data.workspaces
+    .filter((ws) => used.has(ws.id))
+    .sort((a, b) => Number(a.archived) - Number(b.archived) || a.name.localeCompare(b.name))
+})
+
+const filteredConversations = computed(() => {
+  const q = keyword.value.trim().toLowerCase()
+  return conversations.value.filter((conv) => {
+    const { team, role, isGroup } = conversationParts(conv, data.teams, data.roles)
+    if (filterWorkspace.value && String(conv.workspace_id || '') !== filterWorkspace.value) return false
+    if (filterKind.value === 'single' && isGroup) return false
+    if (filterKind.value === 'group' && !isGroup) return false
+    if (unreadOnly.value && !Number(conv.unread_count || 0)) return false
+    if (runningOnly.value && !Number(conv.running_count || 0)) return false
+    if (q) {
+      const lead = isGroup ? team?.leader : role
+      const haystack = [
+        conversationTitle(conv, data.teams, data.roles),
+        conv.last_message || '',
+        team?.name || '',
+        role?.name || '',
+        lead?.title || '',
+        workspaceName(conv.workspace_id),
+      ].join(' ').toLowerCase()
+      if (!haystack.includes(q)) return false
+    }
+    return true
+  })
+})
+
+const filtersActive = computed(() => Boolean(
+  filterWorkspace.value || filterKind.value !== 'all' || unreadOnly.value || runningOnly.value || keyword.value.trim(),
+))
+
+function clearFilters(): void {
+  filterWorkspace.value = ''
+  filterKind.value = 'all'
+  unreadOnly.value = false
+  runningOnly.value = false
+  keyword.value = ''
+}
+
+function workspaceOf(conv: (typeof data.conversations)[number]): string {
+  return workspaceName(conv.workspace_id)
+}
+
+function workspaceName(id?: string): string {
+  const wsId = String(id || '')
+  return data.workspaces.find((ws) => ws.id === wsId)?.name || '默认工作区'
+}
+
 // 会话列表显示在办工单数（角色 / 群组后台任务自动建单）。
 const openWorkByConv = computed(() => {
   const map = new Map<string, number>()
@@ -165,14 +226,37 @@ function onCreated(_kind: string, id: string): void {
 </script>
 
 <template>
-  <PageHeader section="会话" title="全部会话" :chip="`${conversations.length} 个`">
+  <PageHeader
+    section="会话"
+    title="全部会话"
+    :chip="filtersActive ? `${filteredConversations.length} / ${conversations.length} 个` : `${conversations.length} 个`"
+  >
     <el-button type="primary" @click="createOpen = true">新建会话</el-button>
   </PageHeader>
 
   <div class="canvas-body">
+    <div class="conv-filters">
+      <input v-model="keyword" class="input conv-search" placeholder="搜索会话 / 角色 / 工作区…" />
+      <select v-model="filterWorkspace" class="input conv-ws-filter" title="按工作区筛选">
+        <option value="">全部工作区</option>
+        <option v-for="ws in workspaceOptions" :key="ws.id" :value="ws.id">
+          {{ ws.name }}{{ ws.archived ? '（已归档）' : '' }}
+        </option>
+      </select>
+      <div class="seg" role="group" aria-label="会话类型">
+        <button class="seg-btn" :class="{ on: filterKind === 'all' }" type="button" @click="filterKind = 'all'">全部</button>
+        <button class="seg-btn" :class="{ on: filterKind === 'single' }" type="button" @click="filterKind = 'single'">单聊</button>
+        <button class="seg-btn" :class="{ on: filterKind === 'group' }" type="button" @click="filterKind = 'group'">群聊</button>
+      </div>
+      <button class="work-filter" :class="{ on: unreadOnly }" type="button" @click="unreadOnly = !unreadOnly">未读</button>
+      <button class="work-filter" :class="{ on: runningOnly }" type="button" @click="runningOnly = !runningOnly">运行中</button>
+      <button v-if="filtersActive" class="mini-link" type="button" @click="clearFilters">清除筛选</button>
+      <span class="conv-filter-count">{{ filteredConversations.length }} 个</span>
+    </div>
+
     <div class="tile-grid">
       <article
-        v-for="conv in conversations"
+        v-for="conv in filteredConversations"
         :key="conv.id"
         class="tile-card conv-tile"
         :class="{ unread: conv.unread }"
@@ -195,6 +279,7 @@ function onCreated(_kind: string, id: string): void {
         </div>
         <p class="tile-preview">{{ conv.last_message || '还没有消息' }}</p>
         <div class="tile-chips">
+          <span class="chip ws-chip" :title="`工作区：${workspaceOf(conv)}`">{{ workspaceOf(conv) }}</span>
           <span v-if="openWorkByConv.get(conv.id)" class="chip work-chip">{{ openWorkByConv.get(conv.id) }} 工单</span>
           <span v-for="chip in chipsOf(conv)" :key="chip" class="chip">{{ chip }}</span>
         </div>
@@ -207,6 +292,11 @@ function onCreated(_kind: string, id: string): void {
       </article>
     </div>
     <div v-if="!conversations.length" class="empty">还没有会话<br />点右上角「新建会话」开始</div>
+    <div v-else-if="!filteredConversations.length" class="empty">
+      没有符合筛选条件的会话
+      <br />
+      <button class="mini-link" type="button" @click="clearFilters">清除筛选</button>
+    </div>
   </div>
 
   <CreateDialog :open="createOpen" kind="conv" @close="createOpen = false" @created="onCreated" />

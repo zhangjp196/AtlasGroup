@@ -147,6 +147,14 @@ html[data-theme-mode="light"] .theme-toggle .theme-moon{display:block}
 .work-filter{border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--faint);font-size:10px;padding:3px 8px;cursor:pointer;white-space:nowrap}
 .work-filter:hover{color:var(--text);border-color:var(--line-strong)}
 .work-filter.on{color:var(--accent-ink);border-color:color-mix(in srgb,var(--accent) 45%,var(--line));background:color-mix(in srgb,var(--accent) 14%,var(--panel))}
+/* 会话筛选：搜索 + 工作区 + 类型 + 状态 */
+.conv-filters{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:2px 4px 10px}
+.conv-filters .input{height:29px;padding:4px 9px;font-size:11px;width:auto}
+.conv-search{flex:1 1 200px;min-width:150px;max-width:300px}
+.conv-ws-filter{max-width:190px}
+.conv-filter-count{margin-left:auto;font:10px var(--mono);color:var(--faint);white-space:nowrap}
+.chip.ws-chip{border-color:color-mix(in srgb,var(--accent) 26%,var(--line));background:color-mix(in srgb,var(--accent) 7%,var(--panel));color:var(--accent-ink);max-width:190px;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:620px){.conv-filter-count{display:none}.conv-search,.conv-ws-filter{max-width:none;flex:1 1 140px}}
 .work-row{align-items:flex-start}
 .work-status{flex:none;width:8px;height:8px;border-radius:50%;margin-top:5px;background:var(--faint)}
 .work-status.working{background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent);animation:tabPulse 1.6s ease-in-out infinite}
@@ -332,6 +340,12 @@ html[data-theme-mode="light"] .theme-toggle .theme-moon{display:block}
 .role-top{display:flex;align-items:center;gap:9px;min-width:0}
 .role-top b{font-size:12.5px}
 .role-line{font-size:10.5px;color:var(--faint);line-height:1.6}
+.role-ws-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.role-ws-select{border:1px solid var(--line);border-radius:7px;background:var(--bg-2);color:var(--text);font:10.5px var(--font);padding:3px 6px;max-width:230px;cursor:pointer}
+.role-ws-select:hover{border-color:var(--line-strong)}
+.role-ws-select:focus{outline:none;border-color:var(--accent)}
+.role-ws-select:disabled{opacity:.55;cursor:wait}
+.role-ws-select option{background:var(--panel-2);color:var(--text)}
 .role-warn{color:var(--warn,var(--danger))}
 .role-skill-list{display:flex;flex-direction:column;gap:6px}
 .role-skill-row{display:flex;align-items:flex-start;gap:8px;border:1px solid var(--line-soft);border-radius:9px;background:var(--bg-2);padding:7px 9px}

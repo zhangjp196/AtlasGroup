@@ -2047,6 +2047,7 @@ def _role_public(role: Dict[str, Any]) -> Dict[str, Any]:
         "title": role.get("title") or "",
         "department_id": dept_id,
         "department": zero_store.department_path(dept_id) if dept_id else "",
+        "workspace_id": str(role.get("group_id") or ""),
         "expertise": role.get("expertise") or "",
         "persona": role.get("persona") or "",
         "avatar": role.get("avatar") or "",
@@ -2213,6 +2214,19 @@ def _exec_department_manage(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"error": f"非法 action: {action}"}
 
 
+def _role_workspace_value(raw: Any) -> Tuple[Optional[str], Optional[str]]:
+    """角色绑定的工作区：返回 (ws_id, error)。空串 = 不绑定。"""
+    from services.agent_zero.stores import zero_store
+
+    ws_id = str(raw or "").strip()
+    if not ws_id:
+        return "", None
+    ws = zero_store.get_workspace(ws_id)
+    if not ws or ws.get("archived"):
+        return None, f"工作区不存在或已归档: {ws_id}"
+    return ws_id, None
+
+
 def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
     """角色库工具：list / create / update / promote / delete。
 
@@ -2246,6 +2260,9 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
         dept_id = str(a.get("department_id") or "").strip()
         if dept_id and not zero_store.get_department(dept_id):
             return {"error": f"部门不存在: {dept_id}"}
+        ws_id, ws_err = _role_workspace_value(a.get("workspace_id"))
+        if ws_err:
+            return {"error": ws_err}
         # 未显式要求临时角色时，优先复用同名持久角色：模型经常把
         # 「把 X 加入群组」误走成 create，不能再造一个无头像的临时角色。
         reused = False
@@ -2266,10 +2283,18 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
                 ))
                 role = matches[0]
                 reused = True
+                # 显式指定工作区时，即使复用同名角色也按请求切换。
+                if "workspace_id" in a and str(role.get("group_id") or "") != str(ws_id or ""):
+                    role = zero_store.upsert_role({
+                        **role,
+                        "group_id": ws_id or None,
+                    })
+                    sync_conversations_workspace_for_role(
+                        str(role["id"]), ws_id or None)
         if role is None:
             role = zero_store.upsert_role({
                 "id": zero_store.new_id("role"),
-                "group_id": None,
+                "group_id": ws_id or None,
                 "name": name,
                 "title": a.get("title") or "",
                 "department_id": dept_id,
@@ -2307,9 +2332,15 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
             dept_id = str(a.get("department_id") or "").strip()
             if dept_id and not zero_store.get_department(dept_id):
                 return {"error": f"部门不存在: {dept_id}"}
+        ws_id = current.get("group_id")
+        ws_changed = "workspace_id" in a
+        if ws_changed:
+            ws_id, ws_err = _role_workspace_value(a.get("workspace_id"))
+            if ws_err:
+                return {"error": ws_err}
         merged = {
             "id": role_id,
-            "group_id": current.get("group_id"),
+            "group_id": ws_id or None,
             "name": a.get("name") or current.get("name"),
             "title": (a.get("title") if "title" in a and a.get("title") is not None
                       else current.get("title")),
@@ -2326,6 +2357,8 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
             "session_id": current.get("session_id"),
         }
         role = zero_store.upsert_role(merged)
+        if ws_changed:
+            sync_conversations_workspace_for_role(role_id, ws_id or None)
         return {"ok": True, "role": _role_public(role)}
     if action == "promote":
         merged = dict(current)
