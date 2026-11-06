@@ -140,6 +140,9 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
             m = team_service.normalize_system_roles()
             if m:
                 logger.info("修复 %d 个群组里的系统角色（AtlasX 只保留在全局 Agent）", m)
+            p = team_service.repair_team_member_avatars()
+            if p:
+                logger.info("恢复 %d 个群组里被重建角色的头像 / 人格", p)
             k = team_service.detach_global_agent_conversations()
             if k:
                 logger.info("解除 %d 个全局 Agent 会话的群组绑定", k)

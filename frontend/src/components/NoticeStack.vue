@@ -20,7 +20,9 @@ function run(item: NoticeItem): void {
           <b>{{ item.title }}</b>
           <button class="notice-close" type="button" title="关闭" aria-label="关闭" @click="notice.remove(item.id)">×</button>
         </div>
-        <p v-if="item.message">{{ item.message }}</p>
+        <p v-if="item.message">
+          {{ item.message }}<span v-if="Number(item.count || 1) > 1" class="notice-merge"> · {{ item.count }} 次</span>
+        </p>
         <button v-if="item.action" class="notice-action" type="button" @click="run(item)">
           {{ item.actionLabel || '查看' }}
         </button>

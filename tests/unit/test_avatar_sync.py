@@ -62,6 +62,17 @@ def test_saving_team_keeps_role_avatar(app_env):
     assert zero_store.get_role(role["id"])["avatar"] == AVATAR_A
 
 
+def test_removing_reused_library_role_keeps_it_in_library(app_env):
+    """从群组移出复用的角色库角色时，不能把角色本身删掉。"""
+    ws = _env(app_env)
+    role = _role(ws, "后端", AVATAR_A)
+    team = ts.create_team(ws, "研发群", leader={"name": "主持"},
+                          members=[{"id": role["id"], "name": "后端"}])
+    ts.update_team(team["id"], members=[])
+    assert zero_store.get_role(role["id"]) is not None
+    assert zero_store.get_role(role["id"])["avatar"] == AVATAR_A
+
+
 def test_team_created_role_keeps_avatar(app_env):
     ws = _env(app_env)
     team = ts.create_team(

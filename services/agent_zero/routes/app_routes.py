@@ -1350,6 +1350,15 @@ def app_attention(limit: int = 100):
     return {"code": 0, "data": attention_service.snapshot(limit)}
 
 
+@router.post("/app/read-all")
+def app_read_all():
+    """一键已读：清空所有普通会话的未读角标。"""
+    from services.agent_zero.task_layer import conversation
+
+    marked = conversation.mark_all_conversations_read()
+    return {"code": 0, "data": {"marked": marked}}
+
+
 class CodegraphBody(BaseModel):
     workspace_id: str = ""
 

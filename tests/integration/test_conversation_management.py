@@ -56,6 +56,50 @@ def test_binding_empty_group_is_rejected(client):
     assert "成员" in res.json()["detail"]
 
 
+def test_conversation_list_reports_unread_and_running_counts(client):
+    """会话列表用数字角标展示未读消息数 / 进行中运行数。"""
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+    from services.agent_zero.runtime.zero.gdag.store import GdagStore
+    from services.agent_zero.stores import zero_store
+    from services.agent_zero.task_layer import run_service
+
+    conv = client.post(f"{API}/conversations", json={}).json()["data"]
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text("UPDATE conversations SET last_read_at = '2000-01-01 00:00:00' "
+                 "WHERE id = :id"),
+            {"id": conv["id"]},
+        )
+        db.commit()
+    GdagStore().upsert_node({
+        "id": zero_store.new_id("msg"),
+        "type": "fact",
+        "camp": "default",
+        "props": {
+            "conversation_id": conv["id"],
+            "workspace_id": conv["workspace_id"],
+            "content": "新的助手回复",
+            "stage": "exploration",
+            "by": "assistant",
+        },
+    })
+    run_service.create_run(conv["id"], "local", content="运行中")
+
+    items = client.get(f"{API}/conversations?limit=200").json()["data"]["items"]
+    row = next(item for item in items if item["id"] == conv["id"])
+    assert row["unread_count"] >= 1
+    assert row["running_count"] >= 1
+
+    out = client.post(f"{API}/app/read-all").json()["data"]
+    assert out["marked"] >= 1
+    items = client.get(f"{API}/conversations?limit=200").json()["data"]["items"]
+    row = next(item for item in items if item["id"] == conv["id"])
+    assert row["unread_count"] == 0
+
+
 def test_global_agent_cannot_be_turned_into_group(client):
     """全局 Agent 会话不能绑定群组；否则群组页会把它显示成全局 Agent。"""
     global_conv = client.post(f"{API}/conversations",

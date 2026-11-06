@@ -29,6 +29,7 @@ export interface AttentionData {
     id: string
     title?: string
     last_message?: string
+    unread_count?: number
     updated_at?: string
   }>
   running?: Array<{

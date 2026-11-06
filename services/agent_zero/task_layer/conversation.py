@@ -2239,26 +2239,48 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
         name = str(a.get("name") or "").strip()
         if not name:
             return {"error": "角色名不能为空"}
-        scope = str(a.get("scope") or "temporary").strip()
+        explicit_scope = str(a.get("scope") or "").strip()
+        scope = explicit_scope or "temporary"
         if scope not in ("temporary", "persistent"):
             return {"error": f"非法 scope: {scope}"}
         dept_id = str(a.get("department_id") or "").strip()
         if dept_id and not zero_store.get_department(dept_id):
             return {"error": f"部门不存在: {dept_id}"}
-        role = zero_store.upsert_role({
-            "id": zero_store.new_id("role"),
-            "group_id": None,
-            "name": name,
-            "title": a.get("title") or "",
-            "department_id": dept_id,
-            "persona": a.get("persona") or "",
-            "expertise": a.get("expertise") or "",
-            "envelope": _role_envelope(a.get("tools")),
-            "model_code": a.get("model_code"),
-            "scope": scope,
-            "source": "llm",
-            "session_id": conv_id if scope == "temporary" else "",
-        })
+        # 未显式要求临时角色时，优先复用同名持久角色：模型经常把
+        # 「把 X 加入群组」误走成 create，不能再造一个无头像的临时角色。
+        reused = False
+        role = None
+        if not explicit_scope:
+            key = name.lower()
+            matches = [
+                row for row in zero_store.list_roles(limit=2000)
+                if (str(row.get("name") or "").strip().lower() == key
+                    and str(row.get("scope") or "persistent") == "persistent"
+                    and str(row.get("id") or "") != zero_store.GLOBAL_ROLE_ID)
+            ]
+            if matches:
+                matches.sort(key=lambda row: (
+                    0 if str(row.get("avatar") or "").strip() else 1,
+                    str(row.get("created_at") or ""),
+                    str(row.get("id") or ""),
+                ))
+                role = matches[0]
+                reused = True
+        if role is None:
+            role = zero_store.upsert_role({
+                "id": zero_store.new_id("role"),
+                "group_id": None,
+                "name": name,
+                "title": a.get("title") or "",
+                "department_id": dept_id,
+                "persona": a.get("persona") or "",
+                "expertise": a.get("expertise") or "",
+                "envelope": _role_envelope(a.get("tools")),
+                "model_code": a.get("model_code"),
+                "scope": scope,
+                "source": "llm",
+                "session_id": conv_id if scope == "temporary" else "",
+            })
         added = False
         team_id = str(conv.get("team_id") or "").strip()
         if team_id and scope != "single" and a.get("add_to_team", True):
@@ -2270,7 +2292,10 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
                                 "expertise": role.get("expertise") or ""})
                 _tsvc.update_team(team_id, members=members)
                 added = True
-        return {"ok": True, "role": _role_public(role), "added_to_team": added}
+        out = {"ok": True, "role": _role_public(role), "added_to_team": added}
+        if reused:
+            out["reused"] = True
+        return out
 
     role_id = str(a.get("role_id") or "").strip()
     current = zero_store.get_role(role_id) if role_id else None
@@ -5770,11 +5795,27 @@ def list_conversations(workspace_id: Optional[str] = None,
         f"  AND g.props->>'by' = 'assistant'), '') "
         f"  > COALESCE(c.last_read_at, '') THEN 1 ELSE 0 END"
     )
+    unread_count_expr = (
+        f"(SELECT COUNT(*) FROM {_q('gdag_nodes')} g "
+        f"  WHERE g.type = 'fact' "
+        f"  AND g.props->>'conversation_id' = c.id "
+        f"  AND g.props->>'by' = 'assistant' "
+        f"  AND g.props->>'stage' = 'exploration' "
+        f"  AND COALESCE(g.props->>'kind', '') <> 'checkpoint' "
+        f"  AND g.created_at > COALESCE(c.last_read_at, ''))"
+    )
+    running_count_expr = (
+        f"(SELECT COUNT(*) FROM {_q('conversation_runs')} r "
+        f"  WHERE r.conversation_id = c.id "
+        f"  AND r.status IN ('queued','running','waiting'))"
+    )
     base = (f"SELECT c.id, c.workspace_id, c.bound_workspace_id, c.role_id, c.team_id, "
             f"c.zone, c.source, c.title, "
             f"c.archived, c.forked_from_id, c.forked_from_message_id, "
             f"c.created_by, c.created_at, c.updated_at, c.last_read_at, "
             f"{unread_expr} AS has_unread, "
+            f"{unread_count_expr} AS unread_count, "
+            f"{running_count_expr} AS running_count, "
             f"(SELECT r2.status FROM {_q('conversation_runs')} r2 "
             f"  WHERE r2.conversation_id = c.id "
             f"  AND r2.status IN ('queued','running','waiting') "
@@ -5819,6 +5860,8 @@ def list_conversations(workspace_id: Optional[str] = None,
             item["updated_at"] = str(item.get("updated_at") or item["created_at"])
             item["active"] = bool(item.pop("is_live", 0))
             item["unread"] = bool(item.pop("has_unread", 0))
+            item["unread_count"] = int(item.get("unread_count") or 0)
+            item["running_count"] = int(item.get("running_count") or 0)
             item["last_read_at"] = str(item.get("last_read_at") or "")
             item["run_status"] = str(item.pop("run_status", "") or "")
             item["has_active_goal"] = item.pop("goal_status", None) == "active"
@@ -5869,6 +5912,23 @@ def mark_conversation_read(conv_id: str) -> bool:
         )
         db.commit()
         return bool(res.rowcount)
+
+
+def mark_all_conversations_read() -> int:
+    """一键已读：把全部未归档普通会话的已读水位推到当前时间。"""
+    from sqlalchemy import text
+    from services.agent_zero.database import get_session_local
+    from services.agent_zero.stores.zero_store import _q
+
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        res = db.execute(
+            text(f"UPDATE {_q('conversations')} "
+                 f"SET last_read_at = datetime('now','localtime') "
+                 f"WHERE archived = 0 AND COALESCE(zone, '') <> 'global-agent'")
+        )
+        db.commit()
+        return int(res.rowcount or 0)
 
 
 def count_conversations(workspace_id: Optional[str] = None,

@@ -116,21 +116,34 @@ def _ensure_role(ws_id: str, role_id: str, name: str, expertise: str,
                  avatar: Any = None) -> Dict[str, Any]:
     """创建/更新团队成员角色：默认能力包络，可按角色收窄工具 / 指定模型。
 
-    ``avatar`` 只在显式给出非空值时写入：更新已有角色时不带头像 = 保持原值，
-    避免「保存一次群组把角色头像清空」。
+    - ``avatar`` 只在显式给出非空值时写入；不带头像 = 保持原值；
+    - 已有角色被复用（例如按名字加入群组）时，不覆盖 persona / 标题 / 部门 /
+      能力包络等未显式提供的字段，避免把正式角色改成“临时角色”。
     """
+    current = zero_store.get_role(role_id) or {}
+    is_new = not current
     model = str(model_code or "").strip() or None
     avatar_url = str(avatar or "").strip() or None
-    return zero_store.upsert_role({
+    clean_expertise = str(expertise or "").strip()
+    payload: Dict[str, Any] = {
         "id": role_id,
         "group_id": ws_id,
-        "name": name or role_id,
-        "persona": "",
-        "expertise": expertise[:600],
-        "envelope": _envelope_with(envelope),
-        "model_code": model,
-        **({"avatar": avatar_url} if avatar_url else {}),
-    })
+        "name": name or current.get("name") or role_id,
+        # persona 在 upsert 里是无条件写入，已有角色必须显式回填。
+        "persona": current.get("persona") or "",
+        "expertise": (clean_expertise[:600] if clean_expertise
+                      else current.get("expertise") or ""),
+        "envelope": (_envelope_with(envelope) if envelope is not None or is_new
+                     else current.get("envelope") or zero_store.DEFAULT_ENVELOPE),
+    }
+    if is_new:
+        # 只有团队自动创建的角色才允许在移出群组时清理；复用的角色库角色不能删。
+        payload["source"] = "team"
+    if model is not None:
+        payload["model_code"] = model
+    if avatar_url:
+        payload["avatar"] = avatar_url
+    return zero_store.upsert_role(payload)
 
 
 def _team_public(team: Dict[str, Any]) -> Dict[str, Any]:
@@ -272,6 +285,31 @@ def _role_referenced_elsewhere(role_id: str, team_id: Optional[str]) -> bool:
         ).first()
         if conv:
             return True
+        work = db.execute(
+            text(f"SELECT 1 FROM {_q('work_items')} WHERE role_id = :rid LIMIT 1"),
+            {"rid": rid},
+        ).first()
+        if work:
+            return True
+        for table, column in (
+            ("conversation_runs", "role_id"),
+            ("conversation_runs", "target_role_id"),
+            ("team_tasks", "leader_role_id"),
+            ("skills", "role_id"),
+        ):
+            hit = db.execute(
+                text(f"SELECT 1 FROM {_q(table)} WHERE {column} = :rid LIMIT 1"),
+                {"rid": rid},
+            ).first()
+            if hit:
+                return True
+        task_member = db.execute(
+            text(f"SELECT 1 FROM {_q('team_tasks')} tt, json_each(tt.members) j "
+                 f"WHERE j.value->>'role_id' = :rid LIMIT 1"),
+            {"rid": rid},
+        ).first()
+        if task_member:
+            return True
         ws = db.execute(
             text(f"SELECT 1 FROM {_q('workspaces')} WHERE host_role_id = :rid LIMIT 1"),
             {"rid": rid},
@@ -286,13 +324,43 @@ def _sync_roles(ws_id: str, leader: Dict[str, Any],
                 old_member_ids: List[str], old_leader_id: Optional[str],
                 team_id: Optional[str] = None) -> tuple:
     """确保 leader/member 角色存在；删除旧团队角色中不再使用的。"""
+    existing_roles = zero_store.list_roles(limit=2000)
+
+    def _find_by_name(spec: Dict[str, Any]) -> str:
+        """按名字复用已有持久角色，避免同名角色被重新创建成无头像的新角色。"""
+        name = str(spec.get("name") or "").strip().lower()
+        if not name:
+            return ""
+        rows = [
+            row for row in existing_roles
+            if str(row.get("name") or "").strip().lower() == name
+            and str(row.get("id") or "") != zero_store.GLOBAL_ROLE_ID
+            and str(row.get("scope") or "persistent") == "persistent"
+        ]
+        if not rows:
+            return ""
+        expertise = str(spec.get("expertise") or "").strip().lower()
+        if expertise:
+            exact = [row for row in rows
+                     if str(row.get("expertise") or "").strip().lower() == expertise]
+            if exact:
+                rows = exact
+        # 有头像的正式角色优先，避免同名重复角色里挑到旧的空头像角色。
+        rows.sort(key=lambda row: (
+            0 if str(row.get("avatar") or "").strip() else 1,
+            str(row.get("created_at") or ""),
+            str(row.get("id") or ""),
+        ))
+        return str(rows[0].get("id") or "")
+
     def _resolve(spec: Dict[str, Any], prefix: str) -> str:
         rid = str(spec.get("id") or "").strip()
         # 系统角色不能进入群组：旧数据如果引用它们，就地换成一个新的团队角色。
         if rid == zero_store.GLOBAL_ROLE_ID:
             rid = ""
         if not rid:
-            rid = zero_store.new_id(prefix)
+            # 模型通常只给 name；优先复用角色库里同名持久角色（保留头像 / 人格）。
+            rid = _find_by_name(spec) or zero_store.new_id(prefix)
         env = spec.get("envelope")
         if not isinstance(env, dict) and isinstance(spec.get("tools"), list):
             env = {"tools": spec.get("tools")}
@@ -331,8 +399,14 @@ def _sync_roles(ws_id: str, leader: Dict[str, Any],
     stale = set(old_member_ids) | ({old_leader_id} if old_leader_id else set())
     stale -= {leader_id} | set(member_ids)
     for rid in stale:
-        if (rid and rid not in zero_store.SYSTEM_ROLE_IDS
-                and not _role_referenced_elsewhere(rid, team_id)):
+        if not rid or rid in zero_store.SYSTEM_ROLE_IDS:
+            continue
+        role = zero_store.get_role(rid) or {}
+        # 只清理团队自动创建的角色。复用的角色库角色即使暂时没有别的引用，
+        # 移出群组也不能从角色库里删掉。
+        if str(role.get("source") or "") != "team":
+            continue
+        if not _role_referenced_elsewhere(rid, team_id):
             zero_store.delete_role(rid)
     return leader_id, member_ids
 
@@ -802,6 +876,119 @@ def detach_global_agent_conversations() -> int:
         )
         db.commit()
         return int(res.rowcount or 0)
+
+
+def repair_team_member_avatars() -> int:
+    """修复旧版本“按名字加群”生成的无头像角色（幂等）。
+
+    旧逻辑只拿到成员名字就新建角色，导致角色库里有头像的正式角色被替换成
+    一个没有头像 / 人格的新角色。这里把无头像的主持 / 成员换回角色库里同名
+    且有头像的持久角色，并清理不再被引用的重复角色。
+    """
+    roles = zero_store.list_roles(limit=2000)
+    by_name: Dict[str, List[Dict[str, Any]]] = {}
+    for role in roles:
+        rid = str(role.get("id") or "")
+        name = str(role.get("name") or "").strip().lower()
+        if (not rid or not name or rid == zero_store.GLOBAL_ROLE_ID
+                or not str(role.get("avatar") or "").strip()
+                or str(role.get("scope") or "persistent") != "persistent"):
+            continue
+        by_name.setdefault(name, []).append(role)
+    if not by_name:
+        return 0
+
+    SessionLocal = get_session_local()
+    fixed = 0
+    removed: set = set()
+    replacements: Dict[str, str] = {}
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT * FROM {_q('agent_teams')}"),
+        ).mappings().all()
+        for row in rows:
+            team = dict(row)
+            leader_id = str(team.get("leader_role_id") or "")
+            member_ids = [str(x) for x in _json_list(team.get("member_role_ids"))]
+            if not leader_id and not member_ids:
+                continue
+
+            changed = False
+
+            def _avatarless_target(role_id: str) -> str:
+                role = zero_store.get_role(role_id) or {}
+                name = str(role.get("name") or "").strip().lower()
+                if not name or str(role.get("avatar") or "").strip():
+                    return ""
+                candidates = by_name.get(name) or []
+                target = str(candidates[0].get("id") or "") if candidates else ""
+                return target if target and target != role_id else ""
+
+            leader_target = _avatarless_target(leader_id) if leader_id else ""
+            if leader_target:
+                removed.add(leader_id)
+                replacements[leader_id] = leader_target
+                leader_id = leader_target
+                changed = True
+
+            seen = {leader_id} if leader_id else set()
+            new_ids: List[str] = []
+            for mid in member_ids:
+                target = _avatarless_target(mid)
+                if target:
+                    changed = True
+                    replacements[mid] = target
+                    if target not in seen:
+                        new_ids.append(target)
+                        seen.add(target)
+                    removed.add(mid)
+                    continue
+                if mid not in seen:
+                    new_ids.append(mid)
+                    seen.add(mid)
+            # 如果新主持原本在成员里，成员列表要去重。
+            new_ids = [mid for mid in new_ids if mid != leader_id]
+            if changed:
+                db.execute(
+                    text(f"UPDATE {_q('agent_teams')} SET leader_role_id = :leader, "
+                         f"member_role_ids = :members, "
+                         f"updated_at = datetime('now','localtime') WHERE id = :id"),
+                    {"leader": leader_id or None,
+                     "members": zero_store._json(new_ids), "id": team.get("id")},
+                )
+                fixed += 1
+        # 会话 / 工单如果引用了被替换的无头像角色，也改回正式角色。
+        for old_id, new_id in replacements.items():
+            db.execute(
+                text(f"UPDATE {_q('conversations')} SET role_id = :new "
+                     f"WHERE role_id = :old"),
+                {"new": new_id, "old": old_id},
+            )
+            db.execute(
+                text(f"UPDATE {_q('work_items')} SET role_id = :new "
+                     f"WHERE role_id = :old"),
+                {"new": new_id, "old": old_id},
+            )
+            db.execute(
+                text(f"UPDATE {_q('workspaces')} SET host_role_id = :new "
+                     f"WHERE host_role_id = :old"),
+                {"new": new_id, "old": old_id},
+            )
+        db.commit()
+
+    for rid in removed:
+        if not rid or rid in zero_store.SYSTEM_ROLE_IDS:
+            continue
+        role = zero_store.get_role(rid) or {}
+        # 只清理看起来是自动生成的角色：团队创建，或没有岗位 / 部门 / 人格。
+        looks_auto = str(role.get("source") or "") == "team" or not any(
+            str(role.get(key) or "").strip()
+            for key in ("persona", "title", "department_id"))
+        if not looks_auto:
+            continue
+        if not _role_referenced_elsewhere(rid, None):
+            zero_store.delete_role(rid)
+    return fixed
 
 
 def normalize_system_roles() -> int:

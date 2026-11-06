@@ -73,6 +73,12 @@ def unread_conversations(limit: int = 100) -> List[Dict[str, Any]]:
         rows = db.execute(
             text(f"SELECT c.id, c.title, c.role_id, c.team_id, c.bound_workspace_id, "
                  f"c.updated_at, "
+                 f"(SELECT COUNT(*) FROM {_q('gdag_nodes')} g "
+                 f" WHERE g.type = 'fact' AND g.props->>'conversation_id' = c.id "
+                 f" AND g.props->>'by' = 'assistant' "
+                 f" AND g.props->>'stage' = 'exploration' "
+                 f" AND COALESCE(g.props->>'kind', '') <> 'checkpoint' "
+                 f" AND g.created_at > COALESCE(c.last_read_at, '')) AS unread_count, "
                  f"(SELECT g.props->>'content' FROM {_q('gdag_nodes')} g "
                  f" WHERE g.type = 'fact' AND g.props->>'conversation_id' = c.id "
                  f" AND g.props->>'stage' = 'exploration' "

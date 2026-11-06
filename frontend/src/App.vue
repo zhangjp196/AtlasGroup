@@ -41,7 +41,7 @@ const bootDuration = (() => {
 const booting = ref(true)
 // 需要人处理的入口：待授权 + 待回答（未读 / 运行中只展示，不顶在角标上）。
 const pendingCount = computed(() => Number(attention.counts.authorizations || 0))
-const lastCounts = { approvals: 0, questions: 0, unread: 0, running: 0 }
+const lastCounts = { approvals: 0, questions: 0 }
 let attentionReady = false
 
 const chatId = computed(() => {
@@ -61,7 +61,7 @@ function pushApprovalNotice(count: number): void {
     tone: 'warning',
     action: 'global-approvals',
     actionLabel: '去处理',
-    duration: 10000,
+    duration: 2500,
   })
 }
 
@@ -85,8 +85,6 @@ watch(() => attention.counts, (counts) => {
   const next = {
     approvals: Number(counts.approvals || 0),
     questions: Number(counts.questions || 0),
-    unread: Number(counts.unread || 0),
-    running: Number(counts.running || 0),
   }
   if (!attentionReady) {
     attentionReady = true
@@ -104,15 +102,81 @@ watch(() => attention.counts, (counts) => {
     openGlobalAgentInbox()
   }
   if (next.questions > lastCounts.questions) playSound('question')
-  if (next.unread > lastCounts.unread) {
-    playSound('message')
-    notice.push({ title: '新消息', message: '有新的助手回复', tone: 'info', duration: 10000 })
-  }
-  if (next.running < lastCounts.running) {
-    playSound('done')
-    notice.push({ title: '后台运行完成', message: '有运行已经结束', tone: 'success', duration: 10000 })
-  }
   Object.assign(lastCounts, next)
+}, { deep: true })
+
+// 每个会话的未读 / 运行状态不再进全局收件箱，只在会话列表显示数字角标；
+// 右上角提示按会话合并，5 秒内同一会话只保留一条。
+const lastUnread = new Map<string, { count: number; title: string }>()
+const lastRunning = new Map<string, { count: number; title: string }>()
+let activityReady = false
+
+function replaceActivity(
+  target: Map<string, { count: number; title: string }>,
+  source: Map<string, { count: number; title: string }>,
+): void {
+  target.clear()
+  for (const [id, info] of source) target.set(id, info)
+}
+
+watch(() => attention.data, (value) => {
+  if (!value?.counts) return
+  const unread = new Map<string, { count: number; title: string }>()
+  for (const item of value.unread || []) {
+    const id = String(item.id || '')
+    if (!id) continue
+    unread.set(id, {
+      count: Math.max(1, Number(item.unread_count || 1)),
+      title: String(item.title || '会话'),
+    })
+  }
+  const running = new Map<string, { count: number; title: string }>()
+  for (const item of value.running || []) {
+    const id = String(item.conversation_id || '')
+    if (!id) continue
+    const hit = running.get(id)
+    running.set(id, {
+      count: (hit?.count || 0) + 1,
+      title: String(item.title || hit?.title || '会话'),
+    })
+  }
+  if (!activityReady) {
+    activityReady = true
+    replaceActivity(lastUnread, unread)
+    replaceActivity(lastRunning, running)
+    return
+  }
+  for (const [id, info] of unread) {
+    const prev = lastUnread.get(id)?.count || 0
+    if (info.count > prev) {
+      playSound('message')
+      notice.push({
+        title: info.title,
+        message: `${info.count - prev} 条新消息`,
+        tone: 'info',
+        duration: 2500,
+        mergeKey: `conv:${id}`,
+        mergeWindowMs: 5000,
+      })
+    }
+  }
+  for (const [id, prev] of lastRunning) {
+    const current = running.get(id)
+    const count = current?.count || 0
+    if (prev.count > count) {
+      if (count === 0) playSound('done')
+      notice.push({
+        title: current?.title || prev.title,
+        message: count === 0 ? '运行完成' : '有后台任务结束',
+        tone: 'success',
+        duration: 2500,
+        mergeKey: `conv:${id}`,
+        mergeWindowMs: 5000,
+      })
+    }
+  }
+  replaceActivity(lastUnread, unread)
+  replaceActivity(lastRunning, running)
 }, { deep: true })
 
 function onNoticeAction(action: string): void {

@@ -344,6 +344,125 @@ def test_shared_role_survives_team_delete(app_env):
     assert zero_store.get_role(rid) is None          # 没人用了才删
 
 
+def test_team_member_name_reuses_existing_role_avatar_and_persona(app_env):
+    """全局 Agent 只给角色名加群时，应复用角色库里的正式角色，而不是新建无头像角色。"""
+    ws = _init(app_env)
+    role = zero_store.upsert_role({
+        "id": "role-designer",
+        "group_id": ws,
+        "name": "设计",
+        "title": "视觉设计",
+        "persona": "细腻、注重一致性",
+        "expertise": "UI / 品牌",
+        "avatar": "data:image/png;base64,AAAA",
+        "envelope": zero_store.DEFAULT_ENVELOPE,
+    })
+
+    team = ts.create_team(ws, "设计群", leader={"name": "主持"},
+                          members=[{"name": "设计"}])
+    design = next(m for m in team["members"] if m["name"] == "设计")
+    assert design["id"] == role["id"]
+    assert design["avatar"] == role["avatar"]
+
+    stored = zero_store.get_role(role["id"])
+    assert stored["avatar"] == role["avatar"]
+    assert stored["persona"] == "细腻、注重一致性"
+    assert stored["title"] == "视觉设计"
+
+    # 再次保存群（按名字传成员）也不能把头像 / 人格冲掉。
+    updated = ts.update_team(team["id"], members=[{"name": "设计"}, {"name": "测试"}])
+    design = next(m for m in updated["members"] if m["name"] == "设计")
+    assert design["id"] == role["id"]
+    assert zero_store.get_role(role["id"])["avatar"] == role["avatar"]
+
+
+def test_repair_team_member_avatars_restores_original_role(app_env):
+    """旧版本按名字加群产生的无头像角色，启动修复时换回正式角色。"""
+    ws = _init(app_env)
+    original = zero_store.upsert_role({
+        "id": "role-original",
+        "group_id": ws,
+        "name": "设计",
+        "title": "视觉设计",
+        "persona": "细腻、注重一致性",
+        "expertise": "UI / 品牌",
+        "avatar": "data:image/png;base64,BBBB",
+        "envelope": zero_store.DEFAULT_ENVELOPE,
+    })
+    duplicate = zero_store.upsert_role({
+        "id": "role-duplicate",
+        "group_id": ws,
+        "name": "设计",
+        "persona": "",
+        "expertise": "",
+        "avatar": "",
+        "envelope": zero_store.DEFAULT_ENVELOPE,
+    })
+    team = ts.create_team(ws, "旧设计群", leader={"name": "主持"},
+                          members=[{"id": duplicate["id"], "name": "设计"}])
+    assert team["members"][0]["id"] == duplicate["id"]
+    assert not team["members"][0]["avatar"]
+
+    assert ts.repair_team_member_avatars() == 1
+    repaired = ts.get_team(team["id"])
+    assert repaired["members"][0]["id"] == original["id"]
+    assert repaired["members"][0]["avatar"] == original["avatar"]
+    assert zero_store.get_role(duplicate["id"]) is None
+
+
+def test_repair_team_leader_avatar_restores_original_role(app_env):
+    ws = _init(app_env)
+    original = zero_store.upsert_role({
+        "id": "role-host-original",
+        "group_id": ws,
+        "name": "主持",
+        "persona": "负责编排",
+        "expertise": "群聊主持",
+        "avatar": "data:image/png;base64,CCCC",
+        "envelope": zero_store.DEFAULT_ENVELOPE,
+    })
+    duplicate = zero_store.upsert_role({
+        "id": "role-host-duplicate",
+        "group_id": ws,
+        "name": "主持",
+        "persona": "",
+        "expertise": "",
+        "avatar": "",
+        "envelope": zero_store.DEFAULT_ENVELOPE,
+    })
+    team = ts.create_team(ws, "旧主持群", leader={"id": duplicate["id"], "name": "主持"})
+    assert team["leader"]["id"] == duplicate["id"]
+    assert not team["leader"]["avatar"]
+
+    assert ts.repair_team_member_avatars() == 1
+    repaired = ts.get_team(team["id"])
+    assert repaired["leader"]["id"] == original["id"]
+    assert repaired["leader"]["avatar"] == original["avatar"]
+
+
+def test_role_manage_create_reuses_existing_persistent_role(app_env):
+    """模型把“把角色加入群组”走成 role_manage create 时，也不能新建无头像临时角色。"""
+    ws = _init(app_env)
+    role = zero_store.upsert_role({
+        "id": "role-reuse",
+        "group_id": ws,
+        "name": "设计",
+        "persona": "细腻",
+        "expertise": "UI",
+        "avatar": "data:image/png;base64,DDDD",
+        "envelope": zero_store.DEFAULT_ENVELOPE,
+    })
+    conv = conversation.create_conversation(ws, "local")
+    out = conversation._exec_role_manage(conv, {"action": "create", "name": "设计"})
+    assert out["ok"] is True
+    assert out["reused"] is True
+    assert out["role"]["id"] == role["id"]
+    assert out["role"]["avatar"] == role["avatar"]
+    same_name = [r for r in zero_store.list_roles(limit=1000)
+                 if str(r.get("name") or "") == "设计"]
+    assert len(same_name) == 1
+
+
 def test_group_members_dedupe_by_id_and_name(app_env):
     """邀请 / 保存群成员时：主持不能重复、同 id / 同名成员只保留一个。"""
     ws = _init(app_env)

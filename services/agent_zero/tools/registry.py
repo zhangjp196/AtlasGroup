@@ -446,13 +446,18 @@ TOOL_DEFS: List[ToolDef] = [
             "name": {"type": "string", "description": "团队名称"},
             "description": {"type": "string", "description": "团队目标描述（可选）"},
             "leader": _obj({
+                "id": {"type": "string",
+                       "description": "已有角色 id（可选；优先复用角色库里的角色并保留头像 / 人格）"},
                 "name": {"type": "string", "description": "主持（编排者）名称"},
                 "expertise": {"type": "string", "description": "主持的专长（可选）"},
             }, ["name"]),
             "members": {
                 "type": "array",
-                "description": "成员列表（最多 12 人），每人给出 name 与 expertise；可选用 tools / model_code 收窄能力",
+                "description": "成员列表（最多 12 人）。已有角色请带 id（从 role_manage list 获取）；"
+                               "只给 name 时会复用角色库里同名持久角色，保留头像与人格",
                 "items": _obj({
+                    "id": {"type": "string",
+                           "description": "已有角色 id（可选；优先复用并保留头像）"},
                     "name": {"type": "string", "description": "成员名称"},
                     "expertise": {"type": "string", "description": "该成员的专长（如后端 / 测试）"},
                     "tools": {"type": "array", "items": {"type": "string"},

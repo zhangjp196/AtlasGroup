@@ -35,6 +35,8 @@ export interface Conversation {
   kind?: string
   active?: boolean
   unread?: boolean
+  unread_count?: number
+  running_count?: number
   last_read_at?: string
   last_message?: string
   message_count?: number

@@ -186,8 +186,12 @@ function onCreated(_kind: string, id: string): void {
             <span>{{ conversationMeta(conv, data.teams, data.roles).kind }} · {{ conversationMeta(conv, data.teams, data.roles).sub }}</span>
           </div>
           <button class="tile-more" type="button" title="更多操作" aria-label="更多操作" @click.stop="openMenuAt($event, conv)">⋯</button>
-          <span v-if="conv.active" class="dot run" title="运行中" />
-          <span v-else-if="conv.unread" class="dot" title="未读" />
+          <span v-if="Number(conv.running_count || 0) > 0" class="conv-badge run" title="进行中">
+            {{ Number(conv.running_count) > 99 ? '99+' : conv.running_count }}
+          </span>
+          <span v-if="Number(conv.unread_count || 0) > 0" class="conv-badge unread" title="未读消息">
+            {{ Number(conv.unread_count) > 99 ? '99+' : conv.unread_count }}
+          </span>
         </div>
         <p class="tile-preview">{{ conv.last_message || '还没有消息' }}</p>
         <div class="tile-chips">
@@ -196,7 +200,9 @@ function onCreated(_kind: string, id: string): void {
         </div>
         <div class="tile-foot">
           <span>{{ shortTime(conv.updated_at) }}</span>
-          <span>{{ conv.unread ? '未读' : '打开会话' }}</span>
+          <span v-if="Number(conv.unread_count || 0) > 0">{{ conv.unread_count }} 条未读</span>
+          <span v-else-if="Number(conv.running_count || 0) > 0">进行中</span>
+          <span v-else>打开会话</span>
         </div>
       </article>
     </div>
