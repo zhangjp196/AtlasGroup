@@ -19,10 +19,10 @@ const parts = computed(() => splitEntries(props.entries))
 
 <template>
   <div class="msg assistant">
-    <Avatar :name="roleName || 'AtlasX'" :avatar="roleAvatar" round />
+    <Avatar :name="roleName || '助手'" :avatar="roleAvatar" round />
     <div class="msg-body">
       <div class="msg-who">
-        <b>{{ roleName || 'AtlasX' }}</b>
+        <b>{{ roleName || '助手' }}</b>
         <span v-if="roleSub" class="msg-role">{{ roleSub }}</span>
       </div>
       <ProcessList v-if="parts.process.length" :entries="parts.process" live />

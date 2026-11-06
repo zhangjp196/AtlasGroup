@@ -41,6 +41,7 @@ def _json(x: Any) -> str:
 def create_run(conversation_id: str, user: str, *,
                role_id: Optional[str] = None,
                target_role_id: Optional[str] = None,
+               team_task_id: Optional[str] = None,
                content: Optional[str] = None,
                mentions: Optional[List[str]] = None,
                mode: str = "chat",
@@ -73,12 +74,13 @@ def create_run(conversation_id: str, user: str, *,
             pos = int(queue_pos)
         db.execute(
             text(f"INSERT INTO {_q('conversation_runs')} "
-                 f"(id, conversation_id, role_id, target_role_id, status, mode, auto_execute, "
+                 f"(id, conversation_id, role_id, target_role_id, team_task_id, status, mode, auto_execute, "
                  f" content, mentions, cursor, queue_pos, queued_msg_id, thinking_level, created_by) "
-                 f"VALUES (:id, :cid, :rid, :trid, :status, :mode, :auto_execute, :content, "
+                 f"VALUES (:id, :cid, :rid, :trid, :ttid, :status, :mode, :auto_execute, :content, "
                  f" :mentions, 0, :pos, :qmid, :thinking, :by)"),
             {"id": run_id, "cid": conversation_id, "rid": role_id,
              "trid": (str(target_role_id).strip() or None) if target_role_id else None,
+             "ttid": (str(team_task_id).strip() or None) if team_task_id else None,
              "status": STATUS_QUEUED, "mode": mode, "auto_execute": bool(auto_execute), "content": content,
              "mentions": _json(mentions) if mentions is not None else None,
              "pos": pos, "qmid": queued_msg_id,
@@ -89,6 +91,7 @@ def create_run(conversation_id: str, user: str, *,
     append_audit(user, "conversation_run_create",
                  args={"run_id": run_id, "conversation_id": conversation_id,
                        "role_id": role_id, "target_role_id": target_role_id or "",
+                       "team_task_id": team_task_id or "",
                        "mode": mode, "auto_execute": bool(auto_execute),
                        "queue_pos": pos,
                        "mentions": list(mentions or []),
@@ -169,55 +172,75 @@ def list_runs(conversation_id: str, limit: int = 20,
 
 
 def active_run(conversation_id: str) -> Optional[Dict[str, Any]]:
-    """该对话当前活跃的 run（queued/running）；无则 None。"""
+    """该对话当前活跃的主持 run（queued/running）；无则回退到成员 run。"""
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         row = db.execute(
             text(f"SELECT * FROM {_q('conversation_runs')} "
                  f"WHERE conversation_id = :cid AND status IN ('queued','running') "
-                 f"ORDER BY created_at DESC, id DESC LIMIT 1"),
+                 f"ORDER BY CASE WHEN COALESCE(target_role_id, '') = '' THEN 0 ELSE 1 END, "
+                 f"created_at DESC, id DESC LIMIT 1"),
             {"cid": conversation_id},
         ).mappings().first()
     return _normalize(dict(row)) if row else None
 
 
-def list_active_runs(limit: int = 30) -> List[Dict[str, Any]]:
-    """全局活跃 run（queued/running），含对话标题与工作区——跨工作区可见性用。"""
+def list_active_runs(limit: int = 30, exclude_zone: str = "") -> List[Dict[str, Any]]:
+    """全局活跃 run（queued/running），含对话标题与工作区——跨工作区可见性用。
+
+    ``exclude_zone``：排除某个 zone 的会话（全局 Agent 不进入自己的注意力队列）。
+    """
     SessionLocal = get_session_local()
     with SessionLocal() as db:
+        cond = "r.status IN ('queued', 'running')"
+        params: Dict[str, Any] = {"n": max(1, min(int(limit), 100))}
+        if exclude_zone:
+            cond += " AND COALESCE(c.zone, '') <> :zone"
+            params["zone"] = exclude_zone
         rows = db.execute(
             text(f"SELECT r.id, r.conversation_id, r.status, r.mode, r.created_at, r.started_at, "
                  f"c.title, c.workspace_id, w.name AS workspace_name "
                  f"FROM {_q('conversation_runs')} r "
                  f"JOIN {_q('conversations')} c ON c.id = r.conversation_id "
                  f"LEFT JOIN {_q('workspaces')} w ON w.id = c.workspace_id "
-                 f"WHERE r.status IN ('queued', 'running') "
+                 f"WHERE {cond} "
                  f"ORDER BY r.created_at DESC, r.id DESC LIMIT :n"),
-            {"n": max(1, min(int(limit), 100))},
+            params,
         ).mappings().all()
     return [dict(r) for r in rows]
 
 
 def list_queued(limit: int = 50) -> List[Dict[str, Any]]:
-    """全局待跑 run（worker 取用；按队列序号，同序号按创建时间 = FIFO）。"""
+    """全局待跑 run（worker 取用；按队列序号，同序号按创建时间 = FIFO）。
+
+    主持 run 优先于成员并行 run：先把用户这一轮跑起来，再由它派发成员。
+    """
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         rows = db.execute(
             text(f"SELECT * FROM {_q('conversation_runs')} "
                  f"WHERE status = :st "
-                 f"ORDER BY queue_pos ASC, created_at ASC, id ASC LIMIT :n"),
+                 f"ORDER BY CASE WHEN COALESCE(target_role_id, '') = '' THEN 0 ELSE 1 END, "
+                 f"queue_pos ASC, created_at ASC, id ASC LIMIT :n"),
             {"st": STATUS_QUEUED, "n": max(1, min(int(limit), 200))},
         ).mappings().all()
     return [_normalize(dict(r)) for r in rows]
 
 
-def conversation_queue(conversation_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """该对话的排队 run（按队列序号，同序号按创建时间）。"""
+def conversation_queue(conversation_id: str, limit: int = 50,
+                       include_member: bool = False) -> List[Dict[str, Any]]:
+    """该对话的排队 run（按队列序号，同序号按创建时间）。
+
+    默认不返回团队成员的后台并行 run：它们由主持派发，不是用户排队消息。
+    """
     SessionLocal = get_session_local()
+    cond = "conversation_id = :cid AND status = :st"
+    if not include_member:
+        cond += " AND COALESCE(target_role_id, '') = ''"
     with SessionLocal() as db:
         rows = db.execute(
             text(f"SELECT * FROM {_q('conversation_runs')} "
-                 f"WHERE conversation_id = :cid AND status = :st "
+                 f"WHERE {cond} "
                  f"ORDER BY queue_pos ASC, created_at ASC, id ASC LIMIT :n"),
             {"cid": conversation_id, "st": STATUS_QUEUED,
              "n": max(1, min(int(limit), 200))},
@@ -225,17 +248,72 @@ def conversation_queue(conversation_id: str, limit: int = 50) -> List[Dict[str, 
     return [_normalize(dict(r)) for r in rows]
 
 
-def running_run(conversation_id: str) -> Optional[Dict[str, Any]]:
-    """该对话当前正在执行的 run（status=running）；无则 None。"""
+def running_run(conversation_id: str,
+                include_member: bool = True) -> Optional[Dict[str, Any]]:
+    """该对话当前正在执行的主持 run（status=running）。
+
+    默认在没有主持 run 时回退到成员 run（“会话是否忙碌”的判断用）。
+    **主会话区必须传 ``include_member=False``**：成员的并行后台 run 不是这一轮
+    的主回复，不能让主会话的发送按钮跟着锁住 —— 用户要的是「主会话随时能发，
+    后台任务在自己的触发器上推进」。
+    """
+    SessionLocal = get_session_local()
+    cond = "conversation_id = :cid AND status = :running"
+    if not include_member:
+        cond += " AND COALESCE(target_role_id, '') = ''"
+    with SessionLocal() as db:
+        row = db.execute(
+            text(f"SELECT * FROM {_q('conversation_runs')} "
+                 f"WHERE {cond} "
+                 f"ORDER BY CASE WHEN COALESCE(target_role_id, '') = '' THEN 0 ELSE 1 END, "
+                 f"started_at DESC, id DESC LIMIT 1"),
+            {"cid": conversation_id, "running": STATUS_RUNNING},
+        ).mappings().first()
+    return _normalize(dict(row)) if row else None
+
+
+def active_target_run(conversation_id: str,
+                      target_role_id: str) -> Optional[Dict[str, Any]]:
+    """该成员在会话里是否已有排队 / 执行中的 run。
+
+    角色回复里 `@成员` 时用来去重：已经派过活（或主持已用 delegate 派过）
+    就不再重复入队，避免一句话里 @ 两次就派两次。
+    """
+    tid = str(target_role_id or "").strip()
+    if not tid:
+        return None
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         row = db.execute(
             text(f"SELECT * FROM {_q('conversation_runs')} "
-                 f"WHERE conversation_id = :cid AND status = :running "
-                 f"ORDER BY started_at DESC, id DESC LIMIT 1"),
-            {"cid": conversation_id, "running": STATUS_RUNNING},
+                 f"WHERE conversation_id = :cid AND target_role_id = :trid "
+                 f"AND status IN ('queued','running') "
+                 f"ORDER BY created_at DESC, id DESC LIMIT 1"),
+            {"cid": conversation_id, "trid": tid},
         ).mappings().first()
     return _normalize(dict(row)) if row else None
+
+
+def running_slots() -> List[Dict[str, Any]]:
+    """当前正在执行的 run（conversation_id + 是否成员并行 run），供 worker 调度。"""
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT conversation_id, target_role_id FROM {_q('conversation_runs')} "
+                 f"WHERE status = :running"),
+            {"running": STATUS_RUNNING},
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def parallel_member_limit() -> int:
+    """同一对话最多同时跑几个成员 run（主持 run 不占这个名额）。"""
+    try:
+        from services.agent_zero.config import get_settings
+
+        return max(1, int(get_settings().max_parallel_member_runs))
+    except Exception:
+        return 4
 
 
 def running_conversation_ids() -> set:
@@ -481,20 +559,32 @@ def cancel_run_by_message(msg_id: str) -> bool:
 def claim_run(run_id: str) -> bool:
     """queued → running（CAS 单写，防多 worker 双跑）。成功返回 True。
 
-    同一对话至多一条 running run：队列里的后续 run 在这里被挡住，
-    等当前 run 收尾后的下一个调度周期才会被认领。
+    并发规则：
+    - 同一对话**至多一条主持 run**（target_role_id 为空）；
+    - 成员并行 run（target_role_id 非空）可以同时跑，上限见
+      ``parallel_member_limit()``；主持与成员可以并存（主持派发后立即返回，
+      成员继续在后台并行执行）。
     """
     SessionLocal = get_session_local()
+    limit = parallel_member_limit()
     with SessionLocal() as db:
         res = db.execute(
             text(f"UPDATE {_q('conversation_runs')} "
                  f"SET status = :running, started_at = datetime('now','localtime'), updated_at = datetime('now','localtime') "
                  f"WHERE id = :id AND status = :queued "
-                 f"AND NOT EXISTS (SELECT 1 FROM {_q('conversation_runs')} r2 "
-                 f"  WHERE r2.conversation_id = "
-                 f"    (SELECT conversation_id FROM {_q('conversation_runs')} WHERE id = :id) "
-                 f"  AND r2.status = :running)"),
-            {"id": run_id, "running": STATUS_RUNNING, "queued": STATUS_QUEUED},
+                 f"AND ( "
+                 f"  (COALESCE(target_role_id, '') = '' AND NOT EXISTS ( "
+                 f"    SELECT 1 FROM {_q('conversation_runs')} r2 "
+                 f"    WHERE r2.conversation_id = (SELECT conversation_id FROM {_q('conversation_runs')} WHERE id = :id) "
+                 f"      AND r2.status = :running AND COALESCE(r2.target_role_id, '') = '')) "
+                 f"  OR "
+                 f"  (COALESCE(target_role_id, '') <> '' AND ( "
+                 f"    SELECT COUNT(*) FROM {_q('conversation_runs')} r3 "
+                 f"    WHERE r3.conversation_id = (SELECT conversation_id FROM {_q('conversation_runs')} WHERE id = :id) "
+                 f"      AND r3.status = :running AND COALESCE(r3.target_role_id, '') <> '') < :parallel_limit) "
+                 f")"),
+            {"id": run_id, "running": STATUS_RUNNING, "queued": STATUS_QUEUED,
+             "parallel_limit": limit},
         )
         db.commit()
         return bool(res.rowcount)
@@ -749,6 +839,7 @@ def _decode_events(rows) -> List[Dict[str, Any]]:
         data = dict(raw or {})
         data["_seq"] = int(r["seq"])
         data["_kind"] = r["kind"]
+        data["_at"] = str(r["created_at"] or "")
         out.append(data)
     return out
 

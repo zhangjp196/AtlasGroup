@@ -891,6 +891,7 @@ async def _open_model(cfg: Dict[str, Any]) -> AsyncIterator[Any]:
             # 两个头同时发送；anthropic-version 固定到最通用的稳定版本。
             default_headers={
                 "x-api-key": api_key,
+                "Authorization": f"Bearer {api_key}",
                 "anthropic-version": "2023-06-01",
             },
         )

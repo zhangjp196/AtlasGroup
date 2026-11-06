@@ -29,8 +29,9 @@ export function conversationTitle(conv: Conversation, teams: Team[], roles: Role
   if (String(conv.zone || '') === GLOBAL_AGENT_ZONE) return '全局Agent'
   const { team, role, isGroup } = conversationParts(conv, teams, roles)
   if (isGroup && team) return team.name
-  if (role) return role.name
-  return conv.title || '未命名会话'
+  // 兜底角色「通用助手」不占标题：单聊优先显示用户/AI 生成的会话标题。
+  if (role && role.id !== 'default') return role.name
+  return conv.title || role?.name || '未命名会话'
 }
 
 export function conversationMeta(conv: Conversation, teams: Team[], roles: Role[]): { kind: string; sub: string } {
@@ -41,7 +42,7 @@ export function conversationMeta(conv: Conversation, teams: Team[], roles: Role[
   if (isGroup && team) {
     return { kind: '群聊', sub: `${members.length} 个角色 · ${modeLabel(team.mode)}` }
   }
-  return { kind: '单聊', sub: role ? `角色：${roleLabel(role)}` : '默认角色' }
+  return { kind: '单聊', sub: role ? `角色：${roleLabel(role)}` : '通用助手' }
 }
 
 export function conversationIsGroup(conv: Conversation, teams: Team[]): boolean {
@@ -72,6 +73,46 @@ export function orderedDepartments(departments: Department[]): Array<Department 
       })
   }
   walk('', 0)
+  return out
+}
+
+/** 每个部门（含所有子部门）的角色数。
+ *
+ * 组织树里的父部门不能只显示直属角色：右侧列表选父部门时本来就包含子部门，
+ * 两边口径必须一致，否则会出现「父部门 0、子部门各有角色」的怪计数。
+ */
+export function departmentRoleCounts(
+  departments: Department[],
+  roles: Array<{ department_id?: string }>,
+): Map<string, number> {
+  const children = new Map<string, string[]>()
+  for (const dept of departments) {
+    const pid = String(dept.parent_id || '')
+    if (!pid) continue
+    const list = children.get(pid) || []
+    list.push(dept.id)
+    children.set(pid, list)
+  }
+  const direct = new Map<string, number>()
+  for (const role of roles) {
+    const did = String(role.department_id || '')
+    if (did) direct.set(did, (direct.get(did) || 0) + 1)
+  }
+  const memo = new Map<string, number>()
+  const visiting = new Set<string>()
+  const count = (id: string): number => {
+    const cached = memo.get(id)
+    if (cached !== undefined) return cached
+    if (visiting.has(id)) return 0          // 脏数据成环：停止递归，避免栈溢出
+    visiting.add(id)
+    let total = direct.get(id) || 0
+    for (const child of children.get(id) || []) total += count(child)
+    visiting.delete(id)
+    memo.set(id, total)
+    return total
+  }
+  const out = new Map<string, number>()
+  for (const dept of departments) out.set(dept.id, count(dept.id))
   return out
 }
 

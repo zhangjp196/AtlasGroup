@@ -35,6 +35,34 @@ export const useDataStore = defineStore('data', () => {
   const activeWorkspaces = computed(() => workspaces.value.filter((workspace) => !workspace.archived))
   const archivedWorkspaces = computed(() => workspaces.value.filter((workspace) => workspace.archived))
 
+  // 角色头像的「实时」来源：持久角色 + 群组里的主持 / 成员（含临时角色）。
+  // 群聊消息里存的是回复那一刻的头像快照；角色换头像后历史消息不能一直用旧图，
+  // 所以展示时优先按 role_id 查这里，快照只作为角色已删除时的兜底。
+  const roleAvatarMap = computed(() => {
+    const map = new Map<string, string>()
+    for (const role of roles.value) {
+      const id = String(role.id || '')
+      if (id) map.set(id, String(role.avatar || ''))
+    }
+    for (const team of teams.value) {
+      const people = [team.leader, ...(team.members || [])]
+      for (const person of people) {
+        const id = String(person?.id || '')
+        if (!id) continue
+        const avatar = String(person?.avatar || '')
+        // 持久角色是权威来源；群组成员只补角色库里没有的（临时角色 / 已离开角色库）。
+        if (!map.has(id) || (!map.get(id) && avatar)) map.set(id, avatar)
+      }
+    }
+    return map
+  })
+
+  function roleAvatar(roleId?: string, fallback = ''): string {
+    const id = String(roleId || '')
+    const current = id ? roleAvatarMap.value.get(id) : ''
+    return current || fallback || ''
+  }
+
   async function loadAll(): Promise<void> {
     loading.value = true
     lastError.value = ''
@@ -123,6 +151,8 @@ export const useDataStore = defineStore('data', () => {
     persistentRoles,
     activeWorkspaces,
     archivedWorkspaces,
+    roleAvatarMap,
+    roleAvatar,
     loadAll,
     loadWork,
     loadInfo,

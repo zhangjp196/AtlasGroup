@@ -44,6 +44,10 @@ const draft = defineModel<string>('draft', { default: '' })
 const textarea = ref<HTMLTextAreaElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const composing = ref(false)
+// 中文 / 日文输入法：compositionend 与确认上屏的 Enter 可能在同一拍到达，
+// 只靠 event.isComposing 会漏判（Safari / 部分 Chromium）。记一个短宽限期。
+let compositionEndAt = 0
+const COMPOSITION_GRACE_MS = 140
 const dragOver = ref(false)
 const popup = ref<Popup | null>(null)
 
@@ -149,7 +153,15 @@ function movePopup(delta: number): void {
   current.index = (current.index + delta + count) % count
 }
 
+function isComposingKey(event: KeyboardEvent): boolean {
+  // keyCode 229 是 IME 正在处理的哨兵值（Chrome / Safari 都会出现）。
+  if (event.isComposing || composing.value || event.keyCode === 229) return true
+  return Date.now() - compositionEndAt < COMPOSITION_GRACE_MS
+}
+
 function keydown(event: KeyboardEvent): void {
+  // 输入法组字期间，Enter / 方向键都属于输入法，不能触发发送或菜单选择。
+  if (isComposingKey(event)) return
   if (popup.value) {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
@@ -168,9 +180,19 @@ function keydown(event: KeyboardEvent): void {
     }
   }
   if (event.key !== 'Enter') return
-  if (event.shiftKey || composing.value || event.isComposing) return
+  if (event.shiftKey) return
   event.preventDefault()
+  if (props.sending) return
   emit('send')
+}
+
+function onCompositionStart(): void {
+  composing.value = true
+}
+
+function onCompositionEnd(): void {
+  composing.value = false
+  compositionEndAt = Date.now()
 }
 
 function onInput(): void {
@@ -260,17 +282,17 @@ watch(() => props.model, () => nextTick(grow))
         ref="textarea"
         v-model="draft"
         rows="1"
-        :placeholder="streaming ? '生成中… 可以继续输入，发送会排队' : (members.length ? '发消息…  @ 选择成员，/ 命令，Enter 发送' : '发消息…  / 命令，Enter 发送')"
+        :placeholder="streaming ? '生成中… 可以继续输入，发送会排队' : (members.length ? '发消息…  @ 选择成员，/ 命令，Enter 发送，Shift+Enter 换行' : '发消息…  / 命令，Enter 发送，Shift+Enter 换行')"
         aria-label="消息"
         @input="onInput"
         @keydown="keydown"
         @paste="onPaste"
         @blur="onBlur"
-        @compositionstart="composing = true"
-        @compositionend="composing = false"
+        @compositionstart="onCompositionStart"
+        @compositionend="onCompositionEnd"
       />
-      <el-button v-if="!streaming" type="primary" class="send" title="发送 (Enter)" :disabled="sending || (!draft.trim() && !attachments.length)" @click="emit('send')">发送</el-button>
-      <el-button v-else type="danger" plain class="stop" title="停止" @click="emit('stop')">停止</el-button>
+      <el-button v-if="!streaming" type="primary" class="send" title="发送 (Enter)" :disabled="sending || composing || (!draft.trim() && !attachments.length)" @click="emit('send')">发送</el-button>
+      <el-button v-else type="danger" plain class="stop" title="停止当前轮次；后台任务请在执行画布中暂停 / 结束" @click="emit('stop')">停止</el-button>
     </div>
     <div class="tools">
       <el-select :model-value="model" size="small" style="width:150px" placeholder="默认模型" @update:model-value="emit('update:model', String($event))">
@@ -288,10 +310,12 @@ watch(() => props.model, () => nextTick(grow))
         <el-option label="默认" value="" />
         <el-option v-for="level in thinkingLevels" :key="level" :label="level" :value="level" />
       </el-select>
-      <el-radio-group :model-value="perm" size="small" @update:model-value="emit('update:perm', String($event))">
-        <el-radio-button value="ask">询问</el-radio-button>
-        <el-radio-button value="auto">自动</el-radio-button>
-      </el-radio-group>
+      <el-select :model-value="perm" size="small" style="width:118px" @update:model-value="emit('update:perm', String($event))">
+        <el-option label="询问" value="once" />
+        <el-option label="本会话允许" value="session" />
+        <el-option label="始终允许" value="always" />
+        <el-option label="自动" value="auto" />
+      </el-select>
     </div>
   </footer>
 </template>

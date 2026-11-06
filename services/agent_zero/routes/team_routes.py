@@ -43,7 +43,7 @@ class RoleSpecBody(BaseModel):
 
 
 class TeamCreateBody(BaseModel):
-    # V3：群组独立于工作区，可不传；传了只作为历史来源保存。
+    # 群组绑定一个工作区（默认工作区）；工作区提供文件 / 终端上下文。
     workspace_id: Optional[str] = Field(None, max_length=80)
     name: str = Field(..., min_length=1, max_length=120)
     avatar: Optional[str] = Field(None, max_length=500)
@@ -55,6 +55,7 @@ class TeamCreateBody(BaseModel):
 
 
 class TeamUpdateBody(BaseModel):
+    workspace_id: Optional[str] = Field(None, max_length=80)
     name: Optional[str] = Field(None, min_length=1, max_length=120)
     avatar: Optional[str] = Field(None, max_length=500)
     description: Optional[str] = Field(None, max_length=1000)
@@ -121,6 +122,7 @@ def update_team(team_id: str, body: TeamUpdateBody):
             name=body.name,
             avatar=body.avatar,
             description=body.description,
+            workspace_id=body.workspace_id,
             leader=_spec(body.leader),
             members=[m for m in (_spec(x) for x in (body.members or [])) if m]
             if body.members is not None else None,
@@ -151,7 +153,10 @@ def bind_team(team_id: str, body: BindBody):
     if str(conv.get("workspace_id") or "") != str(team.get("workspace_id") or ""):
         raise HTTPException(status_code=400,
                             detail="团队与对话不属于同一个工作区")
-    team_service.bind_team(body.conversation_id, team_id)
+    try:
+        team_service.bind_team(body.conversation_id, team_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"code": 0, "data": {"bound": True, "team_id": team_id,
                                 "conversation_id": body.conversation_id}}
 

@@ -4,17 +4,35 @@ import Avatar from '@/components/Avatar.vue'
 import type { Message } from '@/api/types'
 import { durationText } from '@/lib/format'
 import { entriesFromMessage, splitEntries } from '@/lib/trace'
+import { useDataStore } from '@/stores/data'
 import Attachments from './Attachments.vue'
 import Markdown from './Markdown.vue'
 import ProcessList from './ProcessList.vue'
 
 const props = defineProps<{ message: Message }>()
+const emit = defineEmits<{ (e: 'continue-task', taskId: string): void }>()
+const data = useDataStore()
 
 const entries = computed(() => entriesFromMessage(props.message))
 const parts = computed(() => splitEntries(entries.value))
-const isSystem = computed(() => props.message.by === 'system')
-const isUser = computed(() => props.message.by === 'user')
+const by = computed(() => String(props.message.display_by || props.message.by || ''))
+const isSystem = computed(() => by.value === 'system')
+// 历史用户消息的 by 是 local / user 两种写法；只有 assistant 是模型侧。
+const isUser = computed(() => by.value !== 'assistant' && by.value !== 'system')
 const isClear = computed(() => props.message.kind === 'clear_context')
+// 头像以角色当前值为准，消息里的 role_avatar 只是回复那一刻的快照。
+const avatarSrc = computed(() => data.roleAvatar(
+  props.message.role_id, props.message.role_avatar || ''))
+const taskStatus = computed(() => {
+  const labels: Record<string, string> = {
+    done: '已完成', failed: '失败', stopped: '已结束', paused: '已暂停',
+  }
+  return labels[String(props.message.task_status || '')] || '已结束'
+})
+const taskSummary = computed(() => {
+  const text = String(props.message.summary || '').trim()
+  return text.length > 260 ? `${text.slice(0, 260)}…` : text
+})
 const meta = computed(() => {
   const out: string[] = []
   const ms = durationText(props.message.duration_ms)
@@ -27,7 +45,7 @@ const processMeta = computed(() => {
   const thoughts = parts.value.process.filter((entry) => entry.kind === 'thinking').length
   const tools = parts.value.process.filter((entry) => entry.kind === 'tool').length
   const out: string[] = []
-  if (thoughts) out.push(`思考 ${thoughts}`)
+  if (thoughts) out.push(`think ${thoughts}`)
   if (tools) out.push(`工具 ${tools}`)
   return out.join(' · ')
 })
@@ -43,6 +61,21 @@ const processMeta = computed(() => {
     <span class="ctx-clear-line" />
   </div>
 
+  <div v-else-if="message.kind === 'task_done'" class="task-done-card">
+    <div class="task-done-head">
+      <span class="task-done-ico" :class="{ bad: message.task_status === 'failed' }">✓</span>
+      <div class="task-done-main">
+        <b>后台任务{{ taskStatus }}</b>
+        <span>{{ message.task_title || message.content }}</span>
+      </div>
+    </div>
+    <p v-if="taskSummary" class="task-done-summary">{{ taskSummary }}</p>
+    <div class="task-done-foot">
+      <span>任务在后台完成，结果还没有进入对话。</span>
+      <button class="btn primary" @click="emit('continue-task', message.task_id || '')">继续对话</button>
+    </div>
+  </div>
+
   <div v-else-if="isSystem" class="sys">{{ message.content }}</div>
 
   <div v-else-if="isUser" class="msg user">
@@ -55,10 +88,10 @@ const processMeta = computed(() => {
   </div>
 
   <div v-else class="msg assistant">
-    <Avatar :name="message.role_name || 'AtlasX'" :avatar="message.role_avatar" round />
+    <Avatar :name="message.role_name || '助手'" :avatar="avatarSrc" round />
     <div class="msg-body">
       <div class="msg-who">
-        <b>{{ message.role_name || 'AtlasX' }}</b>
+        <b>{{ message.role_name || '助手' }}</b>
         <span v-if="message.role_title || message.role_department" class="msg-role">
           {{ [message.role_title, message.role_department].filter(Boolean).join(' · ') }}
         </span>

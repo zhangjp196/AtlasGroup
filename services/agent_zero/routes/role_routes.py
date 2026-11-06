@@ -1,10 +1,10 @@
-"""角色库 API（V3：角色独立于工作区与群组）。
+"""角色库 API（V3：角色属于组织，可绑定一个工作区作为文件上下文）。
 
 - 持久角色：跨会话复用，存 `roles`（scope=persistent）；
 - 临时角色：只属于一个会话（scope=temporary, session_id=会话 id），会话删除时清理；
 - 来源：user / llm（模型在对话里创建）。
 
-群组只是「角色集合」，角色本身不挂在任何工作区或群组上。
+工作区由角色 / 群组绑定；会话不再反向绑定工作区。
 """
 
 from __future__ import annotations
@@ -23,11 +23,12 @@ router = APIRouter()
 
 SCOPES = ("persistent", "temporary")
 SOURCES = ("user", "llm")
-_PROTECTED = {zero_store.DEFAULT_ROLE_ID}
+_PROTECTED = {zero_store.DEFAULT_ROLE_ID, zero_store.GLOBAL_ROLE_ID}
 
 
 class RoleCreateBody(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
+    workspace_id: Optional[str] = Field(None, max_length=80)
     title: Optional[str] = Field(None, max_length=120)
     department_id: Optional[str] = Field(None, max_length=80)
     persona: Optional[str] = Field(None, max_length=4000)
@@ -42,6 +43,7 @@ class RoleCreateBody(BaseModel):
 
 class RoleUpdateBody(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=120)
+    workspace_id: Optional[str] = Field(None, max_length=80)
     title: Optional[str] = Field(None, max_length=120)
     department_id: Optional[str] = Field(None, max_length=80)
     persona: Optional[str] = Field(None, max_length=4000)
@@ -62,6 +64,7 @@ def _public(role: Dict[str, Any],
     return {
         "id": role.get("id"),
         "name": str(role.get("name") or role.get("id") or ""),
+        "workspace_id": str(role.get("group_id") or ""),
         "title": str(role.get("title") or ""),
         "department_id": dept_id,
         "department": paths.get(dept_id, ""),
@@ -87,6 +90,19 @@ def _department_value(dept_id: Optional[str]) -> Optional[str]:
         return ""
     if not zero_store.get_department(clean):
         raise HTTPException(status_code=400, detail=f"部门不存在: {clean}")
+    return clean
+
+
+def _workspace_value(ws_id: Optional[str]) -> Optional[str]:
+    """角色绑定的工作区：None = 未提供（保持原值），空串 = 不绑定。"""
+    if ws_id is None:
+        return None
+    clean = str(ws_id).strip()
+    if not clean:
+        return ""
+    ws = zero_store.get_workspace(clean)
+    if not ws or ws.get("archived"):
+        raise HTTPException(status_code=400, detail=f"工作区不存在或已归档: {clean}")
     return clean
 
 
@@ -124,6 +140,9 @@ def list_roles(include_temporary: bool = Query(False),
     paths = zero_store.department_paths()
     out: List[Dict[str, Any]] = []
     for row in rows:
+        if str(row.get("id") or "") == zero_store.GLOBAL_ROLE_ID:
+            # AtlasX 是全局 Agent 的系统角色，不进入角色库 / 选择器。
+            continue
         item = _public(row, paths)
         if item["scope"] == "temporary":
             if not include_temporary:
@@ -145,7 +164,7 @@ def create_role(body: RoleCreateBody):
         raise HTTPException(status_code=400, detail="非法 scope / source")
     role = zero_store.upsert_role({
         "id": zero_store.new_id("role"),
-        "group_id": None,
+        "group_id": _workspace_value(body.workspace_id) or None,
         "name": body.name,
         "title": body.title or "",
         "department_id": _department_value(body.department_id) or "",
@@ -178,9 +197,11 @@ def update_role(role_id: str, body: RoleUpdateBody):
     department_id = (
         ("" if body.department_id is None else _department_value(body.department_id))
         if "department_id" in fields_set else None)
+    workspace_id = (_workspace_value(body.workspace_id)
+                    if "workspace_id" in fields_set else current.get("group_id"))
     role = zero_store.upsert_role({
         "id": role_id,
-        "group_id": current.get("group_id"),
+        "group_id": workspace_id or None,
         "name": body.name or current.get("name"),
         "title": title,
         "department_id": department_id,
@@ -195,6 +216,10 @@ def update_role(role_id: str, body: RoleUpdateBody):
         "source": current.get("source") or "user",
         "session_id": session_id,
     })
+    if "workspace_id" in fields_set:
+        from services.agent_zero.task_layer import conversation
+
+        conversation.sync_conversations_workspace_for_role(role_id, workspace_id or None)
     return {"code": 0, "data": _public(role)}
 
 

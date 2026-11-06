@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 import Modal from '@/components/Modal.vue'
 import WorkEditorDialog, { type WorkSeed } from '@/components/WorkEditorDialog.vue'
 import { api } from '@/api/client'
 import type { Workspace } from '@/api/types'
-import { bytes, shortTime } from '@/lib/format'
+import { bytes } from '@/lib/format'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -25,7 +25,6 @@ const emit = defineEmits<{
 
 const app = useAppStore()
 const data = useDataStore()
-const route = useRoute()
 const router = useRouter()
 
 const path = ref('.')
@@ -41,6 +40,12 @@ const workSeed = ref<WorkSeed | null>(null)
 const pathLabel = computed(() => path.value === '.' ? '/' : `/${path.value}`)
 const breadcrumbs = computed(() => path.value === '.' ? [] : path.value.split('/').filter(Boolean))
 const fileText = computed(() => file.value?.text ?? file.value?.content ?? '')
+const boundRoles = computed(() => data.persistentRoles.filter(
+  (role) => String(role.workspace_id || '') === String(props.workspace?.id || ''),
+))
+const boundTeams = computed(() => data.teams.filter(
+  (team) => String(team.workspace_id || '') === String(props.workspace?.id || ''),
+))
 
 watch(() => props.workspace?.id, (id, old) => {
   if (!props.open || !id) return
@@ -128,7 +133,10 @@ async function toggleArchive(): Promise<void> {
   const ws = props.workspace
   if (!ws || busy.value) return
   const archived = !ws.archived
-  if (archived && !window.confirm(`归档工作区「${ws.name}」？目录与会话都会保留。`)) return
+  const bindHint = (boundRoles.value.length || boundTeams.value.length)
+    ? `有 ${boundRoles.value.length} 个角色 / ${boundTeams.value.length} 个群组绑定此工作区，归档后它们会回退到默认工作区。`
+    : ''
+  if (archived && !window.confirm(`归档工作区「${ws.name}」？${bindHint}`)) return
   busy.value = true
   try {
     await api(`/workspaces/${encodeURIComponent(ws.id)}`, { method: 'PATCH', body: { archived } })
@@ -145,7 +153,10 @@ async function toggleArchive(): Promise<void> {
 async function removeWorkspace(): Promise<void> {
   const ws = props.workspace
   if (!ws || busy.value) return
-  if (!window.confirm(`删除工作区「${ws.name}」？目录本身不会被删除。`)) return
+  const bindHint = (boundRoles.value.length || boundTeams.value.length)
+    ? `有 ${boundRoles.value.length} 个角色 / ${boundTeams.value.length} 个群组绑定此工作区，之后会回退到默认工作区。`
+    : ''
+  if (!window.confirm(`删除工作区「${ws.name}」？目录本身不会被删除。${bindHint}`)) return
   busy.value = true
   try {
     await api(`/workspaces/${encodeURIComponent(ws.id)}`, { method: 'DELETE' })
@@ -169,26 +180,6 @@ async function reveal(): Promise<void> {
   }
 }
 
-async function bindToCurrent(): Promise<void> {
-  const ws = props.workspace
-  if (!ws) return
-  const convId = route.meta.section === 'conv' ? String(route.params.id || '') : ''
-  if (!convId) {
-    app.toast('先打开一个会话再绑定工作区', 'bad')
-    return
-  }
-  try {
-    await api(`/conversations/${encodeURIComponent(convId)}/workspace`, {
-      method: 'PATCH',
-      body: { workspace_id: ws.id },
-    })
-    await data.loadAll()
-    app.toast('已绑定到当前会话')
-  } catch (error) {
-    app.toast(error instanceof Error ? error.message : String(error), 'bad')
-  }
-}
-
 function openWork(): void {
   const ws = props.workspace
   if (!ws) return
@@ -204,9 +195,14 @@ function onWorkSaved(): void {
   workOpen.value = false
 }
 
-function openConversation(id: string): void {
+function openRole(id: string): void {
   close()
-  void router.push(`/conv/${encodeURIComponent(id)}`)
+  void router.push(`/role/${encodeURIComponent(id)}`)
+}
+
+function openTeam(id: string): void {
+  close()
+  void router.push(`/group/${encodeURIComponent(id)}`)
 }
 </script>
 
@@ -233,8 +229,8 @@ function openConversation(id: string): void {
             <div class="role-detail-name">{{ workspace.name }}</div>
             <div class="role-line mono">{{ workspace.chat_only ? '纯聊天工作区，没有本地目录' : (workspace.root_path || '托管目录') }}</div>
             <div class="chips">
-              <span class="chip">{{ workspace.conversation_count || 0 }} 个会话</span>
-              <span v-if="workspace.last_conv_updated" class="chip">最近 {{ shortTime(workspace.last_conv_updated) }}</span>
+              <span class="chip">{{ boundRoles.length }} 个角色</span>
+              <span class="chip">{{ boundTeams.length }} 个群组</span>
               <span v-if="workspace.archived" class="chip">已归档</span>
             </div>
           </div>
@@ -279,6 +275,44 @@ function openConversation(id: string): void {
         </section>
 
         <section class="group-section">
+          <div class="group-section-head"><h3>绑定的角色</h3><span>{{ boundRoles.length }} 个</span></div>
+          <div class="sa-recent-list">
+            <button
+              v-for="role in boundRoles"
+              :key="role.id"
+              class="sa-recent-row"
+              type="button"
+              @click="openRole(role.id)"
+            >
+              <span class="sa-recent-main">
+                <b>{{ role.name || role.id }}</b>
+                <span>{{ [role.title, role.department, role.expertise].filter(Boolean).join(' · ') || '角色' }}</span>
+              </span>
+            </button>
+            <div v-if="!boundRoles.length" class="ws-empty">还没有角色绑定这个工作区</div>
+          </div>
+        </section>
+
+        <section class="group-section">
+          <div class="group-section-head"><h3>绑定的群组</h3><span>{{ boundTeams.length }} 个</span></div>
+          <div class="sa-recent-list">
+            <button
+              v-for="team in boundTeams"
+              :key="team.id"
+              class="sa-recent-row"
+              type="button"
+              @click="openTeam(team.id)"
+            >
+              <span class="sa-recent-main">
+                <b>{{ team.name || team.id }}</b>
+                <span>{{ (team.members || []).length }} 个角色</span>
+              </span>
+            </button>
+            <div v-if="!boundTeams.length" class="ws-empty">还没有群组绑定这个工作区</div>
+          </div>
+        </section>
+
+        <section class="group-section">
           <div class="group-section-head"><h3>管理</h3></div>
           <div class="avatar-actions">
             <button class="btn small" type="button" @click="openRename">重命名</button>
@@ -287,25 +321,9 @@ function openConversation(id: string): void {
           </div>
           <p class="group-mode-hint" style="margin:0">工作区只提供文件与终端上下文；删除工作区不会删除本地目录。</p>
         </section>
-
-        <section v-if="workspace.recent_conversations?.length" class="group-section">
-          <div class="group-section-head"><h3>最近会话</h3><span>{{ workspace.recent_conversations.length }} 个</span></div>
-          <div class="sa-recent-list">
-            <button
-              v-for="conv in workspace.recent_conversations"
-              :key="conv.id"
-              class="sa-recent-row"
-              type="button"
-              @click="openConversation(conv.id)"
-            >
-              <span class="sa-recent-main"><b>{{ conv.title || conv.id }}</b><span>{{ shortTime(conv.updated_at) }}</span></span>
-            </button>
-          </div>
-        </section>
       </div>
 
       <footer class="side-drawer-foot">
-        <button class="btn" type="button" @click="bindToCurrent">绑定到当前会话</button>
         <button class="btn" type="button" @click="reveal">打开文件夹</button>
         <button class="btn" type="button" @click="openWork">新建工单</button>
         <span class="spacer" />

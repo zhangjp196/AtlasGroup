@@ -342,7 +342,10 @@ TOOL_DEFS: List[ToolDef] = [
             "把一个明确的子任务交给子代理或团队成员执行，并拿回结论。\n"
             "- target=subagent（默认）：派生自身子代理（父角色的临时收窄副本）；\n"
             "- target=team：委派给本对话绑定的 Agent 团队成员（需先用 team_manage 建队并绑定），"
-            "成员以其角色人格在受限子循环里执行。\n"
+            "成员以其角色人格在受限子循环里执行；会创建一个群组后台任务，"
+            "可在执行画布查看实时过程、暂停 / 继续 / 结束。\n"
+            "- 团队任务优先拆成多个可并行的子任务，用 assignments 一次派发给多个成员；"
+            "各成员会同时后台执行，结果回到群聊。\n"
             "子代理拥有独立上下文，可以继续派生子代理（不设层数上限，注意别重复劳动）。"
         ),
         parameters=_obj({
@@ -359,11 +362,22 @@ TOOL_DEFS: List[ToolDef] = [
                                        "看不到父对话历史；需要它知道的信息请写在这里"},
             "tools": {"type": "array", "items": {"type": "string"},
                       "description": "可选：收窄本次委派的可用工具（须为父代理 / 成员已有工具的子集）"},
+            "assignments": {
+                "type": "array",
+                "description": "target=team 时批量并行派发：每个成员一个子任务。"
+                               "尽量覆盖所有相关角色；不要用多次单发代替。",
+                "items": _obj({
+                    "member_id": {"type": "string", "description": "成员 id"},
+                    "member_name": {"type": "string", "description": "成员名称（替代 id）"},
+                    "goal": {"type": "string", "description": "该成员要完成的子任务"},
+                    "context": {"type": "string", "description": "只给该成员的上下文（可选）"},
+                }, ["goal"]),
+            },
             "member_id": {"type": "string",
                           "description": "target=team 时的成员 id（系统提示团队名单中）"},
             "member_name": {"type": "string",
                             "description": "target=team 时的成员名称（替代 member_id）"},
-        }, ["goal"]),
+        }, []),
         gated=False,
     ),
     ToolDef(
@@ -397,7 +411,17 @@ TOOL_DEFS: List[ToolDef] = [
             "goal": {"type": "string", "description": "该成员要完成的子任务（明确、可独立收尾）"},
             "context": {"type": "string",
                         "description": "可选：只分享给该成员的上下文（成员不继承父对话历史）"},
-        }, ["goal"]),
+            "assignments": {
+                "type": "array",
+                "description": "批量并行派发：每个成员一个子任务。",
+                "items": _obj({
+                    "member_id": {"type": "string"},
+                    "member_name": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "context": {"type": "string"},
+                }, ["goal"]),
+            },
+        }, []),
         gated=True,
     ),
     ToolDef(
@@ -443,7 +467,8 @@ TOOL_DEFS: List[ToolDef] = [
             "max_speakers": {"type": "integer",
                              "description": "圆桌模式每条消息最多几个角色应答（1–12，默认 4）"},
             "bind": {"type": "boolean",
-                     "description": "create 时是否绑定到当前对话（默认 true）"},
+                     "description": ("create 时是否绑定到当前对话（默认 true）；"
+                                     "全局 Agent 会话不参与绑定，群组建好后从「群组」页进入")},
         }, ["action"]),
         gated=False,
     ),

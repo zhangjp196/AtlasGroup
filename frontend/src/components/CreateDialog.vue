@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import Avatar from '@/components/Avatar.vue'
 import AvatarField from '@/components/AvatarField.vue'
-import Modal from '@/components/Modal.vue'
+import SideDrawer from '@/components/SideDrawer.vue'
 import { api } from '@/api/client'
 import type { Conversation, Role, Team, Workspace, WorkItem } from '@/api/types'
 import { hasNativeBridge, pickFolder } from '@/composables/useNative'
@@ -21,15 +21,25 @@ const app = useAppStore()
 const data = useDataStore()
 const submitting = ref(false)
 
-const convForm = reactive({ role_id: '', team_id: '', bound_workspace_id: '' })
+const convForm = reactive({ role_id: '', team_id: '' })
 const wsForm = reactive({ name: '', path: '' })
-const roleForm = reactive({ name: '', title: '', department_id: '', expertise: '', model_code: '' })
-const teamForm = reactive({ name: '', avatar: '', mode: 'orchestrate', member_ids: [] as string[] })
+const roleForm = reactive({ name: '', workspace_id: '', title: '', department_id: '', expertise: '', model_code: '' })
+const teamForm = reactive({ name: '', workspace_id: '', avatar: '', mode: 'orchestrate', member_ids: [] as string[] })
 const workForm = reactive({ title: '', body: '', workspace_id: '', role_id: '', team_id: '' })
 
 const selectedMembers = computed(() => teamForm.member_ids
   .map((id) => data.persistentRoles.find((role) => role.id === id))
   .filter((role): role is Role => Boolean(role)))
+
+// 会话工作区由所选角色 / 群组决定，不再在会话上单独选择。
+const convWorkspace = computed(() => {
+  const team = data.teams.find((item) => item.id === convForm.team_id)
+  const teamWs = String(team?.workspace_id || '')
+  if (teamWs) return data.workspaces.find((ws) => ws.id === teamWs) || null
+  const roleId = convForm.role_id || 'default'
+  const role = data.roles.find((item) => item.id === roleId)
+  return data.workspaces.find((ws) => ws.id === String(role?.workspace_id || '')) || null
+})
 
 const labels: Record<CreateKind, string> = {
   conv: '新建会话',
@@ -43,15 +53,16 @@ watch(() => [props.open, props.kind], () => {
   if (!props.open) return
   convForm.role_id = ''
   convForm.team_id = ''
-  convForm.bound_workspace_id = ''
   wsForm.name = ''
   wsForm.path = ''
   roleForm.name = ''
+  roleForm.workspace_id = ''
   roleForm.title = ''
   roleForm.department_id = ''
   roleForm.expertise = ''
   roleForm.model_code = ''
   teamForm.name = ''
+  teamForm.workspace_id = ''
   teamForm.avatar = ''
   teamForm.mode = 'orchestrate'
   teamForm.member_ids = []
@@ -84,7 +95,6 @@ async function submit(): Promise<void> {
         body: {
           role_id: convForm.role_id || undefined,
           team_id: convForm.team_id || undefined,
-          bound_workspace_id: convForm.bound_workspace_id || undefined,
         },
       })
       await data.loadAll()
@@ -105,6 +115,7 @@ async function submit(): Promise<void> {
         method: 'POST',
         body: {
           name: teamForm.name,
+          workspace_id: teamForm.workspace_id || undefined,
           avatar: teamForm.avatar || '',
           mode: teamForm.mode,
           members: selectedMembers.value.map((role) => ({
@@ -140,14 +151,14 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <Modal :open="open" :title="labels[kind]" :width="kind === 'team' ? '660px' : '560px'" @close="emit('close')">
+  <SideDrawer :open="open" :title="labels[kind]" subtitle="填写后创建，随时可以在详情里继续调整" :width="kind === 'team' ? '680px' : '600px'" @close="emit('close')">
     <el-form label-position="top" class="atlas-form">
       <template v-if="kind === 'conv'">
         <el-form-item label="单聊 · 选一个角色">
-          <el-select v-model="convForm.role_id" placeholder="默认角色（AtlasX）" style="width:100%">
-            <el-option label="默认角色（AtlasX）" value="" />
+          <el-select v-model="convForm.role_id" placeholder="通用助手（默认）" style="width:100%">
+            <el-option label="通用助手（默认）" value="default" />
             <el-option
-              v-for="role in data.persistentRoles"
+              v-for="role in data.persistentRoles.filter((item) => item.id !== 'default')"
               :key="role.id"
               :label="`${role.name}${role.title ? ` · ${role.title}` : ''}`"
               :value="role.id"
@@ -165,12 +176,12 @@ async function submit(): Promise<void> {
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="绑定工作区（可选）">
-          <el-select v-model="convForm.bound_workspace_id" placeholder="纯聊天（不绑定）" style="width:100%">
-            <el-option label="纯聊天（不绑定）" value="" />
-            <el-option v-for="ws in data.activeWorkspaces" :key="ws.id" :label="ws.name" :value="ws.id" />
-          </el-select>
-        </el-form-item>
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          :title="`工作区：${convWorkspace?.name || '默认工作区'}（由所选角色 / 群组绑定）`"
+        />
         <el-alert type="info" :closable="false" show-icon title="单聊就是一个角色和你聊天；需要多角色协作时再开群聊。" />
       </template>
 
@@ -189,6 +200,12 @@ async function submit(): Promise<void> {
       <template v-else-if="kind === 'role'">
         <el-form-item label="名字"><el-input v-model="roleForm.name" /></el-form-item>
         <el-form-item label="岗位"><el-input v-model="roleForm.title" /></el-form-item>
+        <el-form-item label="工作区">
+          <el-select v-model="roleForm.workspace_id" placeholder="不绑定（默认工作区）" style="width:100%">
+            <el-option label="不绑定（默认工作区）" value="" />
+            <el-option v-for="ws in data.activeWorkspaces" :key="ws.id" :label="ws.name" :value="ws.id" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="部门">
           <el-select v-model="roleForm.department_id" placeholder="未安排" style="width:100%">
             <el-option label="未安排" value="" />
@@ -210,6 +227,12 @@ async function submit(): Promise<void> {
         </el-form-item>
         <el-form-item label="群头像">
           <AvatarField v-model="teamForm.avatar" scope="team" :name="teamForm.name || '群'" />
+        </el-form-item>
+        <el-form-item label="绑定工作区">
+          <el-select v-model="teamForm.workspace_id" placeholder="默认工作区" style="width:100%">
+            <el-option label="默认工作区" value="" />
+            <el-option v-for="ws in data.activeWorkspaces" :key="ws.id" :label="ws.name" :value="ws.id" />
+          </el-select>
         </el-form-item>
         <el-form-item label="协作方式">
           <el-select v-model="teamForm.mode" style="width:100%">
@@ -256,5 +279,5 @@ async function submit(): Promise<void> {
         {{ kind === 'team' ? '保存' : '创建' }}
       </el-button>
     </template>
-  </Modal>
+  </SideDrawer>
 </template>

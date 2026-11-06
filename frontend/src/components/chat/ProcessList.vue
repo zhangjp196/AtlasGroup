@@ -12,7 +12,7 @@ defineProps<{ entries: ProcessEntry[]; live?: boolean }>()
       <details v-if="entry.kind === 'thinking'" class="think-step" :open="live && index === entries.length - 1">
         <summary>
           <span class="proc-caret">›</span>
-          <b>{{ live && index === entries.length - 1 ? '深度思考中' : '深度思考' }}</b>
+          <b>think</b>
           <span class="think-brief">{{ firstLine(entry.text || '', 120) }}</span>
           <span v-if="live && index === entries.length - 1" class="live-dots"><i /><i /><i /></span>
         </summary>

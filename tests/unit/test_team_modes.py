@@ -242,6 +242,10 @@ def test_call_team_dispatches_background_member_run(app_env):
     assert member["name"] in mention["content"]
     assert "整理 API 文档" in mention["content"]
     assert mention["queued"] is True
+    # 模型上下文里是用户侧任务，但界面显示成主持直接 @ 成员
+    assert mention["by"] == "user"
+    assert mention["display_by"] == "assistant"
+    assert mention["role_name"] == team["leader"]["name"]
 
 
 def test_team_manage_tool_creates_with_mode(app_env):
@@ -259,6 +263,68 @@ def test_team_manage_tool_creates_with_mode(app_env):
     assert out["team"]["max_speakers"] == 5
     assert conv["team_id"] == out["team"]["id"]
     assert ts.get_team(out["team"]["id"])["mode"] == "roundtable"
+
+
+def test_global_agent_creates_group_without_binding_itself(app_env):
+    """全局 Agent 建群只建群，不把自己绑进群（否则群聊会显示成全局 Agent）。"""
+    import json
+
+    ws = _init(app_env)
+    conv = conversation.create_conversation(
+        ws, "local", zone=conversation.GLOBAL_AGENT_ZONE)
+    specs: list = []
+    out = json.loads(conversation._exec_team_manage(conv, ws, {
+        "action": "create", "name": "全局建的群",
+        "members": [{"name": "后端"}],
+    }, specs))
+    assert out["ok"] is True
+    assert out["bound"] is False
+    assert out["note"]
+    assert ts.get_team(out["team"]["id"]) is not None
+    assert not str(conversation.get_conversation(conv["id"])["team_id"] or "")
+    assert not str(conv.get("team_id") or "")
+
+    # 显式 bind 同样被拒绝；群组本身保留，可从群组页进入。
+    denied = json.loads(conversation._exec_team_manage(
+        conv, ws, {"action": "bind", "team_id": out["team"]["id"]}, specs))
+    assert "error" in denied
+    assert not str(conversation.get_conversation(conv["id"])["team_id"] or "")
+
+
+def test_global_agent_conversation_ignores_team_id(app_env):
+    """创建全局 Agent 会话时即使传了 team_id 也不落库。"""
+    ws = _init(app_env)
+    team = ts.create_team(ws, "旧群", leader={"name": "主持"},
+                          members=[{"name": "成员"}])
+    conv = conversation.create_conversation(
+        ws, "local", zone=conversation.GLOBAL_AGENT_ZONE, team_id=team["id"])
+    assert not str(conv.get("team_id") or "")
+    assert not str(conversation.get_conversation(conv["id"])["team_id"] or "")
+
+
+def test_detach_global_agent_conversations_clears_legacy_binding(app_env):
+    """旧数据里全局 Agent 会话绑了群：启动迁移只解绑，不删除群组。"""
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+
+    ws = _init(app_env)
+    team = ts.create_team(ws, "旧群", leader={"name": "主持"},
+                          members=[{"name": "成员"}])
+    conv = conversation.create_conversation(
+        ws, "local", zone=conversation.GLOBAL_AGENT_ZONE)
+    # 绕过新守卫，模拟旧版本留下的绑定。
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text("UPDATE conversations SET team_id = :tid WHERE id = :id"),
+            {"tid": team["id"], "id": conv["id"]},
+        )
+        db.commit()
+
+    assert ts.detach_global_agent_conversations() == 1
+    assert not str(conversation.get_conversation(conv["id"])["team_id"] or "")
+    assert ts.get_team(team["id"]) is not None
 
 
 def test_shared_role_survives_team_delete(app_env):

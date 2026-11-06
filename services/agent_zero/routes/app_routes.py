@@ -1334,6 +1334,14 @@ def put_permissions(body: PermissionBody):
 # ── Superagent：跨会话待授权 / 未读 / 运行 / 授权策略 ──────────────────
 
 
+@router.post("/app/global-agent")
+def ensure_global_agent():
+    """获取唯一的全局 Agent 会话（不存在则创建，归档则恢复，重复则收敛）。"""
+    from services.agent_zero.task_layer import conversation
+
+    return {"code": 0, "data": conversation.ensure_global_agent_conversation()}
+
+
 @router.get("/app/attention")
 def app_attention(limit: int = 100):
     """Superagent 面板数据：跨会话的待审批、待回答、未读、运行与授权策略。"""

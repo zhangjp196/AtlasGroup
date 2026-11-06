@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from services.agent_zero.stores.zero_store import (
     DEFAULT_ROLE_ID,
     DEFAULT_WORKSPACE_ID,
+    GLOBAL_ROLE_ID,
     get_workspace,
 )
 from services.agent_zero.stores import zero_store
@@ -45,12 +46,21 @@ class CreateConvBody(BaseModel):
 
 @router.post("/conversations")
 def create_conversation(body: CreateConvBody):
-    ws_id = body.workspace_id or DEFAULT_WORKSPACE_ID
+    zone = str(body.zone or "").strip() or None
+    # AtlasX 只服务全局 Agent；普通会话默认落到「通用助手」。
+    if zone == conversation.GLOBAL_AGENT_ZONE:
+        role_id = body.role_id or GLOBAL_ROLE_ID
+    else:
+        role_id = body.role_id or DEFAULT_ROLE_ID
+    # 工作区由角色 / 群组绑定决定；显式 workspace_id 仍优先（后台任务等内部入口）。
+    ws_id = (str(body.workspace_id or "").strip()
+             or conversation.workspace_for_conversation(role_id, body.team_id)
+             or DEFAULT_WORKSPACE_ID)
     if not get_workspace(ws_id):
         raise HTTPException(status_code=404, detail=f"工作区不存在: {ws_id}")
     try:
         conv = conversation.create_conversation(
-            ws_id, USER, role_id=body.role_id or DEFAULT_ROLE_ID, zone=body.zone,
+            ws_id, USER, role_id=role_id, zone=zone,
             team_id=body.team_id,
             bound_workspace_id=body.bound_workspace_id,
             model_code=body.model_code, thinking_level=body.thinking_level,
@@ -76,6 +86,105 @@ def update_conversation_title(conv_id: str, body: ConversationTitleBody):
     if not data:
         raise HTTPException(status_code=400, detail="标题为空或对话不存在")
     return {"code": 0, "data": data}
+
+
+class ConversationSettingsBody(BaseModel):
+    """会话管理：标题 / 单聊角色 / 群组 / 绑定工作区。
+
+    未出现在请求里的字段保持不变；显式传空字符串表示清空（如 team_id="" 退出群聊）。
+    """
+
+    title: Optional[str] = Field(None, max_length=200)
+    role_id: Optional[str] = Field(None, max_length=80)
+    team_id: Optional[str] = Field(None, max_length=80)
+    bound_workspace_id: Optional[str] = Field(None, max_length=80)
+
+
+@router.patch("/conversations/{conv_id}/settings")
+def update_conversation_settings(conv_id: str, body: ConversationSettingsBody):
+    """会话管理入口：一次保存角色 / 群组 / 工作区 / 标题。"""
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+    from services.agent_zero.services import team_service
+    from services.agent_zero.task_layer import title_service
+
+    conv = conversation.get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    fields = body.model_fields_set
+    zone = str(conv.get("zone") or "")
+    SessionLocal = get_session_local()
+
+    def _set_role(role_id: Optional[str]) -> None:
+        with SessionLocal() as db:
+            db.execute(
+                text("UPDATE conversations SET role_id = :rid, "
+                     "updated_at = datetime('now','localtime') WHERE id = :id"),
+                {"rid": role_id or None, "id": conv_id},
+            )
+            db.commit()
+
+    if "title" in fields:
+        title = str(body.title or "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="标题不能为空")
+        title_service.rename(conv_id, title)
+
+    if "role_id" in fields:
+        role_id = str(body.role_id or "").strip()
+        if role_id:
+            role = zero_store.get_role(role_id)
+            if not role:
+                raise HTTPException(status_code=400, detail=f"角色不存在: {role_id}")
+            if role_id == GLOBAL_ROLE_ID and zone != conversation.GLOBAL_AGENT_ZONE:
+                raise HTTPException(status_code=400,
+                                    detail="AtlasX 全局角色只能用于全局 Agent")
+            if str(role.get("scope") or "") == "temporary" \
+                    and str(role.get("session_id") or "") != conv_id:
+                raise HTTPException(status_code=400, detail="临时角色不属于当前会话")
+        _set_role(role_id or None)
+
+    if "team_id" in fields:
+        team_id = str(body.team_id or "").strip()
+        current_team = str(conv.get("team_id") or "").strip()
+        if team_id:
+            team = team_service.get_team(team_id)
+            if not team:
+                raise HTTPException(status_code=400, detail=f"群组不存在: {team_id}")
+            if not (team.get("members") or []):
+                raise HTTPException(status_code=400,
+                                    detail="这个群组还没有成员，先添加成员再绑定")
+            if team_id != current_team:
+                try:
+                    team_service.bind_team(conv_id, team_id)
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+            if "role_id" not in fields:
+                leader_id = str((team.get("leader") or {}).get("id") or "")
+                if leader_id:
+                    _set_role(leader_id)
+        elif current_team:
+            team_service.bind_team(conv_id, None, notice="你已退出群聊")
+
+    if "bound_workspace_id" in fields:
+        try:
+            conversation.update_bound_workspace(conv_id, body.bound_workspace_id or None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    if "role_id" in fields or "team_id" in fields:
+        role_changed = ("role_id" in fields
+                        and str(body.role_id or "").strip() != str(conv.get("role_id") or ""))
+        team_changed = ("team_id" in fields
+                        and str(body.team_id or "").strip() != str(conv.get("team_id") or ""))
+        if role_changed or team_changed:
+            conversation.sync_conversation_workspace(conv_id)
+
+    updated = conversation.get_conversation(conv_id) or conv
+    updated["created_at"] = str(updated.get("created_at") or "")
+    updated["updated_at"] = str(updated.get("updated_at") or "")
+    return {"code": 0, "data": updated}
 
 
 @router.post("/conversations/{conv_id}/title/regenerate")
@@ -219,7 +328,7 @@ async def conv_message_run(conv_id: str, body: MessageBody):
         logger.warning("对话运行触发失败（worker 周期会拾取）: %s", e)
     queue = run_service.conversation_queue(conv_id)
     position = next((i + 1 for i, r in enumerate(queue) if r["id"] == run["id"]), None)
-    running = run_service.running_run(conv_id)
+    running = run_service.running_run(conv_id, include_member=False)
     data = dict(run)
     data["intervened"] = False
     data["queued"] = True
@@ -293,6 +402,21 @@ def clear_conversation_context(conv_id: str, body: Optional[ClearContextBody] = 
         return {"code": 0, "data": {"cleared": 1 if ok else 0, "scope": scope}}
     count = conversation.clear_all_contexts()
     return {"code": 0, "data": {"cleared": count, "scope": "all"}}
+
+
+@router.post("/conversations/{conv_id}/clean")
+def clean_conversation(conv_id: str):
+    """彻底清空会话：上下文 + 历史消息 + 运行 / 后台任务 / 审批痕迹。
+
+    ``/clear`` 只让模型看不到旧上下文（转录可回看）；``/clean`` 连历史一起删，
+    会话本身（标题 / 群组 / 工作区）保留。前端负责二次确认。
+    """
+    if not conversation.get_conversation(conv_id):
+        raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    try:
+        return {"code": 0, "data": conversation.clean_conversation(conv_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 class MessageEditBody(BaseModel):
@@ -529,7 +653,9 @@ def get_conversation_queue(conv_id: str):
         raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
     return {"code": 0, "data": {
         "items": run_service.conversation_queue(conv_id),
-        "running": run_service.running_run(conv_id),
+        # 主会话只认主持 run：成员的后台并行 run 在执行画布里看，不能把
+        # 主会话的发送按钮锁住（用户要求：后台任务靠触发器推进，不是一直等）。
+        "running": run_service.running_run(conv_id, include_member=False),
     }}
 
 
@@ -590,7 +716,7 @@ async def inject_queued_run(conv_id: str, run_id: str):
     与兜底收尾），再让它在队首等 worker 认领——用户看到的就是「停 → 接着跑新消息」。
     """
     _queued_run_or_404(conv_id, run_id)
-    running = run_service.running_run(conv_id)
+    running = run_service.running_run(conv_id, include_member=False)
     if not running:
         raise HTTPException(status_code=409,
                             detail="当前没有正在执行的运行，无法立即插入（可直接等待执行）")
@@ -1306,7 +1432,13 @@ async def answer_question(question_id: str, body: AskAnswerBody):
 
 
 @router.post("/approvals/{approval_id}")
-def decide_approval(approval_id: str, body: ApprovalBody):
+async def decide_approval(approval_id: str, body: ApprovalBody):
+    """处理审批。
+
+    必须是 async 路由：审批等待方用 asyncio.Event 唤醒；同步路由会被 FastAPI
+    丢到线程池执行，跨线程 set() 不能可靠唤醒运行中的事件循环，表现为点了
+    「允许」但工具迟迟不继续。
+    """
     from services.agent_zero.task_layer import permissions
 
     action = (body.action or "").strip()

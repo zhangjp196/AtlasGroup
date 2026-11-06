@@ -435,9 +435,11 @@ def test_chat_seq_calls_names_are_resolvable():
     known = set(registry.known_codes())
     from services.agent_zero.task_layer import conversation
 
-    # 「当前工具」必须都能归一（propose_task 由对话层定义，不在 registry）
+    # 「当前工具」必须都能归一（propose_task / background_task 由对话层定义，
+    # 不在 registry）
     bad = {n for n in conversation._SEQ_CALLS_TOOLS
-           if n != "propose_task" and registry.canonical(n) not in known}
+           if n not in ("propose_task", "background_task")
+           and registry.canonical(n) not in known}
     assert not bad, f"_SEQ_CALLS_TOOLS 有无法归一的工具名：{sorted(bad)}"
     # 历史兼容名单里除 todo（→ todo_write 别名）外都是已下线的名字
     assert registry.canonical("todo") == "todo_write"

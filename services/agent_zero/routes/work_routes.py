@@ -68,8 +68,10 @@ def put_work_settings(body: WorkPolicyBody):
 
 
 @router.get("/work-items")
-def list_work_items(status: Optional[str] = None, limit: int = 100):
-    return {"code": 0, "data": work_service.list_items(status=status, limit=limit)}
+def list_work_items(status: Optional[str] = None, limit: int = 100,
+                    conversation_id: Optional[str] = None):
+    return {"code": 0, "data": work_service.list_items(
+        status=status, limit=limit, conversation_id=conversation_id)}
 
 
 @router.post("/work-items")

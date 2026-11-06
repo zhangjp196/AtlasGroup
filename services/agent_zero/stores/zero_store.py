@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_ID = "default"
 DEFAULT_ROLE_ID = "default"
+# 普通会话的兜底角色叫「通用助手」；AtlasX 只作为全局 Agent（工单助手）的角色存在。
+DEFAULT_ROLE_NAME = "通用助手"
+GLOBAL_ROLE_ID = "global-agent"
+GLOBAL_ROLE_NAME = APP_NAME
+SYSTEM_ROLE_IDS = frozenset({DEFAULT_ROLE_ID, GLOBAL_ROLE_ID})
 
 
 def _q(table: str) -> str:
@@ -433,7 +438,12 @@ DEFAULT_ENVELOPE = {
 
 
 def ensure_defaults() -> Dict[str, Any]:
-    """确保默认工作区与默认角色存在（幂等）。"""
+    """确保默认工作区与默认角色存在（幂等）。
+
+    - ``DEFAULT_ROLE_ID``：普通会话的兜底角色「通用助手」，不再叫 AtlasX；
+    - ``GLOBAL_ROLE_ID``：全局 Agent（工单助手）专用角色，名字是 AtlasX；
+    - 历史全局会话如果还绑着默认角色，统一迁到全局角色。
+    """
     ws = get_workspace(DEFAULT_WORKSPACE_ID)
     if not ws:
         create_workspace(
@@ -446,22 +456,24 @@ def ensure_defaults() -> Dict[str, Any]:
         upsert_role({
             "id": DEFAULT_ROLE_ID,
             "group_id": DEFAULT_WORKSPACE_ID,
-            "name": APP_NAME,
+            "name": DEFAULT_ROLE_NAME,
             "persona": "务实、直接、先动手再汇报。",
             "expertise": "本地文件操作、脚本执行、网页抓取与多步任务执行。",
             "envelope": DEFAULT_ENVELOPE,
         })
-    elif str(role.get("name") or "") == LEGACY_APP_NAME:
-        # 默认角色还是旧品牌名（用户没改过）→ 跟着品牌改名；用户自定义过则不动。
+    elif str(role.get("name") or "") in (APP_NAME, LEGACY_APP_NAME):
+        # 旧版本把默认角色命名为品牌名；现在 AtlasX 只属于全局 Agent。
         upsert_role({
             "id": role["id"],
             "group_id": role.get("group_id"),
-            "name": APP_NAME,
+            "name": DEFAULT_ROLE_NAME,
             "persona": role.get("persona"),
             "expertise": role.get("expertise"),
             "avatar": role.get("avatar"),
             "envelope": role.get("envelope") or DEFAULT_ENVELOPE,
         })
+    _ensure_global_agent_role()
+    _migrate_global_agent_conversations()
     # 老角色的 envelope 里没有 read_office（Office/PDF 工具是新加的）：补上，
     # 只追加不删除，用户显式收窄的工具清单不会被改动。
     _grant_missing_tools()
@@ -469,7 +481,52 @@ def ensure_defaults() -> Dict[str, Any]:
     # 否则「工具清单」里会一直躺着一个 registry 不存在的 code。
     _drop_retired_tools()
     # 默认工作区是纯聊天工作区：没有 root_path，也不创建工作目录。
-    return {"workspace_id": DEFAULT_WORKSPACE_ID, "role_id": DEFAULT_ROLE_ID}
+    return {"workspace_id": DEFAULT_WORKSPACE_ID, "role_id": DEFAULT_ROLE_ID,
+            "global_role_id": GLOBAL_ROLE_ID}
+
+
+def _ensure_global_agent_role() -> None:
+    """全局 Agent 角色（AtlasX）只服务 ``zone=global-agent`` 的会话。"""
+    role = get_role(GLOBAL_ROLE_ID)
+    if not role:
+        upsert_role({
+            "id": GLOBAL_ROLE_ID,
+            "group_id": DEFAULT_WORKSPACE_ID,
+            "name": GLOBAL_ROLE_NAME,
+            "title": "全局 Agent",
+            "persona": "克制、清楚、先结论后动作。代表用户管理整个 App，不执行用户项目代码。",
+            "expertise": "跨会话授权、未读、运行状态与组织/角色/群组管理。",
+            "envelope": DEFAULT_ENVELOPE,
+            "scope": "persistent",
+            "source": "system",
+        })
+        return
+    if str(role.get("name") or "") in (LEGACY_APP_NAME, ""):
+        upsert_role({
+            "id": role["id"],
+            "group_id": role.get("group_id"),
+            "name": GLOBAL_ROLE_NAME,
+            "title": role.get("title") or "全局 Agent",
+            "persona": role.get("persona"),
+            "expertise": role.get("expertise"),
+            "avatar": role.get("avatar"),
+            "envelope": role.get("envelope") or DEFAULT_ENVELOPE,
+            "scope": "persistent",
+            "source": "system",
+        })
+
+
+def _migrate_global_agent_conversations() -> None:
+    """历史全局会话（role_id 为空 / 默认角色）改绑到 AtlasX 全局角色。"""
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"UPDATE {_q('conversations')} SET role_id = :gid "
+                 f"WHERE COALESCE(zone, '') = 'global-agent' "
+                 f"AND (role_id IS NULL OR role_id = '' OR role_id = :did)"),
+            {"gid": GLOBAL_ROLE_ID, "did": DEFAULT_ROLE_ID},
+        )
+        db.commit()
 
 
 def _drop_retired_tools() -> int:

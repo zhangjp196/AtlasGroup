@@ -193,6 +193,10 @@ def _sync_item(item: Dict[str, Any], pending: Optional[Dict[str, str]] = None) -
     """把 run 的真实状态收敛到工单；只有需要人时停在 needs_attention。"""
     if item.get("status") in ("closed",):
         return item
+    # 后台任务自动建的工单由任务生命周期维护（一次任务可能有多个成员 run），
+    # 不能按单个 run 的状态来回覆盖。
+    if str((item.get("meta") or {}).get("managed_by") or "") == "team_task":
+        return item
     pending = pending if pending is not None else _pending_map()
     conv_id = str(item.get("conversation_id") or "")
     run_id = str(item.get("run_id") or "")
@@ -249,13 +253,18 @@ def _public(row: Dict[str, Any]) -> Dict[str, Any]:
     return item
 
 
-def _list_rows(status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+def _list_rows(status: Optional[str] = None, limit: int = 100,
+               conversation_id: Optional[str] = None) -> List[Dict[str, Any]]:
     limit = _limit(limit)
-    where = ""
+    conds = []
     params: Dict[str, Any] = {"n": limit}
     if status in STATUSES:
-        where = "WHERE w.status = :status"
+        conds.append("w.status = :status")
         params["status"] = status
+    if conversation_id:
+        conds.append("w.conversation_id = :cid")
+        params["cid"] = str(conversation_id)
+    where = f"WHERE {' AND '.join(conds)}" if conds else ""
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         rows = db.execute(
@@ -314,9 +323,11 @@ def stats() -> Dict[str, int]:
     return out
 
 
-def list_items(status: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
+def list_items(status: Optional[str] = None, limit: int = 100,
+               conversation_id: Optional[str] = None) -> Dict[str, Any]:
     pending = _pending_map()
-    items = [_sync_item(item, pending) for item in _list_rows(status, limit)]
+    items = [_sync_item(item, pending)
+             for item in _list_rows(status, limit, conversation_id)]
     return {"items": items, "stats": stats(), "policy": get_policy()}
 
 
@@ -326,6 +337,85 @@ def get_item(item_id: str) -> Optional[Dict[str, Any]]:
 
 
 # ── CRUD ─────────────────────────────────────────────────────────────────
+
+def find_by_ref(ref: str) -> Optional[Dict[str, Any]]:
+    """按 source_ref 找工单（后台任务自动建单用它幂等关联）。"""
+    value = str(ref or "").strip()
+    if not value:
+        return None
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        row = db.execute(
+            text(f"SELECT id FROM {_q('work_items')} WHERE source_ref = :ref LIMIT 1"),
+            {"ref": value},
+        ).scalar()
+    return get_item(str(row)) if row else None
+
+
+def create_from_task(task: Dict[str, Any], conv: Optional[Dict[str, Any]] = None
+                     ) -> Optional[Dict[str, Any]]:
+    """角色 / 群组的后台任务 → 自动创建一张工单（同一任务幂等）。
+
+    工单是任务在「工单」面板里的可观测入口；状态由任务生命周期维护
+    （`_sync_item` 不会用单个成员 run 去覆盖它）。
+    """
+    task_id = str((task or {}).get("id") or "").strip()
+    if not task_id:
+        return None
+    ref = f"team_task:{task_id}"
+    existing = find_by_ref(ref)
+    if existing:
+        return existing
+    members = [str(m.get("role_name") or m.get("role_id") or "")
+               for m in (task.get("members") or [])]
+    try:
+        return create_item({
+            "title": str(task.get("title") or "后台任务"),
+            "body": str(task.get("goal") or ""),
+            "source": "agent",
+            "source_ref": ref,
+            "source_actor": "角色 / 群组任务",
+            "status": "working",
+            "conversation_id": str(task.get("conversation_id") or ""),
+            "role_id": str(task.get("leader_role_id") or ""),
+            "team_id": str(task.get("team_id") or ""),
+            "workspace_id": str((conv or {}).get("workspace_id") or ""),
+            "meta": {"task_id": task_id, "managed_by": "team_task",
+                     "members": members},
+        })
+    except Exception:
+        logger.exception("后台任务自动建工单失败 task=%s", task_id)
+        return None
+
+
+def finish_task(task: Dict[str, Any], summary: str = "") -> Optional[Dict[str, Any]]:
+    """后台任务结束 → 收敛对应工单状态（完成 / 需要你）。"""
+    task_id = str((task or {}).get("id") or "").strip()
+    if not task_id:
+        return None
+    item = find_by_ref(f"team_task:{task_id}")
+    if not item:
+        return None
+    raw = str(task.get("status") or "")
+    if raw == "done":
+        status, attention = "done", None
+    elif raw in ("failed", "stopped"):
+        status = "needs_attention"
+        attention = ("任务执行失败，确认后可重新派发" if raw == "failed"
+                     else "任务已停止，确认后可重新派发")
+    else:
+        return item
+    fields: Dict[str, Any] = {"status": status}
+    if attention:
+        fields["attention_reason"] = attention
+    else:
+        fields["attention_reason"] = None
+        fields["finished_at"] = _now()
+    if summary:
+        fields["result_summary"] = summary[:4000]
+    _update_status(item["id"], **fields)
+    return get_item(item["id"]) or item
+
 
 def create_item(payload: Dict[str, Any], *, actor: str = "local") -> Dict[str, Any]:
     title = str(payload.get("title") or "").strip()
@@ -353,15 +443,25 @@ def create_item(payload: Dict[str, Any], *, actor: str = "local") -> Dict[str, A
     if not allowed:
         status = "needs_attention"
         attention = reason
+    # 内部自动建单（角色 / 群组的后台任务）可以显式指定状态：
+    # 任务已经在后台跑，工单只是它在前台的可观测入口，不该被来源策略拦成待处理。
+    explicit_status = str(payload.get("status") or "").strip()
+    if explicit_status in STATUSES:
+        status = explicit_status
+        attention = None if status in ("inbox", "working", "done") else attention
+    conv_id = str(payload.get("conversation_id") or "").strip() or None
+    run_id = str(payload.get("run_id") or "").strip() or None
+    started_at = _now() if status == "working" else None
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         db.execute(
             text(
                 f"INSERT INTO {_q('work_items')} "
                 f"(id, title, body, source, source_ref, source_actor, status, priority, "
-                f"workspace_id, role_id, team_id, attention_reason, meta, created_at, updated_at) "
+                f"workspace_id, role_id, team_id, conversation_id, run_id, "
+                f"attention_reason, meta, started_at, created_at, updated_at) "
                 f"VALUES (:id, :title, :body, :source, :ref, :actor, :status, :priority, "
-                f":ws, :role, :team, :attention, :meta, :now, :now)"
+                f":ws, :role, :team, :conv, :run, :attention, :meta, :started, :now, :now)"
             ),
             {
                 "id": item_id, "title": title[:200], "body": body,
@@ -369,8 +469,9 @@ def create_item(payload: Dict[str, Any], *, actor: str = "local") -> Dict[str, A
                 "actor": source_actor[:120] or None,
                 "status": status, "priority": max(0, min(9, int(payload.get("priority") or 0))),
                 "ws": workspace_id, "role": role_id, "team": team_id,
+                "conv": conv_id, "run": run_id,
                 "attention": attention, "meta": json.dumps(meta, ensure_ascii=False),
-                "now": _now(),
+                "started": started_at, "now": _now(),
             },
         )
         db.commit()

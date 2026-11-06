@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import AvatarField from '@/components/AvatarField.vue'
-import Modal from '@/components/Modal.vue'
+import SideDrawer from '@/components/SideDrawer.vue'
 import { api } from '@/api/client'
 import type { Department } from '@/api/types'
 import { departmentPath, departmentSubtree, orderedDepartments } from '@/lib/derive'
@@ -67,7 +67,7 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-  <Modal :open="open" :title="title" width="560px" @close="emit('close')">
+  <SideDrawer :open="open" :title="title" width="560px" @close="emit('close')">
     <div class="field">
       <label>部门头像</label>
       <AvatarField v-model="form.avatar" scope="department" :name="form.name || '部'" />
@@ -90,5 +90,5 @@ async function save(): Promise<void> {
       <el-button @click="emit('close')">取消</el-button>
       <el-button type="primary" :loading="saving" :disabled="!form.name.trim()" @click="save">保存</el-button>
     </template>
-  </Modal>
+  </SideDrawer>
 </template>

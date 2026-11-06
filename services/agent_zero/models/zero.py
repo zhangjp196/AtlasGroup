@@ -224,6 +224,8 @@ class ConversationRun(Base):
     role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 后台成员任务：该 run 只让指定群成员执行（由主持 call_team / @ 触发）。
     target_role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 所属群组后台任务（一次编排可包含多个成员 run；为空 = 普通对话 / 子代理）
+    team_task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
     mode: Mapped[str] = mapped_column(
         Text, nullable=False, default="chat", server_default=text("'chat'")
@@ -268,6 +270,47 @@ class ConversationRun(Base):
         CheckConstraint(
             "status IN ('queued','running','waiting','done','failed','stopped')",
             name="ck_conversation_runs_status",
+        ),
+    )
+
+
+class TeamTask(Base):
+    """群组后台任务：一次编排 + 多个成员并行 run。
+
+    任务与成员 run 的关系是 1:N（run.team_task_id）。members 里保存每个成员的
+    角色 / 子任务 / 最近一次 run，用于暂停后继续、以及执行画布展示。
+    """
+
+    __tablename__ = "team_tasks"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    leader_role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    goal: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # running / paused / done / failed / stopped
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
+    # [{role_id, role_name, goal, context, status, run_id}]
+    members: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[str] = mapped_column(Text, nullable=False, default="local")
+    # 用户点过「继续对话」的时间：空 = 结果还没交回主会话。
+    # 后台任务结束只写通知，**不自动唤醒**主持（否则每完成一个任务就烧一轮 token）；
+    # 由用户显式触发后才把结果汇总成一条主持 run。
+    continued_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+    updated_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running','paused','done','failed','stopped')",
+            name="ck_team_tasks_status",
         ),
     )
 
@@ -582,6 +625,9 @@ ENSURE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_conv_runs_conv ON conversation_runs(conversation_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_conv_runs_status ON conversation_runs(status)",
     "CREATE INDEX IF NOT EXISTS idx_conv_runs_target ON conversation_runs(target_role_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_conv_runs_task ON conversation_runs(team_task_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_team_tasks_conv ON team_tasks(conversation_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_team_tasks_status ON team_tasks(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_conversations_archived ON conversations(workspace_id, archived, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_workspaces_archived ON workspaces(archived)",

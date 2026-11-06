@@ -430,7 +430,8 @@ def _translate_merged(code: str, data: Dict[str, Any]) -> Tuple[str, Dict[str, A
     if code == "delegate":
         target = str(data.get("target") or "").strip().lower()
         out = {k: v for k, v in data.items() if k != "target"}
-        if target == "team" or out.get("member_id") or out.get("member_name"):
+        if target == "team" or out.get("member_id") or out.get("member_name") \
+                or out.get("assignments"):
             return "call_team", out
         return "call_subagent", out
     return code, data

@@ -61,6 +61,17 @@ def test_global_agent_is_a_real_conversation(client):
     assert all(s["id"] != conv["id"] for s in data["sessions"])
 
 
+def test_global_agent_endpoint_returns_single_conversation(client):
+    first = client.post(f"{API}/app/global-agent").json()["data"]
+    second = client.post(f"{API}/app/global-agent").json()["data"]
+    assert first["id"] == second["id"]
+    assert first["zone"] == "global-agent"
+    assert first["role_id"]
+    # 入口会话不在普通会话授权列表里
+    data = client.get(f"{API}/app/attention").json()["data"]
+    assert all(s["id"] != first["id"] for s in data["sessions"])
+
+
 def test_global_agent_tool_is_registered_and_reads_status(client):
     from services.agent_zero.services import attention_service
     from services.agent_zero.task_layer import conversation

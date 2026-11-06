@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
-import Modal from '@/components/Modal.vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import SideDrawer from '@/components/SideDrawer.vue'
+import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import type { HookSummary, McpServer, ModelProfile, PlatformPreset, Skill, SlashCommand, Subscription, ToolItem, Workspace } from '@/api/types'
 import { ACTION_COMMANDS } from '@/lib/commands'
+import { playSound } from '@/lib/sound'
 import { THEMES, type ThemeId, type ThemeSchedule } from '@/lib/theme'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
@@ -13,6 +15,23 @@ import PageHeader from '@/components/PageHeader.vue'
 const app = useAppStore()
 const data = useDataStore()
 const router = useRouter()
+
+const roleCountByWs = computed(() => {
+  const map = new Map<string, number>()
+  for (const role of data.persistentRoles) {
+    const id = String(role.workspace_id || '')
+    if (id) map.set(id, (map.get(id) || 0) + 1)
+  }
+  return map
+})
+const teamCountByWs = computed(() => {
+  const map = new Map<string, number>()
+  for (const team of data.teams) {
+    const id = String(team.workspace_id || '')
+    if (id) map.set(id, (map.get(id) || 0) + 1)
+  }
+  return map
+})
 
 type Tab = 'models' | 'usage' | 'mcp' | 'skills' | 'commands' | 'appearance' | 'tools' | 'runtime' | 'workspaces'
 const tab = ref<Tab>('models')
@@ -118,9 +137,148 @@ async function loadUsage(): Promise<void> {
     usageLoading.value = false
   }
 }
+
+async function loadQuota(force = false): Promise<void> {
+  if (!supportsQuota.value) {
+    quota.value = null
+    quotaError.value = ''
+    return
+  }
+  quotaLoading.value = true
+  quotaError.value = ''
+  try {
+    const code = encodeURIComponent(quotaModelCode.value)
+    quota.value = await api<QuotaData>(`/app/models/usage?code=${code}${force ? '&refresh=true' : ''}`)
+  } catch (error) {
+    quota.value = null
+    quotaError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    quotaLoading.value = false
+  }
+}
+
+function quotaTone(percent?: number | null): string {
+  const n = Number(percent || 0)
+  if (n >= 90) return 'hot'
+  if (n >= 70) return 'warn'
+  return ''
+}
+
+function formatReset(seconds?: number | null): string {
+  const n = Number(seconds || 0)
+  if (!n) return ''
+  if (n >= 86400) return `${Math.floor(n / 86400)} 天 ${Math.floor((n % 86400) / 3600)} 小时后重置`
+  if (n >= 3600) return `${Math.floor(n / 3600)} 小时 ${Math.floor((n % 3600) / 60)} 分后重置`
+  return `${Math.max(1, Math.floor(n / 60))} 分钟后重置`
+}
+
+function modelPayload(clearSubId = ''): Array<Record<string, unknown>> {
+  return data.models
+    .filter((item) => item.code !== 'default')
+    .map((item) => {
+      const belongs = clearSubId && (item.subscription_id || item.channel_id || '') === clearSubId
+      return {
+        code: item.code,
+        name: item.name,
+        model: item.model,
+        base_url: item.base_url,
+        api_key: item.api_key,
+        protocol: item.protocol,
+        vision: item.vision,
+        thinking_levels: item.thinking_levels,
+        context_window: item.context_window,
+        max_tokens: item.max_tokens,
+        subscription_id: belongs ? undefined : item.subscription_id,
+        channel_id: belongs ? undefined : item.channel_id,
+        channel_name: belongs ? undefined : item.channel_name,
+      }
+    })
+}
+
+function openEditSubscription(sub: Subscription): void {
+  editingSubId.value = sub.id
+  subForm.name = sub.name || ''
+  subForm.provider = sub.provider || ''
+  subForm.protocol = sub.protocol || 'openai-chat'
+  subForm.base_url = sub.base_url || ''
+  subForm.anthropic_base_url = sub.anthropic_base_url || ''
+  subForm.api_key = sub.api_key || ''
+  subForm.models_url = sub.models_url || ''
+  addKind.value = 'sub'
+  addOpen.value = true
+}
+
+async function deleteSubscription(sub: Subscription): Promise<void> {
+  const inUse = data.models.some((model) => model.code === data.activeModel
+    && (model.subscription_id || model.channel_id || '') === sub.id)
+  if (inUse) {
+    app.toast('当前默认模型属于这个订阅，请先切换默认模型再删除', 'bad', 4500)
+    return
+  }
+  if (!window.confirm(`删除订阅「${sub.name || sub.id}」？它下面的模型会保留，但会解除订阅绑定。`)) return
+  try {
+    const list = data.subscriptions.filter((item) => item.id !== sub.id).map((item) => ({ ...item }))
+    await api('/app/settings', {
+      method: 'PUT',
+      body: { subscriptions: list, models: modelPayload(sub.id) },
+    })
+    if (selectedSubscriptionId.value === sub.id) selectedSubscriptionId.value = ''
+    await data.loadAll()
+    app.toast('订阅已删除')
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad', 5000)
+  }
+}
+
+function openSubMenu(event: MouseEvent, sub: Subscription): void {
+  itemMenu.open = false
+  subMenu.sub = sub
+  subMenu.x = event.clientX
+  subMenu.y = event.clientY
+  subMenu.open = true
+}
+
+async function copyText(value?: string): Promise<void> {
+  const text = String(value || '').trim()
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    app.toast('已复制')
+  } catch {
+    app.toast('复制失败，请手动选择文本', 'bad')
+  }
+}
+
+const subMenuItems = computed<ContextMenuItem[]>(() => [
+  { label: '编辑订阅', action: 'edit' },
+  { label: '获取模型', action: 'discover' },
+  { label: '复制 Base URL', action: 'copy', hint: subMenu.sub?.base_url || '' },
+  { label: '', action: '', separator: true },
+  { label: '删除订阅', action: 'delete', danger: true },
+])
+
+async function onSubMenu(action: string): Promise<void> {
+  const sub = subMenu.sub
+  if (!sub) return
+  if (action === 'edit') return openEditSubscription(sub)
+  if (action === 'copy') return copyText(sub.base_url)
+  selectedSubscriptionId.value = sub.id
+  if (action === 'discover') {
+    await nextTick()
+    return discoverModels()
+  }
+  if (action === 'delete') return deleteSubscription(sub)
+}
 const tools = ref<ToolItem[]>([])
 const loadingTools = ref(false)
 const schedule = reactive<ThemeSchedule>({ ...app.schedule })
+const soundEnabled = ref(localStorage.getItem('atlasx.sound') !== 'off')
+
+function setSoundEnabled(value: boolean): void {
+  soundEnabled.value = value
+  localStorage.setItem('atlasx.sound', value ? 'on' : 'off')
+  if (value) playSound('done')
+}
 const mcpServers = ref<McpServer[]>([])
 const mcpNpm = ref(true)
 const PACK_LABELS: Record<string, string> = {
@@ -154,6 +312,138 @@ const platformOpen = ref(false)
 const platformSearch = ref('')
 const platformPresets = ref<PlatformPreset[]>([])
 const platformLoading = ref(false)
+const editingSubId = ref('')
+const editingModelCode = ref('')
+const subMenu = reactive({ open: false, x: 0, y: 0, sub: null as Subscription | null })
+type ItemKind = 'mcp' | 'skill' | 'command' | 'hook' | 'model'
+const itemMenu = reactive({
+  open: false,
+  x: 0,
+  y: 0,
+  kind: 'mcp' as ItemKind,
+  id: '',
+  name: '',
+  index: -1,
+  enabled: false,
+  builtin: false,
+  event: '',
+  command: '',
+})
+
+const itemMenuItems = computed<ContextMenuItem[]>(() => {
+  if (itemMenu.kind === 'mcp') {
+    return [
+      { label: itemMenu.enabled ? '停用服务' : '启用服务', action: 'toggle' },
+      { label: '复制名称', action: 'copy' },
+      { label: '', action: '', separator: true },
+      { label: '删除服务', action: 'delete', danger: true },
+    ]
+  }
+  if (itemMenu.kind === 'hook') {
+    return [
+      { label: '复制命令', action: 'copy' },
+      { label: '', action: '', separator: true },
+      { label: '删除 Hook', action: 'delete', danger: true },
+    ]
+  }
+  if (itemMenu.kind === 'model') {
+    return [
+      { label: '编辑模型', action: 'edit' },
+      { label: '设为默认', action: 'activate', disabled: itemMenu.enabled },
+      { label: '复制模型 code', action: 'copy' },
+      { label: '', action: '', separator: true },
+      { label: '删除模型', action: 'delete', danger: true, disabled: itemMenu.enabled },
+    ]
+  }
+  return [
+    { label: '复制名称', action: 'copy' },
+    { label: '', action: '', separator: true },
+    { label: itemMenu.kind === 'skill' ? '删除技能' : '删除命令', action: 'delete', danger: true, disabled: itemMenu.builtin },
+  ]
+})
+
+function openItemMenu(event: MouseEvent, kind: ItemKind,
+                      data: { id?: string; name?: string; index?: number; enabled?: boolean;
+                              builtin?: boolean; event?: string; command?: string }): void {
+  subMenu.open = false
+  itemMenu.kind = kind
+  itemMenu.id = String(data.id || '')
+  itemMenu.name = String(data.name || '')
+  itemMenu.index = Number(data.index ?? -1)
+  itemMenu.enabled = Boolean(data.enabled)
+  itemMenu.builtin = Boolean(data.builtin)
+  itemMenu.event = String(data.event || '')
+  itemMenu.command = String(data.command || '')
+  itemMenu.x = event.clientX
+  itemMenu.y = event.clientY
+  itemMenu.open = true
+}
+
+async function onItemMenu(action: string): Promise<void> {
+  if (action === 'copy') {
+    return copyText(itemMenu.kind === 'hook' ? itemMenu.command
+      : itemMenu.kind === 'model' ? itemMenu.id
+        : itemMenu.name)
+  }
+  if (itemMenu.kind === 'model') {
+    const model = data.models.find((item) => item.code === itemMenu.id)
+    if (!model) return
+    if (action === 'edit') return openEditModel(model)
+    if (action === 'activate') return activate(model.code)
+    if (action === 'delete') return removeModel(model)
+    return
+  }
+  if (itemMenu.kind === 'mcp') {
+    const server = mcpServers.value.find((item) => item.id === itemMenu.id)
+    if (!server) return
+    if (action === 'toggle') return toggleMcp(server)
+    if (action === 'delete') return deleteMcp(server)
+  }
+  if (itemMenu.kind === 'skill') {
+    const skill = skills.value.find((item) => item.id === itemMenu.id)
+    if (skill && action === 'delete') return deleteSkill(skill)
+  }
+  if (itemMenu.kind === 'command') {
+    const command = workspaceCommands.value.find((item) => item.name === itemMenu.name)
+    if (command && action === 'delete') return deleteCommand(command)
+  }
+  if (itemMenu.kind === 'hook' && action === 'delete') {
+    try {
+      await api(`/app/hooks?event=${encodeURIComponent(itemMenu.event)}&index=${itemMenu.index}&workspace_id=${encodeURIComponent(activeWorkspaceId.value)}`, {
+        method: 'DELETE',
+      })
+      await loadLegacy()
+      app.toast('Hook 已删除')
+    } catch (error) {
+      app.toast(error instanceof Error ? error.message : String(error), 'bad')
+    }
+  }
+}
+
+interface QuotaWindow {
+  used?: number | null
+  limit?: number | null
+  remaining?: number | null
+  percent?: number | null
+  reset_in_sec?: number | null
+  status?: string
+}
+
+interface QuotaData {
+  provider?: string
+  windows?: Record<string, QuotaWindow>
+  subscribed_at?: string
+}
+
+const quota = ref<QuotaData | null>(null)
+const quotaLoading = ref(false)
+const quotaError = ref('')
+const QUOTA_LABELS: Record<string, string> = {
+  five_hour: '5 小时',
+  weekly: '本周',
+  monthly: '本月',
+}
+const QUOTA_ORDER = ['five_hour', 'weekly', 'monthly']
 
 const filteredSubscriptions = computed(() => {
   const q = subQuery.value.trim().toLowerCase()
@@ -168,6 +458,26 @@ const subscriptionModels = computed(() => {
     .filter((model) => !q || `${model.name || ''} ${model.code} ${model.model || ''}`.toLowerCase().includes(q))
 })
 const unassignedModels = computed(() => data.models.filter((model) => model.code !== 'default' && !(model.subscription_id || model.channel_id)))
+const quotaModelCode = computed(() => subscriptionModels.value[0]?.code || '')
+const supportsQuota = computed(() => {
+  const sub = selectedSubscription.value
+  if (!sub || !quotaModelCode.value) return false
+  return sub.provider === 'opencode-go'
+    || /opencode\.ai\/inference\/go/i.test(String(sub.base_url || ''))
+    || Boolean((sub as Record<string, unknown>).supports_quota)
+})
+const quotaEntries = computed(() => {
+  const windows = quota.value?.windows || {}
+  const keys = [
+    ...QUOTA_ORDER.filter((key) => windows[key]),
+    ...Object.keys(windows).filter((key) => !QUOTA_ORDER.includes(key)),
+  ]
+  return keys.map((key) => ({
+    key,
+    label: QUOTA_LABELS[key] || key,
+    ...(windows[key] || {}),
+  }))
+})
 
 watch(data.subscriptions, (list) => {
   if (!selectedSubscriptionId.value && list.length) selectedSubscriptionId.value = list[0].id
@@ -176,8 +486,13 @@ watch(data.subscriptions, (list) => {
   }
 }, { immediate: true })
 
-watch(selectedSubscriptionId, () => { modelQuery.value = '' })
+watch(selectedSubscriptionId, () => {
+  modelQuery.value = ''
+  void loadQuota()
+})
 const addTitle = computed(() => {
+  if (addKind.value === 'sub' && editingSubId.value) return '编辑订阅'
+  if (addKind.value === 'model' && editingModelCode.value) return '编辑模型'
   const labels: Record<Exclude<AddKind, ''>, string> = {
     mcp: '新增 MCP 服务',
     skill: '新建技能',
@@ -196,7 +511,11 @@ const skillForm = reactive({ name: '', description: '', content: '' })
 const commandForm = reactive({ name: '', description: '', argument_hint: '', body: '' })
 const hookForm = reactive({ event: 'PreToolUse', command: '', matcher: '*', timeout: 10 })
 const subForm = reactive({ name: '', provider: '', protocol: 'openai-chat', base_url: '', anthropic_base_url: '', api_key: '', models_url: '' })
-const modelForm = reactive({ code: '', name: '', model: '', subscription_id: '', protocol: 'openai-chat', context_window: 0, max_tokens: 0, vision: false })
+const modelForm = reactive({
+  code: '', name: '', model: '', subscription_id: '', protocol: 'openai-chat',
+  context_window: 0, max_tokens: 0, vision: false,
+  thinking_levels: [] as string[],
+})
 const discoverOpen = ref(false)
 const discovering = ref(false)
 const discoveredModels = ref<Array<{ id: string; protocol?: string; supported?: boolean; note?: string }>>([])
@@ -329,6 +648,7 @@ async function openPlatformPicker(): Promise<void> {
 }
 
 function choosePlatform(preset?: PlatformPreset): void {
+  editingSubId.value = ''
   subForm.name = preset?.name || ''
   subForm.provider = preset?.provider || preset?.code || ''
   subForm.protocol = preset?.protocol || 'openai-chat'
@@ -360,7 +680,43 @@ function platformHost(preset: PlatformPreset): string {
 function openAdd(kind: AddKind): void {
   addKind.value = kind
   addOpen.value = true
-  if (kind === 'model') modelForm.subscription_id = selectedSubscriptionId.value || data.subscriptions[0]?.id || ''
+  if (kind === 'sub') {
+    editingSubId.value = ''
+    subForm.name = ''
+    subForm.provider = ''
+    subForm.protocol = 'openai-chat'
+    subForm.base_url = ''
+    subForm.anthropic_base_url = ''
+    subForm.api_key = ''
+    subForm.models_url = ''
+  }
+  if (kind === 'model') {
+    editingModelCode.value = ''
+    modelForm.code = ''
+    modelForm.name = ''
+    modelForm.model = ''
+    modelForm.subscription_id = selectedSubscriptionId.value || data.subscriptions[0]?.id || ''
+    modelForm.protocol = 'openai-chat'
+    modelForm.context_window = 0
+    modelForm.max_tokens = 0
+    modelForm.vision = false
+    modelForm.thinking_levels = []
+  }
+}
+
+function openEditModel(model: ModelProfile): void {
+  editingModelCode.value = model.code
+  modelForm.code = model.code
+  modelForm.name = model.name || ''
+  modelForm.model = model.model || model.code
+  modelForm.subscription_id = model.subscription_id || model.channel_id || selectedSubscriptionId.value || ''
+  modelForm.protocol = model.protocol || 'openai-chat'
+  modelForm.context_window = Number(model.context_window || 0)
+  modelForm.max_tokens = Number(model.max_tokens || 0)
+  modelForm.vision = Boolean(model.vision)
+  modelForm.thinking_levels = [...(model.thinking_levels || [])]
+  addKind.value = 'model'
+  addOpen.value = true
 }
 
 async function saveAdd(): Promise<void> {
@@ -402,8 +758,7 @@ async function saveAdd(): Promise<void> {
       app.toast('Hook 已添加')
     } else if (kind === 'sub') {
       const list = data.subscriptions.map((item) => ({ ...item }))
-      list.push({
-        id: `sub-${Date.now().toString(36)}`,
+      const payload = {
         name: subForm.name,
         provider: subForm.provider,
         protocol: subForm.protocol,
@@ -411,14 +766,23 @@ async function saveAdd(): Promise<void> {
         anthropic_base_url: subForm.anthropic_base_url,
         api_key: subForm.api_key,
         models_url: subForm.models_url,
-      })
+      }
+      if (editingSubId.value) {
+        const idx = list.findIndex((item) => item.id === editingSubId.value)
+        if (idx < 0) throw new Error('订阅不存在或已被删除')
+        list[idx] = { ...list[idx], ...payload }
+      } else {
+        list.push({ id: `sub-${Date.now().toString(36)}`, ...payload })
+      }
       await api('/app/settings', { method: 'PUT', body: { subscriptions: list } })
       await data.loadAll()
-      app.toast('订阅已添加')
+      app.toast(editingSubId.value ? '订阅已更新' : '订阅已添加')
+      editingSubId.value = ''
     } else if (kind === 'model') {
       const code = modelForm.code.trim()
       if (!code) throw new Error('模型 code 不能为空')
-      if (data.models.some((item) => item.code === code)) throw new Error(`模型 code 已存在：${code}`)
+      const duplicate = data.models.some((item) => item.code === code)
+      if (!editingModelCode.value && duplicate) throw new Error(`模型 code 已存在：${code}`)
       const models: ModelProfile[] = data.models
         .filter((item) => item.code !== 'default')
         .map((item) => ({
@@ -436,7 +800,8 @@ async function saveAdd(): Promise<void> {
           channel_id: item.channel_id,
           channel_name: item.channel_name,
         }))
-      models.push({
+      const sub = data.subscriptions.find((item) => item.id === modelForm.subscription_id)
+      const payload: ModelProfile = {
         code,
         name: modelForm.name || code,
         model: modelForm.model || code,
@@ -444,12 +809,22 @@ async function saveAdd(): Promise<void> {
         context_window: modelForm.context_window || undefined,
         max_tokens: modelForm.max_tokens || undefined,
         vision: modelForm.vision,
+        thinking_levels: modelForm.thinking_levels,
         subscription_id: modelForm.subscription_id || undefined,
         channel_id: modelForm.subscription_id || undefined,
-      })
+        channel_name: sub?.name || undefined,
+      }
+      if (editingModelCode.value) {
+        const idx = models.findIndex((item) => item.code === editingModelCode.value)
+        if (idx < 0) throw new Error('模型不存在或已被删除')
+        models[idx] = { ...models[idx], ...payload, code: editingModelCode.value }
+      } else {
+        models.push(payload)
+      }
       await api('/app/settings', { method: 'PUT', body: { models } })
       await data.loadAll()
-      app.toast('模型已添加')
+      app.toast(editingModelCode.value ? '模型已更新' : '模型已添加')
+      editingModelCode.value = ''
     }
     addOpen.value = false
   } catch (error) {
@@ -618,7 +993,11 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
           <section class="models-pane subscriptions-pane">
             <header class="models-pane-head">
               <span class="pane-title">订阅 <b>{{ filteredSubscriptions.length }}</b></span>
-              <el-button size="small" type="primary" @click="openPlatformPicker">＋ 添加平台</el-button>
+              <div class="pane-actions">
+                <el-button size="small" :disabled="!selectedSubscription" @click="selectedSubscription && openEditSubscription(selectedSubscription)">编辑</el-button>
+                <el-button size="small" type="danger" plain :disabled="!selectedSubscription" @click="selectedSubscription && deleteSubscription(selectedSubscription)">删除</el-button>
+                <el-button size="small" type="primary" @click="openPlatformPicker">＋ 添加平台</el-button>
+              </div>
             </header>
             <div class="pane-filter">
               <el-input v-model="subQuery" size="small" placeholder="筛选订阅" clearable />
@@ -630,6 +1009,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
                 class="sub-card"
                 :class="{ active: selectedSubscriptionId === sub.id }"
                 @click="selectedSubscriptionId = sub.id"
+                @contextmenu.prevent.stop="openSubMenu($event, sub)"
               >
                 <span class="sub-avatar">{{ (sub.name || sub.id).slice(0, 1).toUpperCase() }}</span>
                 <span class="sub-main">
@@ -638,6 +1018,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
                     <el-tag v-if="data.activeModel && data.models.find((m) => m.code === data.activeModel)?.subscription_id === sub.id" size="small" type="success">当前</el-tag>
                   </span>
                   <small>{{ sub.provider || sub.base_url || '未配置端点' }}</small>
+                  <small v-if="sub.provider === 'opencode-go'" style="color:var(--accent-ink)">Go 额度可查</small>
                   <small>{{ data.models.filter((m) => m.code !== 'default' && (m.subscription_id || m.channel_id) === sub.id).length }} 个模型</small>
                 </span>
                 <span class="sub-check">{{ selectedSubscriptionId === sub.id ? '✓' : '' }}</span>
@@ -662,8 +1043,35 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
             <div class="pane-filter">
               <el-input v-model="modelQuery" size="small" placeholder="筛选模型" clearable />
             </div>
+
+            <div v-if="supportsQuota" class="quota-card">
+              <div class="quota-head">
+                <b>OpenCode Go 额度</b>
+                <span>{{ quotaLoading ? '刷新中…' : (quota ? '实时' : '未查询') }}</span>
+                <el-button size="small" text :loading="quotaLoading" @click="loadQuota(true)">刷新</el-button>
+              </div>
+              <div v-if="quotaError" class="quota-error">{{ quotaError }}</div>
+              <template v-else-if="quotaEntries.length">
+                <div v-for="item in quotaEntries" :key="item.key" class="quota-window">
+                  <div class="quota-window-head">
+                    <b>{{ item.label }}</b>
+                    <span>{{ item.percent == null ? '—' : `${Math.round(Number(item.percent))}%` }} · {{ formatReset(item.reset_in_sec) || (item.limit ? `$${Number(item.used || 0).toFixed(2)} / $${Number(item.limit).toFixed(2)}` : '') }}</span>
+                  </div>
+                  <div class="quota-bar">
+                    <i :class="quotaTone(item.percent)" :style="{ width: `${Math.max(0, Math.min(100, Number(item.percent || 0)))}%` }" />
+                  </div>
+                </div>
+              </template>
+              <div v-else class="quota-error" style="color:var(--faint)">还没有额度数据，点「刷新」查询。</div>
+            </div>
+
             <div class="model-list">
-              <div v-for="model in subscriptionModels" :key="model.code" class="model-card">
+              <div
+                v-for="model in subscriptionModels"
+                :key="model.code"
+                class="model-card"
+                @contextmenu.prevent.stop="openItemMenu($event, 'model', { id: model.code, name: model.name || model.code, enabled: data.activeModel === model.code })"
+              >
                 <span class="model-avatar">{{ (model.name || model.code).slice(0, 1).toUpperCase() }}</span>
                 <div class="model-main">
                   <div class="model-title">
@@ -672,8 +1080,10 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
                     <el-tag v-if="data.activeModel === model.code" size="small" type="success">当前</el-tag>
                   </div>
                   <small>{{ model.model || model.code }} · {{ model.protocol || 'openai-chat' }}</small>
+                  <small v-if="model.thinking_levels?.length">think：{{ model.thinking_levels.join(' / ') }}</small>
                 </div>
                 <div class="model-actions">
+                  <el-button size="small" text @click="openEditModel(model)">编辑</el-button>
                   <el-button v-if="data.activeModel !== model.code" size="small" text @click="activate(model.code)">设为默认</el-button>
                   <el-button size="small" text @click="removeModel(model)" :disabled="data.activeModel === model.code">删除</el-button>
                 </div>
@@ -771,6 +1181,15 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
           </div>
         </div>
         <div class="detail-section">
+          <h3>事件音效</h3>
+          <label class="switch">
+            <input v-model="soundEnabled" type="checkbox" @change="setSoundEnabled(soundEnabled)" />
+            <span class="track" />
+            <span class="switch-label">审批 / 新消息 / 运行完成使用不同提示音</span>
+          </label>
+          <p class="hintline">浏览器首次交互后生效；右上角提示会同时出现，10 秒后自动消失。</p>
+        </div>
+        <div class="detail-section">
           <h3>自动切换</h3>
           <el-form label-position="top" class="atlas-form">
             <el-form-item label="切换方式">
@@ -813,7 +1232,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
             <div v-for="ws in data.activeWorkspaces" :key="ws.id" class="file-row" style="cursor:default">
               <span>▣</span>
               <span class="fname">{{ ws.name }}<small style="color:var(--faint)"> · {{ ws.root_path || '纯聊天' }}</small></span>
-              <span class="fsize">{{ ws.conversation_count || 0 }} 会话</span>
+              <span class="fsize">{{ roleCountByWs.get(ws.id) || 0 }} 角色 · {{ teamCountByWs.get(ws.id) || 0 }} 群组</span>
               <el-button size="small" @click="router.push(`/ws/${ws.id}`)">打开</el-button>
               <el-button size="small" @click="renameWorkspace(ws)">改名</el-button>
               <el-button size="small" @click="toggleWorkspace(ws)">归档</el-button>
@@ -926,7 +1345,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
             <el-button size="small" type="primary" @click="openAdd('mcp')">新增</el-button>
           </div>
           <div class="file-list">
-            <div v-for="server in mcpServers" :key="server.id" class="file-row" style="cursor:default">
+            <div v-for="server in mcpServers" :key="server.id" class="file-row" style="cursor:default" @contextmenu.prevent.stop="openItemMenu($event, 'mcp', { id: server.id, name: server.name || server.id, enabled: server.enabled })">
               <span>{{ server.enabled ? '●' : '○' }}</span>
               <span class="fname">{{ server.name || server.id }}<small style="color:var(--faint)"> · {{ server.type }} · {{ server.tools || 0 }} 个工具</small></span>
               <el-tag size="small" :type="server.installed ? 'success' : 'info'">{{ server.installed ? '已安装' : '未安装' }}</el-tag>
@@ -943,7 +1362,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
         <div v-else class="detail-section">
           <div class="toolbar" style="margin-bottom:8px"><h3 style="margin:0">技能</h3><el-button size="small" type="primary" style="margin-left:auto" @click="openAdd('skill')">新建</el-button></div>
           <div class="file-list">
-            <div v-for="skill in skills" :key="skill.id" class="file-row" style="cursor:default">
+            <div v-for="skill in skills" :key="skill.id" class="file-row" style="cursor:default" @contextmenu.prevent.stop="openItemMenu($event, 'skill', { id: skill.id, name: skill.name })">
               <span>✦</span>
               <span class="fname">{{ skill.name }}<small style="color:var(--faint)"> · {{ skill.description || '无描述' }}</small></span>
               <el-tag size="small" type="info">{{ skill.role_id ? '角色专属' : '全局' }}</el-tag>
@@ -960,7 +1379,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
           <div class="detail-section">
             <div class="toolbar" style="margin-bottom:8px"><h3 style="margin:0">斜杠命令</h3><el-button size="small" type="primary" style="margin-left:auto" @click="openAdd('command')">新建</el-button></div>
             <div class="file-list">
-              <div v-for="command in workspaceCommands" :key="command.name" class="file-row" style="cursor:default">
+              <div v-for="command in workspaceCommands" :key="command.name" class="file-row" style="cursor:default" @contextmenu.prevent.stop="openItemMenu($event, 'command', { name: command.name, builtin: command.builtin })">
                 <span>/</span>
                 <span class="fname">{{ command.name }}<small style="color:var(--faint)"> · {{ command.description || command.argument_hint || '无描述' }}</small></span>
                 <el-tag size="small" type="info">{{ command.source || 'workspace' }}</el-tag>
@@ -973,7 +1392,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
           <div class="detail-section">
             <div class="toolbar" style="margin-bottom:8px"><h3 style="margin:0">命令 / hooks</h3><el-button size="small" type="primary" style="margin-left:auto" @click="openAdd('hook')">新增</el-button></div>
             <div class="file-list">
-              <div v-for="(hook, index) in hooks" :key="index" class="file-row" style="cursor:default">
+              <div v-for="(hook, index) in hooks" :key="index" class="file-row" style="cursor:default" @contextmenu.prevent.stop="openItemMenu($event, 'hook', { index, event: hook.event, command: hook.command, name: hook.event })">
                 <span>⚡</span>
                 <span class="fname">{{ hook.event || 'event' }}<small style="color:var(--faint)"> · {{ hook.command || '' }}</small></span>
                 <el-tag size="small" type="info">{{ hook.matcher || '*' }}</el-tag>
@@ -985,7 +1404,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
       </template>
 
 
-        <Modal :open="platformOpen" title="平台预设" width="660px" @close="platformOpen = false">
+        <SideDrawer :open="platformOpen" title="平台预设" subtitle="官方 API、聚合平台，以及自建 / 本地网关。" width="680px" @close="platformOpen = false">
           <p style="margin:0;color:var(--faint);font-size:11px">官方 API、聚合平台，以及自建 / 本地网关。</p>
           <el-input v-model="platformSearch" placeholder="搜索平台" clearable />
           <div v-if="platformLoading" class="empty">加载平台预设…</div>
@@ -1008,8 +1427,8 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
           <template #footer>
             <el-button @click="platformOpen = false">关闭</el-button>
           </template>
-        </Modal>
-        <Modal :open="addOpen" :title="addTitle" @close="addOpen = false">
+        </SideDrawer>
+        <SideDrawer :open="addOpen" :title="addTitle" subtitle="保存后立即生效" width="620px" @close="addOpen = false">
           <el-form label-position="top" class="atlas-form">
             <template v-if="addKind === 'sub'">
               <el-form-item label="名称"><el-input v-model="subForm.name" /></el-form-item>
@@ -1028,7 +1447,10 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
             </template>
 
             <template v-else-if="addKind === 'model'">
-              <el-form-item label="模型 code"><el-input v-model="modelForm.code" placeholder="例如 fast" /></el-form-item>
+              <el-form-item label="模型 code">
+                <el-input v-model="modelForm.code" :disabled="Boolean(editingModelCode)" placeholder="例如 fast" />
+                <div v-if="editingModelCode" class="hintline">code 是模型主键，编辑时不可修改。</div>
+              </el-form-item>
               <el-form-item label="显示名"><el-input v-model="modelForm.name" /></el-form-item>
               <el-form-item label="模型 ID"><el-input v-model="modelForm.model" placeholder="例如 gpt-4o-mini" /></el-form-item>
               <el-form-item label="订阅">
@@ -1041,6 +1463,19 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
                   <el-option label="OpenAI Chat" value="openai-chat" />
                   <el-option label="OpenAI Responses" value="openai-response" />
                   <el-option label="Anthropic Messages" value="anthropic" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="思考强度（可选）">
+                <el-select
+                  v-model="modelForm.thinking_levels"
+                  multiple
+                  filterable
+                  allow-create
+                  default-first-option
+                  placeholder="例如 low / medium / high"
+                  style="width:100%"
+                >
+                  <el-option v-for="level in ['minimal', 'low', 'medium', 'high', 'xhigh']" :key="level" :label="level" :value="level" />
                 </el-select>
               </el-form-item>
               <el-form-item label="上下文窗口 / 最大输出">
@@ -1096,9 +1531,9 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
             <el-button @click="addOpen = false">取消</el-button>
             <el-button type="primary" @click="saveAdd">保存</el-button>
           </template>
-        </Modal>
+        </SideDrawer>
 
-        <Modal :open="discoverOpen" title="获取模型" @close="discoverOpen = false">
+        <SideDrawer :open="discoverOpen" title="获取模型" subtitle="选择要添加的模型" width="620px" @close="discoverOpen = false">
           <p style="margin:0;color:var(--faint);font-size:11px">来自订阅「{{ selectedSubscription?.name || selectedSubscription?.id }}」的模型列表。</p>
           <div v-if="!discoveredModels.length" class="empty">端点没有返回模型。</div>
           <el-checkbox-group v-else v-model="discoveredSelected" class="discover-list">
@@ -1119,8 +1554,26 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
             <el-button @click="discoverOpen = false">取消</el-button>
             <el-button type="primary" :disabled="!discoveredSelected.length" @click="addDiscovered">添加选中 {{ discoveredSelected.length }}</el-button>
           </template>
-        </Modal>
+        </SideDrawer>
       </div>
     </div>
   </div>
+
+  <ContextMenu
+    :open="subMenu.open"
+    :x="subMenu.x"
+    :y="subMenu.y"
+    :items="subMenuItems"
+    @close="subMenu.open = false"
+    @select="onSubMenu"
+  />
+
+  <ContextMenu
+    :open="itemMenu.open"
+    :x="itemMenu.x"
+    :y="itemMenu.y"
+    :items="itemMenuItems"
+    @close="itemMenu.open = false"
+    @select="onItemMenu"
+  />
 </template>

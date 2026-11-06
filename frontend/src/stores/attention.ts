@@ -46,7 +46,7 @@ export const useAttentionStore = defineStore('attention', () => {
   const data = ref<AttentionData>({})
   const loading = ref(false)
   const counts = computed(() => data.value.counts || {})
-  const badgeCount = computed(() => Number(counts.value.authorizations || 0) + Number(counts.value.unread || 0))
+  const badgeCount = computed(() => Number(counts.value.approvals || 0))
   let timer: number | null = null
 
   async function load(): Promise<void> {

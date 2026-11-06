@@ -1,18 +1,77 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import CreateDialog from '@/components/CreateDialog.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import WorkspaceSettingsDrawer from '@/components/WorkspaceSettingsDrawer.vue'
-import { shortTime } from '@/lib/format'
+import { api } from '@/api/client'
+import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
 const data = useDataStore()
+const app = useAppStore()
 const route = useRoute()
 const router = useRouter()
 const createOpen = ref(false)
+const menu = reactive({ open: false, x: 0, y: 0, ws: null as (typeof data.workspaces)[number] | null })
+
+const menuItems = computed<ContextMenuItem[]>(() => [
+  { label: '打开工作区', action: 'open' },
+  { label: '复制路径', action: 'copy', disabled: !menu.ws?.root_path },
+  { label: '', action: '', separator: true },
+  { label: '归档工作区', action: 'archive', danger: true, disabled: Boolean(menu.ws?.archived) },
+])
+
+function openMenu(event: MouseEvent, ws: (typeof data.workspaces)[number]): void {
+  menu.ws = ws
+  menu.x = event.clientX
+  menu.y = event.clientY
+  menu.open = true
+}
+
+async function onMenu(action: string): Promise<void> {
+  const ws = menu.ws
+  if (!ws) return
+  if (action === 'open') return openWorkspace(ws.id)
+  if (action === 'copy') {
+    try {
+      await navigator.clipboard.writeText(ws.root_path || ws.name)
+      app.toast('已复制路径')
+    } catch {
+      app.toast('复制失败', 'bad')
+    }
+    return
+  }
+  if (action === 'archive') {
+    if (!window.confirm(`归档工作区「${ws.name}」？归档后不再出现在会话选择里。`)) return
+    try {
+      await api(`/workspaces/${encodeURIComponent(ws.id)}`, { method: 'PATCH', body: { archived: true } })
+      await data.loadAll()
+      app.toast('工作区已归档')
+    } catch (error) {
+      app.toast(error instanceof Error ? error.message : String(error), 'bad')
+    }
+  }
+}
 
 const workspaces = computed(() => data.activeWorkspaces)
+const roleCountByWs = computed(() => {
+  const map = new Map<string, number>()
+  for (const role of data.persistentRoles) {
+    const id = String(role.workspace_id || '')
+    if (id) map.set(id, (map.get(id) || 0) + 1)
+  }
+  return map
+})
+const teamCountByWs = computed(() => {
+  const map = new Map<string, number>()
+  for (const team of data.teams) {
+    const id = String(team.workspace_id || '')
+    if (id) map.set(id, (map.get(id) || 0) + 1)
+  }
+  return map
+})
 const workspaceId = computed(() => String(route.params.id || ''))
 const selectedWorkspace = computed(() => data.workspaces.find((ws) => ws.id === workspaceId.value) || null)
 
@@ -40,19 +99,13 @@ function onDeleted(): void {
   </PageHeader>
 
   <div class="canvas-body">
-    <div class="hero">
-      <div>
-        <h1>工作区</h1>
-        <p>工作区只提供文件与终端上下文。点开一个块查看目录、文件预览和绑定操作。</p>
-      </div>
-    </div>
-
     <div class="tile-grid">
       <article
         v-for="ws in workspaces"
         :key="ws.id"
         class="tile-card ws-tile"
         @click="openWorkspace(ws.id)"
+        @contextmenu.prevent.stop="openMenu($event, ws)"
       >
         <div class="tile-head">
           <span class="ws-tile-icon">
@@ -64,12 +117,11 @@ function onDeleted(): void {
           </div>
         </div>
         <div class="tile-chips">
-          <span class="chip">{{ ws.conversation_count || 0 }} 个会话</span>
-          <span v-if="ws.last_conv_updated" class="chip">最近 {{ shortTime(ws.last_conv_updated) }}</span>
-          <span v-else class="chip">还没有会话</span>
+          <span class="chip">{{ roleCountByWs.get(ws.id) || 0 }} 个角色</span>
+          <span class="chip">{{ teamCountByWs.get(ws.id) || 0 }} 个群组</span>
         </div>
         <div class="tile-foot">
-          <span>点击查看目录与文件</span>
+          <span>角色与群组绑定到此工作区</span>
           <span>{{ ws.archived ? '已归档' : '打开详情' }}</span>
         </div>
       </article>
@@ -84,5 +136,14 @@ function onDeleted(): void {
     :workspace="selectedWorkspace"
     @close="closeWorkspace"
     @deleted="onDeleted"
+  />
+
+  <ContextMenu
+    :open="menu.open"
+    :x="menu.x"
+    :y="menu.y"
+    :items="menuItems"
+    @close="menu.open = false"
+    @select="onMenu"
   />
 </template>

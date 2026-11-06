@@ -36,6 +36,7 @@ from services.agent_zero.routes import (
     role_routes,
     task_routes,
     team_routes,
+    team_task_routes,
     work_routes,
     workspace_admin_routes,
     workspace_routes,
@@ -136,12 +137,21 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
             n = team_service.cleanup_phantom_default_teams()
             if n:
                 logger.info("清掉 %d 个旧版自动归一的「默认群聊」（单聊不再成群聊）", n)
+            m = team_service.normalize_system_roles()
+            if m:
+                logger.info("修复 %d 个群组里的系统角色（AtlasX 只保留在全局 Agent）", m)
+            k = team_service.detach_global_agent_conversations()
+            if k:
+                logger.info("解除 %d 个全局 Agent 会话的群组绑定", k)
         except Exception as e:
             logger.warning("清理旧「默认群聊」失败（不影响启动）: %s", e)
 
         try:
             from services.agent_zero.task_layer import conversation as conv_layer
 
+            n = conv_layer.migrate_bound_workspaces()
+            if n:
+                logger.info("把 %d 条旧会话的工作区绑定提升为工作区归属", n)
             n = conv_layer.archive_stale_conversations()
             if n:
                 logger.info("自动归档 %d 条 30 天无活动的对话", n)
@@ -242,6 +252,7 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
     app.include_router(work_routes.router, prefix=API_PREFIX, tags=["工单助手"])
     app.include_router(workspace_admin_routes.router, prefix=API_PREFIX, tags=["工作区"])
     app.include_router(team_routes.router, prefix=API_PREFIX, tags=["团队"])
+    app.include_router(team_task_routes.router, prefix=API_PREFIX, tags=["群组后台任务"])
     app.include_router(department_routes.router, prefix=API_PREFIX, tags=["部门"])
     app.include_router(avatar_routes.router, prefix=API_PREFIX, tags=["头像"])
     app.include_router(role_routes.router, prefix=API_PREFIX, tags=["角色"])

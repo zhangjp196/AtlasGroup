@@ -29,6 +29,8 @@ export interface Conversation {
   role_id?: string
   model_code?: string
   thinking_level?: string
+  permission_mode?: string
+  run_mode?: string
   zone?: string
   kind?: string
   active?: boolean
@@ -73,15 +75,21 @@ export interface TraceItem {
 export interface Message {
   id?: string
   by?: string
+  display_by?: string
   kind?: string
   content?: string
   reasoning?: string
   trace?: TraceItem[]
   tool_trace?: TraceItem[]
   role_name?: string
+  role_id?: string
   role_title?: string
   role_department?: string
   role_avatar?: string
+  task_id?: string
+  task_title?: string
+  task_status?: string
+  summary?: string
   attachments?: Attachment[]
   duration_ms?: number
   error?: string
@@ -92,6 +100,7 @@ export interface Message {
 export interface Role {
   id: string
   name: string
+  workspace_id?: string
   title?: string
   department_id?: string
   department?: string
@@ -293,21 +302,32 @@ export interface WorkItem {
   [key: string]: unknown
 }
 
+export interface AgentTool {
+  id?: string
+  name?: string
+  status?: string
+  ok?: boolean
+  summary?: string
+}
+
 export interface AgentNode {
   id: string
   parent_id?: string | null
   kind?: string
   name?: string
   role_id?: string
+  avatar?: string
   goal?: string
   status?: string
   current?: string
   text?: string
   error?: string
-  tools?: string[]
+  tools?: AgentTool[]
   elapsed_ms?: number
   started_at?: string
   ended_at?: string
+  run_id?: string
+  mode?: string
 }
 
 export interface AgentActivity {
@@ -326,7 +346,7 @@ export interface AgentGraph {
   nodes?: AgentNode[]
   edges?: Array<{ from: string; to: string; kind?: string }>
   activity?: AgentActivity[]
-  upcoming?: Array<{ id?: string; status?: string; created_at?: string; content?: string }>
+  upcoming?: Array<{ id?: string; status?: string; created_at?: string; content?: string; kind?: string; role_id?: string; role_name?: string }>
   stats?: {
     agents?: number
     tools?: number
@@ -336,7 +356,65 @@ export interface AgentGraph {
     running?: number
     done?: number
     failed?: number
+    queued?: number
+    parallel?: number
+    member_runs?: number
   }
+}
+
+export interface RunRecord {
+  id: string
+  conversation_id?: string
+  role_id?: string
+  target_role_id?: string
+  team_task_id?: string
+  status?: string
+  mode?: string
+  content?: string
+  error?: string
+  created_at?: string
+  started_at?: string
+  finished_at?: string
+}
+
+export interface TeamTaskMember {
+  role_id?: string
+  role_name?: string
+  goal?: string
+  context?: string
+  status?: string
+  run_id?: string
+  run_status?: string
+  error?: string
+  started_at?: string
+  finished_at?: string
+}
+
+export interface TeamTask {
+  id: string
+  conversation_id?: string
+  team_id?: string
+  leader_role_id?: string
+  leader_name?: string
+  title?: string
+  goal?: string
+  status?: string
+  members?: TeamTaskMember[]
+  active_runs?: number
+  done_members?: number
+  total_members?: number
+  created_at?: string
+  updated_at?: string
+  continued_at?: string
+  can_pause?: boolean
+  can_resume?: boolean
+  can_stop?: boolean
+  can_continue?: boolean
+}
+
+export interface TeamTaskListResponse {
+  items: TeamTask[]
+  running?: number
 }
 
 export interface McpServer {
@@ -393,11 +471,11 @@ export interface WorkItemsResponse {
 
 export interface RunStartResponse {
   id: string
-  queue?: Array<{ id: string; content?: string; title?: string }>
+  queue?: Array<{ id: string; content?: string; title?: string; target_role_id?: string }>
 }
 
 export interface QueueResponse {
-  items: Array<{ id: string; content?: string; title?: string }>
+  items: Array<{ id: string; content?: string; title?: string; target_role_id?: string }>
   running?: { id: string } | null
 }
 

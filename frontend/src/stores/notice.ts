@@ -1,0 +1,55 @@
+import { ref } from 'vue'
+import { defineStore } from 'pinia'
+
+export type NoticeTone = 'info' | 'success' | 'warning' | 'error'
+
+export interface NoticeItem {
+  id: string
+  title: string
+  message?: string
+  tone: NoticeTone
+  action?: string
+  actionLabel?: string
+  duration: number
+}
+
+export const useNoticeStore = defineStore('notice', () => {
+  const items = ref<NoticeItem[]>([])
+  const timers = new Map<string, number>()
+  let seq = 0
+
+  function remove(id: string): void {
+    const timer = timers.get(id)
+    if (timer) window.clearTimeout(timer)
+    timers.delete(id)
+    items.value = items.value.filter((item) => item.id !== id)
+  }
+
+  function push(input: Omit<NoticeItem, 'id' | 'tone' | 'duration'> & {
+    tone?: NoticeTone
+    duration?: number
+  }): string {
+    seq += 1
+    const id = `notice-${seq}`
+    const duration = Math.max(2000, Number(input.duration || 10000))
+    items.value = [...items.value, {
+      id,
+      title: input.title,
+      message: input.message,
+      tone: input.tone || 'info',
+      action: input.action,
+      actionLabel: input.actionLabel,
+      duration,
+    }]
+    const timer = window.setTimeout(() => remove(id), duration)
+    timers.set(id, timer)
+    return id
+  }
+
+  function clear(): void {
+    for (const id of [...timers.keys()]) remove(id)
+    items.value = []
+  }
+
+  return { items, push, remove, clear }
+})

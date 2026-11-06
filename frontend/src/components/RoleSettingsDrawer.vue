@@ -37,6 +37,10 @@ const mergeForm = reactive({ name: '', description: '' })
 const toolsLoaded = ref(false)
 
 const temporary = computed(() => props.role?.scope === 'temporary')
+const roleWorkspace = computed(() => {
+  const wsId = String(props.role?.workspace_id || '')
+  return data.workspaces.find((ws) => ws.id === wsId) || null
+})
 const toolNames = computed(() => {
   const map = new Map<string, string>()
   for (const tool of tools.value) {
@@ -250,6 +254,7 @@ async function removeRole(): Promise<void> {
             </div>
             <div class="role-line">{{ role.expertise || '没有填写专长' }}</div>
             <div class="role-line mono">模型：{{ role.model_code || '未指定' }}</div>
+            <div class="role-line">工作区：{{ roleWorkspace?.name || '默认工作区' }}</div>
           </div>
         </div>
 

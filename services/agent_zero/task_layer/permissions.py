@@ -319,7 +319,9 @@ def decide(conv_id: str, name: str, args: Dict[str, Any],
     # 用户在这条对话里点过「本次对话允许」→ 同对话内不再问（换对话重新问）
     if _has_session_grant(conv_id, canon) or _has_session_grant(conv_id, _grant_key(canon)):
         return {"ask": False, "risk": risk, "reasons": reasons, "mode": "session"}
-    if mode == "always":
+    # 会话档位：session = 本会话全部允许，always = 始终允许。
+    # 之前只处理了 always，导致选择「本会话允许」后仍然逐次询问。
+    if mode in ("session", "always"):
         return {"ask": False, "risk": risk, "reasons": reasons, "mode": mode}
     if mode == "auto" and risk != "high":
         return {"ask": False, "risk": risk, "reasons": reasons, "mode": mode}

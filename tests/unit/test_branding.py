@@ -27,14 +27,16 @@ def test_app_info_reports_brand(client):
     assert data["version"] == version.APP_VERSION
 
 
-def test_default_role_uses_brand_and_legacy_name_is_migrated(app_env):
+def test_default_role_is_generic_and_global_role_uses_brand(app_env):
     from services.agent_zero import database
     from services.agent_zero.stores import zero_store
 
     database.init_database()
     zero_store.ensure_defaults()
-    role = zero_store.get_role("default")
-    assert role["name"] == version.APP_NAME
+    role = zero_store.get_role(zero_store.DEFAULT_ROLE_ID)
+    # AtlasX 只属于全局 Agent；普通会话的兜底角色是「通用助手」。
+    assert role["name"] == zero_store.DEFAULT_ROLE_NAME
+    assert zero_store.get_role(zero_store.GLOBAL_ROLE_ID)["name"] == version.APP_NAME
 
     # 用户自定义过的名字不动
     zero_store.upsert_role({"id": "custom", "group_id": "default",
@@ -43,11 +45,11 @@ def test_default_role_uses_brand_and_legacy_name_is_migrated(app_env):
     assert zero_store.get_role("custom")["name"] == "我的助手"
 
     # 旧默认名（用户没改过）跟随改名
-    zero_store.upsert_role({"id": "default", "group_id": "default",
+    zero_store.upsert_role({"id": zero_store.DEFAULT_ROLE_ID, "group_id": "default",
                             "name": version.LEGACY_APP_NAME,
                             "envelope": role.get("envelope") or {}})
     zero_store.ensure_defaults()
-    assert zero_store.get_role("default")["name"] == version.APP_NAME
+    assert zero_store.get_role(zero_store.DEFAULT_ROLE_ID)["name"] == zero_store.DEFAULT_ROLE_NAME
 
 
 def test_user_agent_uses_brand_and_real_version():

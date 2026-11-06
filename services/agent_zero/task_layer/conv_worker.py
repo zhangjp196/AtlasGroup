@@ -325,12 +325,22 @@ class ConversationRunWorker:
         except Exception:
             logger.exception("读取待跑对话运行失败")
             return
-        # 同一对话至多一条正在执行：已占用的对话本周期直接跳过，避免起一堆
-        # 注定 claim 失败的任务（队列模式下同一对话可能排很多条）。
+        # 同一对话：至多一条主持 run；成员并行 run 可同时跑，但有上限。
+        # 已占用的对话不再无脑跳过，否则团队成员只能排队串行执行。
+        coord_busy: set = set()
+        member_counts: Dict[str, int] = {}
         try:
-            busy = run_service.running_conversation_ids()
+            for slot in run_service.running_slots():
+                cid = str(slot.get("conversation_id") or "")
+                if not cid:
+                    continue
+                if str(slot.get("target_role_id") or "").strip():
+                    member_counts[cid] = member_counts.get(cid, 0) + 1
+                else:
+                    coord_busy.add(cid)
         except Exception:
-            busy = set()
+            coord_busy, member_counts = set(), {}
+        parallel_limit = run_service.parallel_member_limit()
         for run in queued:
             if capacity <= 0:
                 break
@@ -338,10 +348,17 @@ class ConversationRunWorker:
             if run_id in self._live:
                 continue
             cid = run.get("conversation_id")
-            if cid in busy:
+            target = str(run.get("target_role_id") or "").strip()
+            if target:
+                if member_counts.get(cid, 0) >= parallel_limit:
+                    continue
+            elif cid in coord_busy:
                 continue
             self._start(run_id)
-            busy.add(cid)
+            if target:
+                member_counts[cid] = member_counts.get(cid, 0) + 1
+            else:
+                coord_busy.add(cid)
             capacity -= 1
 
     def _start(self, run_id: str) -> None:
@@ -692,6 +709,15 @@ class ConversationRunWorker:
                 goal_service.after_run_finished(conv_id, run_id, usage)
             except Exception:
                 logger.exception("目标模式续跑处理失败 run=%s", run_id)
+
+        # 群组后台任务：成员 run 收尾后，若整个任务已结束，写一条前台触发器。
+        # 不自动唤醒主持——任务与对话分离，由用户点「继续对话」再整合。
+        try:
+            from services.agent_zero.services import team_task_service
+
+            team_task_service.on_run_finished(run_id)
+        except Exception:
+            logger.debug("后台任务收尾通知失败 run=%s", run_id, exc_info=True)
 
     # ── 文本合并 ────────────────────────────────────────────
 

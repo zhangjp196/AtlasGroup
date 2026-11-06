@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
+import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import DepartmentEditorDialog from '@/components/DepartmentEditorDialog.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import RoleEditorDialog from '@/components/RoleEditorDialog.vue'
@@ -9,7 +10,7 @@ import RoleSettingsDrawer from '@/components/RoleSettingsDrawer.vue'
 import WorkEditorDialog, { type WorkSeed } from '@/components/WorkEditorDialog.vue'
 import { api } from '@/api/client'
 import type { Conversation, Department, Role } from '@/api/types'
-import { departmentPath, departmentSubtree, orderedDepartments } from '@/lib/derive'
+import { departmentPath, departmentRoleCounts, departmentSubtree, orderedDepartments } from '@/lib/derive'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -38,9 +39,67 @@ const deptParent = ref('')
 
 const workOpen = ref(false)
 const workSeed = ref<WorkSeed | null>(null)
+const menu = reactive({ open: false, x: 0, y: 0, role: null as Role | null })
+
+const menuItems = computed<ContextMenuItem[]>(() => {
+  const role = menu.role
+  return [
+    { label: '打开角色详情', action: 'detail' },
+    { label: '编辑角色', action: 'edit' },
+    { label: '发起单聊', action: 'chat' },
+    { label: '复制名字', action: 'copy' },
+    { label: '', action: '', separator: true },
+    { label: '删除角色', action: 'delete', danger: true, disabled: Boolean(role?.system) },
+  ]
+})
+
+function openMenu(event: MouseEvent, role: Role): void {
+  menu.role = role
+  menu.x = event.clientX
+  menu.y = event.clientY
+  menu.open = true
+}
+
+async function onMenu(action: string): Promise<void> {
+  const role = menu.role
+  if (!role) return
+  if (action === 'detail') return openRole(role)
+  if (action === 'edit') {
+    editingRole.value = role
+    editorOpen.value = true
+    return
+  }
+  if (action === 'chat') return startRoleChat(role.id)
+  if (action === 'copy') {
+    try {
+      await navigator.clipboard.writeText(role.name)
+      app.toast('已复制角色名')
+    } catch {
+      app.toast('复制失败', 'bad')
+    }
+    return
+  }
+  if (action === 'delete') {
+    if (role.system) {
+      app.toast('系统角色不能删除', 'bad')
+      return
+    }
+    if (!window.confirm(`删除角色「${role.name}」？引用它的群组 / 会话会失去该角色。`)) return
+    try {
+      await api(`/roles/${encodeURIComponent(role.id)}`, { method: 'DELETE' })
+      await data.loadAll()
+      app.toast('角色已删除')
+      if (roleId.value === role.id) closeRole()
+    } catch (error) {
+      app.toast(error instanceof Error ? error.message : String(error), 'bad')
+    }
+  }
+}
 
 const depts = computed(() => orderedDepartments(data.departments))
 const deptTree = computed<DeptNode[]>(() => {
+  // 父部门计数 = 本部门 + 全部子部门（与右侧列表口径一致）。
+  const counts = departmentRoleCounts(data.departments, data.roles)
   const nodes = new Map<string, DeptNode>()
   for (const dept of data.departments) {
     nodes.set(dept.id, {
@@ -48,7 +107,7 @@ const deptTree = computed<DeptNode[]>(() => {
       label: dept.name,
       avatar: dept.avatar,
       parent_id: dept.parent_id,
-      count: data.roles.filter((role) => role.department_id === dept.id).length,
+      count: counts.get(dept.id) || 0,
       children: [],
     })
   }
@@ -76,6 +135,17 @@ const visibleRoles = computed(() => {
   return scoped
 })
 
+// 角色面板显示各自的在办工单数（后台任务会自动建单）。
+const openWorkByRole = computed(() => {
+  const map = new Map<string, number>()
+  for (const item of data.workItems) {
+    if (!['inbox', 'working', 'needs_attention'].includes(String(item.status || ''))) continue
+    const rid = String(item.role_id || '')
+    if (rid) map.set(rid, (map.get(rid) || 0) + 1)
+  }
+  return map
+})
+
 const headTitle = computed(() => {
   if (selectedDept.value === 'all') return '全部角色'
   if (selectedDept.value === '') return '未安排部门'
@@ -89,6 +159,10 @@ const headHint = computed(() => {
 
 const roleId = computed(() => String(route.params.id || ''))
 const selectedRole = computed(() => data.roles.find((role) => role.id === roleId.value) || null)
+
+function workspaceName(id?: string): string {
+  return data.workspaces.find((ws) => ws.id === String(id || ''))?.name || ''
+}
 
 function openRole(role: Role): void {
   void router.push(`/role/${encodeURIComponent(role.id)}`)
@@ -193,13 +267,6 @@ function onWorkSaved(): void {
   </PageHeader>
 
   <div class="canvas-body">
-    <div class="hero">
-      <div>
-        <h1>组织与角色</h1>
-        <p>部门支持多级；角色名称是「谁」，岗位是「做什么」，两者分开维护。</p>
-      </div>
-    </div>
-
     <div class="org-layout">
       <aside class="org-tree">
         <div class="org-tree-head">
@@ -254,7 +321,7 @@ function onWorkSaved(): void {
         </div>
 
         <div class="role-grid">
-          <article v-for="role in visibleRoles" :key="role.id" class="role-card" @click="openRole(role)">
+          <article v-for="role in visibleRoles" :key="role.id" class="role-card" @click="openRole(role)" @contextmenu.prevent.stop="openMenu($event, role)">
             <div class="role-top">
               <Avatar :name="role.name" :avatar="role.avatar" round />
               <span style="min-width:0">
@@ -267,7 +334,9 @@ function onWorkSaved(): void {
             </div>
             <div class="role-line">{{ role.department ? `部门：${role.department}` : '未安排部门' }}</div>
             <div class="role-line">模型：{{ role.model_code || '未指定' }}</div>
+            <div class="role-line">工作区：{{ workspaceName(role.workspace_id) || '默认工作区' }}</div>
             <div class="chips">
+              <span v-if="openWorkByRole.get(role.id)" class="chip work-chip">{{ openWorkByRole.get(role.id) }} 个工单在办</span>
               <span v-for="tool in (role.tools || []).slice(0, 6)" :key="tool" class="chip">{{ tool }}</span>
               <span v-if="!(role.tools || []).length" class="chip">全部工具</span>
             </div>
@@ -306,4 +375,13 @@ function onWorkSaved(): void {
   />
 
   <WorkEditorDialog :open="workOpen" :seed="workSeed" @close="workOpen = false" @saved="onWorkSaved" />
+
+  <ContextMenu
+    :open="menu.open"
+    :x="menu.x"
+    :y="menu.y"
+    :items="menuItems"
+    @close="menu.open = false"
+    @select="onMenu"
+  />
 </template>

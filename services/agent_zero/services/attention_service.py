@@ -99,7 +99,8 @@ def snapshot(limit: int = 100) -> Dict[str, Any]:
     for q in questions:
         q["conversation_title"] = title_by_id.get(str(q.get("conversation_id") or ""), "")
     unread = unread_conversations(n)
-    running = run_service.list_active_runs(limit=min(n, 100))
+    running = run_service.list_active_runs(
+        limit=min(n, 100), exclude_zone=conversation.GLOBAL_AGENT_ZONE)
     policy = permissions.get_policy()
     policy["run_mode"] = conversation.last_run_mode()
     counts = {

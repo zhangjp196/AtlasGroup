@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import Modal from '@/components/Modal.vue'
+import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
+import SideDrawer from '@/components/SideDrawer.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import WorkEditorDialog from '@/components/WorkEditorDialog.vue'
 import WorkSettingsDrawer from '@/components/WorkSettingsDrawer.vue'
@@ -30,6 +31,61 @@ const policyForm = reactive({
   default_team_id: '',
   auto_execute: false,
 })
+const workMenu = reactive({ open: false, x: 0, y: 0, item: null as WorkItem | null })
+
+const workMenuItems = computed<ContextMenuItem[]>(() => {
+  const item = workMenu.item
+  const done = ['done', 'closed'].includes(String(item?.status || ''))
+  return [
+    { label: '打开工单', action: 'open' },
+    { label: '复制标题', action: 'copy' },
+    { label: '', action: '', separator: true },
+    { label: '派活 / 重新派活', action: 'dispatch', disabled: done },
+    { label: '标记完成', action: 'done', disabled: done },
+    { label: '', action: '', separator: true },
+    { label: '删除工单', action: 'delete', danger: true },
+  ]
+})
+
+function openWorkMenu(event: MouseEvent, item: WorkItem): void {
+  workMenu.item = item
+  workMenu.x = event.clientX
+  workMenu.y = event.clientY
+  workMenu.open = true
+}
+
+async function onWorkMenu(action: string): Promise<void> {
+  const item = workMenu.item
+  if (!item) return
+  if (action === 'open') return openItem(item)
+  if (action === 'copy') {
+    try {
+      await navigator.clipboard.writeText(item.title || item.id)
+      app.toast('已复制标题')
+    } catch {
+      app.toast('复制失败', 'bad')
+    }
+    return
+  }
+  try {
+    if (action === 'dispatch') {
+      await api(`/work-items/${encodeURIComponent(item.id)}/dispatch`, { method: 'POST' })
+      await data.loadWork()
+      app.toast('工单已派活')
+    } else if (action === 'done') {
+      await api(`/work-items/${encodeURIComponent(item.id)}`, { method: 'PATCH', body: { status: 'done' } })
+      await data.loadWork()
+      app.toast('工单已标记完成')
+    } else if (action === 'delete') {
+      if (!window.confirm(`删除工单「${item.title || item.id}」？`)) return
+      await api(`/work-items/${encodeURIComponent(item.id)}`, { method: 'DELETE' })
+      await data.loadWork()
+      app.toast('工单已删除')
+    }
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad', 5000)
+  }
+}
 
 const filters = [
   { key: 'open', label: '待办' },
@@ -184,8 +240,6 @@ function openAttentionConversation(conversationId?: string): void {
         </div>
         <div class="sa-hero-main">
           <div class="sa-eyebrow">工单 · 主动执行层</div>
-          <h1>工单</h1>
-          <p>把工作拆成工单，在隔离的会话 / 工作区里推进；只在必须由你决定时才回来。你看到的是结果和需要你处理的事，不是一堆过程。</p>
           <div class="sa-pills">
             <span class="sa-pill"><i class="sa-dot" :class="{ on: mode === 'auto' }" />{{ modeText }}</span>
             <span class="sa-pill"><i class="sa-dot" :class="{ on: Number(stats.working || 0) > 0 }" />{{ stats.working || 0 }} 个运行中</span>
@@ -261,6 +315,7 @@ function openAttentionConversation(conversationId?: string): void {
               class="tile-card work-tile"
               :class="{ attention: item.status === 'needs_attention' }"
               @click="openItem(item)"
+              @contextmenu.prevent.stop="openWorkMenu($event, item)"
             >
               <div class="tile-head">
                 <span class="work-status" :class="item.status" />
@@ -302,7 +357,7 @@ function openAttentionConversation(conversationId?: string): void {
     @deleted="onDeleted"
   />
 
-  <Modal :open="policyOpen" title="工单策略" @close="policyOpen = false">
+  <SideDrawer :open="policyOpen" title="工单策略" subtitle="决定工单何时自动推进" width="560px" @close="policyOpen = false">
     <div class="work-settings-grid">
       <div class="field">
         <label>运行模式</label>
@@ -355,5 +410,14 @@ function openAttentionConversation(conversationId?: string): void {
       <el-button @click="policyOpen = false">取消</el-button>
       <el-button type="primary" :loading="policySaving" @click="savePolicy">保存</el-button>
     </template>
-  </Modal>
+  </SideDrawer>
+
+  <ContextMenu
+    :open="workMenu.open"
+    :x="workMenu.x"
+    :y="workMenu.y"
+    :items="workMenuItems"
+    @close="workMenu.open = false"
+    @select="onWorkMenu"
+  />
 </template>

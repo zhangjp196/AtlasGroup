@@ -65,7 +65,7 @@ export function useChat() {
   const streaming = ref(false)
   const runId = ref('')
   const error = ref('')
-  const roleName = ref('AtlasX')
+  const roleName = ref('助手')
   const roleAvatar = ref('')
   const roleSub = ref('')
   const cursor = ref(0)
@@ -83,6 +83,11 @@ export function useChat() {
     entries.value = []
     tasks.value = []
     error.value = ''
+  }
+
+  function userQueue(items?: Array<{ id: string; content?: string; title?: string; target_role_id?: string }>): Array<{ id: string; content?: string; title?: string }> {
+    // 团队成员的后台并行 run 不属于用户排队消息；只在执行画布里展示。
+    return (items || []).filter((item) => !item.target_role_id)
   }
 
   async function open(id: string): Promise<void> {
@@ -113,7 +118,7 @@ export function useChat() {
       const data = await api<QueueResponse>(
         `/conversations/${encodeURIComponent(conversation.value.id)}/queue`,
       )
-      queue.value = data.items || []
+      queue.value = userQueue(data.items)
       if (data.running?.id) openStream(data.running.id)
       if (queue.value.length || data.running) scheduleQueuePoll()
     } catch {
@@ -134,7 +139,7 @@ export function useChat() {
       const data = await api<QueueResponse>(
         `/conversations/${encodeURIComponent(conversation.value.id)}/queue`,
       )
-      queue.value = data.items || []
+      queue.value = userQueue(data.items)
       if (!streaming.value && data.running?.id) openStream(data.running.id)
       if (queue.value.length || data.running) scheduleQueuePoll()
     } catch {
@@ -201,7 +206,7 @@ export function useChat() {
         },
       )
       clearAttachments()
-      queue.value = run.queue || []
+      queue.value = userQueue(run.queue)
       if (queue.value.length) scheduleQueuePoll()
       runId.value = run.id
       openStream(run.id)
@@ -366,6 +371,49 @@ export function useChat() {
     }
   }
 
+  async function cleanConversation(): Promise<boolean> {
+    if (!conversation.value) return false
+    try {
+      const out = await api<{ nodes?: number }>(
+        `/conversations/${encodeURIComponent(conversation.value.id)}/clean`,
+        { method: 'POST' },
+      )
+      const removed = Number(out?.nodes) || 0
+      // 服务端已经停掉活跃 run：本地流也一起关掉，否则界面还停在「运行中」。
+      closeStream()
+      streaming.value = false
+      sending.value = false
+      runId.value = ''
+      cursor.value = 0
+      const conv = await api<Conversation>(`/conversations/${encodeURIComponent(conversation.value.id)}`)
+      conversation.value = conv
+      messages.value = conv.messages || []
+      resetLive()
+      queue.value = []
+      app.toast(removed ? `会话已清空（删除 ${removed} 条记录）` : '会话已清空', 'ok', 3200)
+      return true
+    } catch (err) {
+      app.toast(err instanceof Error ? err.message : String(err), 'bad', 5000)
+      return false
+    }
+  }
+
+  async function continueTask(taskId: string): Promise<void> {
+    if (!conversation.value || !taskId) return
+    const convId = conversation.value.id
+    try {
+      await api(
+        `/conversations/${encodeURIComponent(convId)}/team-tasks/${encodeURIComponent(taskId)}/continue`,
+        { method: 'POST' },
+      )
+      // 结果已汇总成一条主持 run：重新打开会话，续上这条 run 的流。
+      await open(convId)
+      void app.toast('已把任务结果交回对话', 'ok', 3000)
+    } catch (err) {
+      app.toast(err instanceof Error ? err.message : String(err), 'bad', 5000)
+    }
+  }
+
   function mentionsOf(text: string): string[] {
     const out: string[] = []
     const re = /@([A-Za-z0-9_\-\u4e00-\u9fff]{1,32})/g
@@ -441,13 +489,11 @@ export function useChat() {
 
   function applyEvent(evt: RunEvent): void {
     if (evt.start) {
-      roleName.value = evt.role_name || 'AtlasX'
-      roleAvatar.value = ''
+      roleName.value = evt.role_name || '助手'
       const role = data.roles.find((item) => item.id === evt.role_id)
-      if (role) {
-        roleAvatar.value = role.avatar || ''
-        roleSub.value = [role.title, role.department].filter(Boolean).join(' · ')
-      }
+      // 群组里的临时角色 / 成员不在 /roles 列表里，头像按 role_id 从团队来源兜底。
+      roleAvatar.value = data.roleAvatar(evt.role_id, role?.avatar || '')
+      roleSub.value = role ? [role.title, role.department].filter(Boolean).join(' · ') : ''
       return
     }
     if (evt.thinking !== undefined) {
@@ -642,6 +688,8 @@ export function useChat() {
     cancelQueued,
     compact,
     clearContext,
+    cleanConversation,
+    continueTask,
     pollQueue,
     dispose,
   }

@@ -9,6 +9,9 @@ const data = useDataStore()
 const route = useRoute()
 const router = useRouter()
 
+const props = defineProps<{ pendingCount?: number; globalAgentOpen?: boolean }>()
+const emit = defineEmits<{ (e: 'global-agent'): void }>()
+
 const sections = [
   { key: 'work', label: '工单', path: '/work' },
   { key: 'conv', label: '会话', path: '/conv' },
@@ -51,6 +54,17 @@ function toggle(): void {
     </button>
 
     <div class="spacer" />
+
+    <button
+      class="rail-btn global-agent-btn"
+      :class="{ active: props.globalAgentOpen }"
+      :title="`全局Agent · 待处理 ${Number(props.pendingCount || 0)}`"
+      aria-label="全局Agent"
+      @click="emit('global-agent')"
+    >
+      <svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="11" rx="4" /><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6" /></svg>
+      <span v-if="Number(props.pendingCount || 0) > 0" class="rail-badge">{{ Number(props.pendingCount) > 99 ? '99+' : props.pendingCount }}</span>
+    </button>
 
     <button class="rail-btn theme-toggle" :title="`主题：${app.theme}`" aria-label="切换主题" @click="toggle">
       <svg class="theme-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>

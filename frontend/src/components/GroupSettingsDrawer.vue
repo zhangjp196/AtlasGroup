@@ -24,6 +24,7 @@ const removing = ref(false)
 
 const draft = reactive({
   name: '',
+  workspace_id: '',
   avatar: '',
   description: '',
   mode: 'orchestrate',
@@ -72,6 +73,7 @@ function loadDraft(team: Team): void {
       return true
     })
   draft.name = team.name || ''
+  draft.workspace_id = team.workspace_id || ''
   draft.avatar = team.avatar || ''
   draft.description = team.description || ''
   draft.mode = team.mode || 'orchestrate'
@@ -181,6 +183,7 @@ async function save(): Promise<void> {
       method: 'PATCH',
       body: {
         name,
+        workspace_id: draft.workspace_id || '',
         avatar: draft.avatar || '',
         description: draft.description.trim(),
         mode: draft.mode,
@@ -298,6 +301,13 @@ function onWorkSaved(): void {
           <div class="group-section-head">
             <h3>群设置</h3>
             <span>协作方式与发言上限</span>
+          </div>
+          <div class="field">
+            <label>绑定工作区</label>
+            <select v-model="draft.workspace_id" class="input">
+              <option value="">默认工作区</option>
+              <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
+            </select>
           </div>
           <div class="field">
             <label>协作方式</label>

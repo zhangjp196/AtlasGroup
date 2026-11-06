@@ -112,9 +112,15 @@ def _envelope_with(envelope: Any) -> Dict[str, Any]:
 
 
 def _ensure_role(ws_id: str, role_id: str, name: str, expertise: str,
-                 envelope: Any = None, model_code: Any = None) -> Dict[str, Any]:
-    """创建/更新团队成员角色：默认能力包络，可按角色收窄工具 / 指定模型。"""
+                 envelope: Any = None, model_code: Any = None,
+                 avatar: Any = None) -> Dict[str, Any]:
+    """创建/更新团队成员角色：默认能力包络，可按角色收窄工具 / 指定模型。
+
+    ``avatar`` 只在显式给出非空值时写入：更新已有角色时不带头像 = 保持原值，
+    避免「保存一次群组把角色头像清空」。
+    """
     model = str(model_code or "").strip() or None
+    avatar_url = str(avatar or "").strip() or None
     return zero_store.upsert_role({
         "id": role_id,
         "group_id": ws_id,
@@ -123,6 +129,7 @@ def _ensure_role(ws_id: str, role_id: str, name: str, expertise: str,
         "expertise": expertise[:600],
         "envelope": _envelope_with(envelope),
         "model_code": model,
+        **({"avatar": avatar_url} if avatar_url else {}),
     })
 
 
@@ -130,7 +137,9 @@ def _team_public(team: Dict[str, Any]) -> Dict[str, Any]:
     paths = zero_store.department_paths()
     leader = _role_brief(zero_store.get_role(str(team.get("leader_role_id") or "")),
                          paths)
-    if not leader:
+    # 系统角色（通用助手 / 全局 AtlasX）不属于任何群聊：旧数据里如果主持是它们，
+    # 展示成无 id 的「主持」占位，真正的修复在 normalize_system_roles()。
+    if not leader or str(leader.get("id") or "") == zero_store.GLOBAL_ROLE_ID:
         leader = {"id": None, "name": "主持", "expertise": "", "avatar": "",
                   "title": "", "department_id": "", "department": ""}
     # 成员按 id / 名字去重，并排除主持：旧数据可能把主持也写进 member_role_ids，
@@ -141,6 +150,8 @@ def _team_public(team: Dict[str, Any]) -> Dict[str, Any]:
     seen_ids: set = set()
     seen_names: set = set()
     for rid in _json_list(team.get("member_role_ids")):
+        if str(rid) == zero_store.GLOBAL_ROLE_ID:
+            continue
         b = _role_brief(zero_store.get_role(str(rid)), paths)
         if not b:
             continue
@@ -277,6 +288,9 @@ def _sync_roles(ws_id: str, leader: Dict[str, Any],
     """确保 leader/member 角色存在；删除旧团队角色中不再使用的。"""
     def _resolve(spec: Dict[str, Any], prefix: str) -> str:
         rid = str(spec.get("id") or "").strip()
+        # 系统角色不能进入群组：旧数据如果引用它们，就地换成一个新的团队角色。
+        if rid == zero_store.GLOBAL_ROLE_ID:
+            rid = ""
         if not rid:
             rid = zero_store.new_id(prefix)
         env = spec.get("envelope")
@@ -285,7 +299,8 @@ def _sync_roles(ws_id: str, leader: Dict[str, Any],
         _ensure_role(ws_id, rid, str(spec.get("name") or "").strip()[:128],
                      str(spec.get("expertise") or "").strip(),
                      envelope=env,
-                     model_code=spec.get("model_code") or spec.get("model"))
+                     model_code=spec.get("model_code") or spec.get("model"),
+                     avatar=spec.get("avatar"))
         return rid
 
     leader_id = _resolve(leader or {}, "teamrole")
@@ -298,6 +313,8 @@ def _sync_roles(ws_id: str, leader: Dict[str, Any],
         spec = spec if isinstance(spec, dict) else {}
         sid = str(spec.get("id") or "").strip()
         sname = str(spec.get("name") or "").strip().lower()
+        if sid == zero_store.GLOBAL_ROLE_ID:
+            continue
         if sid and (sid == leader_id or sid in seen_ids):
             continue
         if sname and sname in seen_names:
@@ -314,7 +331,7 @@ def _sync_roles(ws_id: str, leader: Dict[str, Any],
     stale = set(old_member_ids) | ({old_leader_id} if old_leader_id else set())
     stale -= {leader_id} | set(member_ids)
     for rid in stale:
-        if (rid and rid != zero_store.DEFAULT_ROLE_ID
+        if (rid and rid not in zero_store.SYSTEM_ROLE_IDS
                 and not _role_referenced_elsewhere(rid, team_id)):
             zero_store.delete_role(rid)
     return leader_id, member_ids
@@ -364,11 +381,18 @@ def update_team(team_id: str, name: Optional[str] = None,
                 members: Optional[List[Dict[str, Any]]] = None,
                 mode: Any = None,
                 max_speakers: Any = None,
-                avatar: Optional[str] = None) -> Dict[str, Any]:
+                avatar: Optional[str] = None,
+                workspace_id: Optional[str] = None) -> Dict[str, Any]:
     row = _fetch_team(team_id)
     if not row:
         raise ValueError(f"团队不存在: {team_id}")
     ws_id = str(row.get("workspace_id") or "")
+    new_ws_id = None
+    if workspace_id is not None:
+        new_ws_id = str(workspace_id or "").strip() or zero_store.DEFAULT_WORKSPACE_ID
+        ws = zero_store.get_workspace(new_ws_id)
+        if not ws or ws.get("archived"):
+            raise ValueError(f"工作区不存在或已归档: {new_ws_id}")
     leader_id = str(row.get("leader_role_id") or "")
     member_ids = [str(x) for x in _json_list(row.get("member_role_ids"))]
     if name is not None:
@@ -390,6 +414,7 @@ def update_team(team_id: str, name: Optional[str] = None,
     with SessionLocal() as db:
         db.execute(
             text(f"UPDATE {_q('agent_teams')} SET "
+                 f"workspace_id = CASE WHEN :ws IS NULL THEN workspace_id ELSE :ws END, "
                  f"name = COALESCE(:name, name), "
                  f"avatar = CASE WHEN :avatar IS NULL THEN avatar "
                  f"ELSE NULLIF(:avatar, '') END, "
@@ -401,11 +426,29 @@ def update_team(team_id: str, name: Optional[str] = None,
                  f"member_role_ids = :members, "
                  f"updated_at = datetime('now','localtime') "
                  f"WHERE id = :id"),
-            {"id": team_id, "name": name, "avatar": avatar, "desc": description,
+            {"id": team_id, "ws": new_ws_id, "name": name, "avatar": avatar,
+             "desc": description,
              "mode": normalize_mode(mode) if mode is not None else None,
              "speakers": normalize_speakers(max_speakers) if max_speakers is not None else None,
              "leader": leader_id, "members": zero_store._json(member_ids)},
         )
+        if new_ws_id and new_ws_id != ws_id:
+            # 群组换了工作区：绑定它的群聊会话跟着迁移。
+            db.execute(
+                text(f"UPDATE {_q('conversations')} SET workspace_id = :ws, "
+                     f"updated_at = datetime('now','localtime') WHERE team_id = :id"),
+                {"ws": new_ws_id, "id": team_id},
+            )
+            # 群成员角色也跟随群组工作区（单聊该角色时使用同一目录）。
+            role_ids = [rid for rid in ([leader_id] + list(member_ids)) if rid]
+            if role_ids:
+                marks = ",".join(f":r{i}" for i in range(len(role_ids)))
+                db.execute(
+                    text(f"UPDATE {_q('roles')} SET group_id = :ws "
+                         f"WHERE id IN ({marks})"),
+                    {"ws": new_ws_id,
+                     **{f"r{i}": rid for i, rid in enumerate(role_ids)}},
+                )
         db.commit()
     # IM 系统消息：只对绑定该群的会话发；一次 update 可能同时改多项。
     conv_ids = bound_conversation_ids(team_id)
@@ -443,10 +486,10 @@ def delete_team(team_id: str) -> bool:
         db.commit()
     ids = [str(x) for x in _json_list(row.get("member_role_ids"))]
     leader_id = str(row.get("leader_role_id") or "")
-    if leader_id and leader_id != zero_store.DEFAULT_ROLE_ID:
+    if leader_id and leader_id not in zero_store.SYSTEM_ROLE_IDS:
         ids.append(leader_id)
     for rid in ids:
-        if (rid and rid != zero_store.DEFAULT_ROLE_ID
+        if (rid and rid not in zero_store.SYSTEM_ROLE_IDS
                 and not _role_referenced_elsewhere(rid, team_id)):
             zero_store.delete_role(rid)
     with SessionLocal() as db:
@@ -459,6 +502,18 @@ def delete_team(team_id: str) -> bool:
 
 def bind_team(conv_id: str, team_id: Optional[str],
               *, notice: Optional[str] = None) -> Dict[str, Any]:
+    if team_id:
+        from services.agent_zero.task_layer.conversation import GLOBAL_AGENT_ZONE
+
+        SessionLocal = get_session_local()
+        with SessionLocal() as db:
+            row = db.execute(
+                text(f"SELECT COALESCE(zone, '') FROM {_q('conversations')} "
+                     f"WHERE id = :id"),
+                {"id": conv_id},
+            ).first()
+        if row and str(row[0] or "") == GLOBAL_AGENT_ZONE:
+            raise ValueError("全局 Agent 不能加入群组")
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         db.execute(
@@ -467,6 +522,12 @@ def bind_team(conv_id: str, team_id: Optional[str],
             {"tid": team_id or None, "id": conv_id},
         )
         db.commit()
+    try:
+        from services.agent_zero.task_layer import conversation
+
+        conversation.sync_conversation_workspace(conv_id)
+    except Exception:
+        logger.debug("同步会话工作区失败（忽略）", exc_info=True)
     if notice:
         _notice([conv_id], notice)
     elif team_id:
@@ -492,12 +553,23 @@ def team_for_conv(conv: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 _MODE_HINTS = {
     "orchestrate": (
-        "执行方式：把适合某成员的专业子任务用 `delegate(target=team, member_id, goal)` "
-        "委派给该成员（member_id 取上面列表中的 id）；成员结论返回后你负责整合、"
-        "校验与最终汇报，不要只转述。"
+        "执行方式：收到任务后先拆成可并行的子任务，**尽量覆盖所有相关成员**；"
+        "用一次 `delegate(target=team, assignments=[{member_id, goal}, ...])` 批量并行派发，"
+        "不要用多次单发、也不要逐个等待。派发时你直接 @ 成员，由成员自己回复；"
+        "不要以用户身份转发消息，也不要说「我帮你转达」。"
+        "**分流规则**：只是征求成员意见 / 让成员说一句看法 → 直接 `@成员`，"
+        "成员会在会话里回复；需要成员动手做事（写代码、跑命令、查资料并产出结果、"
+        "长时间任务）→ 必须用 `delegate` 明确登记为**后台任务**，并在正文里说明"
+        "「已创建后台任务」，不要在正文里用 @ 代替派发。"
+        "用户只是点名 / 打招呼（如「X 在吗」）时，直接 @X 把话交给它，"
+        "自己只做一句简短说明，不要替成员回答或展开长文。"
+        "**派发后立即收尾**：只说明分工与下一步，不要再自己 shell / 读文件 / 改代码"
+        "去重复执行同一个任务；等用户在会话里点「继续」再整合、校验与最终汇报。"
     ),
     "roundtable": (
         "执行方式：这是圆桌群聊——你与成员会各自应答；用户用 `@成员名` 点名时由该成员回复。"
+        "你回复里 @ 成员 = 请它接一句；要让它动手做事（工具 / 长任务）时，"
+        "明确写「后台任务」或改用 `delegate` 派发，不要在正文里让它干等。"
         "只说你自己的判断，不要替成员转发或编造他们的结论。"
     ),
     "single": (
@@ -538,7 +610,8 @@ def roster_text(team: Dict[str, Any],
             lines.append(
                 "协作模式：`orchestrate`（主持编排）——你处理主持委派给你的子任务；"
                 "用户或其它角色 `@你` 时直接回应，不要转给主持；"
-                "没有委派或点名时不要主动发言。")
+                "需要其它角色配合时，直接 `delegate(target=team, assignments=[...])` @ 对方，"
+                "不要转给用户或主持；没有委派或点名时不要主动发言。")
         return "\n".join(lines)
     lines = [f"你是团队「{team['name']}」的**主持**，负责编排与收尾。"]
     leader = team.get("leader") or {}
@@ -571,6 +644,16 @@ def roster_text(team: Dict[str, Any],
         lines.append(f"- 成员「{m['name']}」{suffix}")
     if not team.get("members"):
         lines.append("- （暂无成员）")
+    else:
+        lines.append(
+            "派发任务：先拆成可并行的子任务，用 `delegate(target=team, assignments=[...])` "
+            "一次覆盖尽量多的相关成员；各成员会并行执行，结果回到群聊后由你整合。"
+            "你直接 @ 成员派活，不要以用户身份转发，也不要说「我帮你转达」。"
+            "分清两种：只征求一句意见 → 直接 `@成员`（成员在会话里回复）；"
+            "需要成员动手做事（工具 / 长任务 / 产出结果）→ 用 `delegate` 登记为后台任务，"
+            "并在正文里说明「已创建后台任务」，不要用 @ 代替真正的派发。"
+            "**派发后本轮就收尾**：不要自己再执行同一个任务；成员完成、用户点「继续」后再整合。"
+        )
     return "\n".join(lines)
 
 
@@ -601,11 +684,15 @@ def ensure_workspace_team(ws_id: str, *, bind_conversation: Optional[str] = None
         return None
     host = str(ws.get("host_role_id") or "").strip()
     member_ids = [str(x) for x in _json_list(ws.get("member_role_ids")) if str(x).strip()]
-    leader_id = host if host and zero_store.get_role(host) else zero_store.DEFAULT_ROLE_ID
-    if not zero_store.get_role(leader_id):
+    # 主持必须是真实团队角色；系统角色（通用助手 / 全局 AtlasX）不能当群主持，
+    # 否则单聊/空群会反复出现 AtlasX。
+    leader_id = host if (host and host != zero_store.GLOBAL_ROLE_ID
+                         and zero_store.get_role(host)) else ""
+    if not leader_id:
         return None
     members = [rid for rid in dict.fromkeys(member_ids)
-               if rid != leader_id and zero_store.get_role(rid)]
+               if rid != leader_id and rid != zero_store.GLOBAL_ROLE_ID
+               and zero_store.get_role(rid)]
     # V3：工作区只是文件容器。「主持 + 至少一个成员」才算旧群组的群聊信号。
     # 只有默认角色（新添加的文件夹工作区 / 默认工作区）不建默认群聊——
     # 否则一条单聊会被归一成「默认群聊」。
@@ -692,3 +779,70 @@ def cleanup_phantom_default_teams() -> int:
         )
         db.commit()
     return len(legacy)
+
+
+def detach_global_agent_conversations() -> int:
+    """解除全局 Agent 会话与群组的绑定（幂等）。
+
+    全局 Agent 只处理审批，不是群聊。旧版本里模型用 `team_manage(create)`
+    建群时会默认绑定当前会话，于是全局 Agent 会话带上了 team_id：
+    群组页「打开群聊」复用它，标题被显示成「全局 Agent」，群头像 / 群成员
+    也会串到全局 Agent 上。这里只清掉会话上的绑定，群组本身保留；
+    用户从群组页进入时会新建一条普通群会话。
+    """
+    from services.agent_zero.task_layer.conversation import GLOBAL_AGENT_ZONE
+
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        res = db.execute(
+            text(f"UPDATE {_q('conversations')} SET team_id = NULL, "
+                 f"updated_at = datetime('now','localtime') "
+                 f"WHERE COALESCE(zone, '') = :zone AND team_id IS NOT NULL"),
+            {"zone": GLOBAL_AGENT_ZONE},
+        )
+        db.commit()
+        return int(res.rowcount or 0)
+
+
+def normalize_system_roles() -> int:
+    """把全局 AtlasX 从所有群组里清出去（幂等）。
+
+    - 成员里的 ``GLOBAL_ROLE_ID`` 直接移除；
+    - 主持是全局角色时，新建一个同名「主持」团队角色顶替，避免群聊路由落回
+      全局 Agent（这正是旧版本「群聊里没人成员却总出现 AtlasX」的来源）。
+    普通兜底角色「通用助手」仍可作为群成员，它不是 AtlasX。
+    返回被修复的群组数。
+    """
+    SessionLocal = get_session_local()
+    fixed = 0
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT * FROM {_q('agent_teams')}"),
+        ).mappings().all()
+        for row in rows:
+            team = dict(row)
+            ws_id = str(team.get("workspace_id") or "") or zero_store.DEFAULT_WORKSPACE_ID
+            leader_id = str(team.get("leader_role_id") or "")
+            member_ids = [str(x) for x in _json_list(team.get("member_role_ids"))]
+            new_members = [rid for rid in member_ids
+                           if rid and rid != zero_store.GLOBAL_ROLE_ID
+                           and rid != leader_id]
+            new_leader = leader_id
+            if (not new_leader or new_leader == zero_store.GLOBAL_ROLE_ID
+                    or not zero_store.get_role(new_leader)):
+                # 旧群组的主持是全局角色 / 已删除：换成一个真实的「主持」角色。
+                new_leader = zero_store.new_id("teamrole")
+                _ensure_role(ws_id, new_leader, "主持", "群聊主持与任务编排")
+                new_members = [rid for rid in new_members if rid != new_leader]
+            if new_leader == leader_id and new_members == member_ids:
+                continue
+            db.execute(
+                text(f"UPDATE {_q('agent_teams')} SET leader_role_id = :leader, "
+                     f"member_role_ids = :members, "
+                     f"updated_at = datetime('now','localtime') WHERE id = :id"),
+                {"leader": new_leader, "members": zero_store._json(new_members),
+                 "id": team.get("id")},
+            )
+            fixed += 1
+        db.commit()
+    return fixed

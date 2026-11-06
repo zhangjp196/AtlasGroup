@@ -107,7 +107,7 @@ def test_inject_without_running_run_is_rejected(client, monkeypatch):
     cid = client.post(f"{API}/conversations", json={}).json()["data"]["id"]
     run_id = run_service.create_run(cid, "local", content="排队中",
                                     mode="chat")["id"]
-    monkeypatch.setattr(run_service, "running_run", lambda _cid: None)
+    monkeypatch.setattr(run_service, "running_run", lambda _cid, **_kw: None)
 
     resp = client.post(f"{API}/conversations/{cid}/queue/{run_id}/inject")
     assert resp.status_code == 409, resp.text

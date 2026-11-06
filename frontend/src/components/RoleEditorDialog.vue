@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import AvatarField from '@/components/AvatarField.vue'
-import Modal from '@/components/Modal.vue'
+import SideDrawer from '@/components/SideDrawer.vue'
 import { api } from '@/api/client'
 import type { Role, ToolItem } from '@/api/types'
 import { departmentPath } from '@/lib/derive'
@@ -27,6 +27,7 @@ const toolsLoaded = ref(false)
 
 const form = reactive({
   name: '',
+  workspace_id: '',
   title: '',
   department_id: '',
   expertise: '',
@@ -49,6 +50,7 @@ watch(() => [props.open, props.role?.id], () => {
   if (!props.open) return
   const role = props.role
   form.name = role?.name || ''
+  form.workspace_id = role?.workspace_id || ''
   form.title = role?.title || ''
   form.department_id = role?.department_id || props.presetDepartmentId || ''
   form.expertise = role?.expertise || ''
@@ -101,6 +103,7 @@ async function save(): Promise<void> {
   try {
     const body = {
       name,
+      workspace_id: form.workspace_id || '',
       title: form.title.trim(),
       department_id: form.department_id || undefined,
       expertise: form.expertise.trim(),
@@ -124,7 +127,7 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-  <Modal :open="open" :title="title" width="660px" @close="emit('close')">
+  <SideDrawer :open="open" :title="title" width="660px" @close="emit('close')">
     <div class="field">
       <label>角色头像</label>
       <AvatarField v-model="form.avatar" scope="role" :name="form.name || '角'" />
@@ -136,6 +139,14 @@ async function save(): Promise<void> {
     <div class="field">
       <label>岗位（做什么）</label>
       <input v-model="form.title" class="input" placeholder="例如：后端工程师 / 合同审阅" maxlength="120" />
+    </div>
+    <div class="field">
+      <label>绑定工作区 <span class="role-line">决定这个角色的文件和终端上下文</span></label>
+      <select v-model="form.workspace_id" class="input">
+        <option value="">不绑定（使用默认工作区）</option>
+        <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
+      </select>
+      <small class="role-line">会话使用这个角色时，会自动在该工作区里运行。</small>
     </div>
     <div class="field">
       <label>所属部门 <span class="role-line">可留空 = 未安排</span></label>
@@ -193,5 +204,5 @@ async function save(): Promise<void> {
       <el-button @click="emit('close')">取消</el-button>
       <el-button type="primary" :loading="saving" :disabled="!form.name.trim()" @click="save">保存</el-button>
     </template>
-  </Modal>
+  </SideDrawer>
 </template>
