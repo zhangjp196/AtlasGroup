@@ -1,13 +1,16 @@
 <script setup lang="ts">
+import { ElButton, ElOption, ElSelect } from 'element-plus'
 import { computed, nextTick, ref, watch } from 'vue'
-import type { ModelProfile, SlashCommand, TeamMember } from '@/api/types'
+import type { ModelProfile, SlashCommand, Subscription, TeamMember } from '@/api/types'
 import type { PendingAttachment } from '@/composables/useChat'
 import { bytes } from '@/lib/format'
+import ModelCascader from '@/components/ModelCascader.vue'
 
 const props = defineProps<{
   streaming: boolean
   sending: boolean
   models: ModelProfile[]
+  subscriptions: Subscription[]
   model: string
   perm: string
   thinking: string
@@ -291,14 +294,20 @@ watch(() => props.model, () => nextTick(grow))
         @compositionstart="onCompositionStart"
         @compositionend="onCompositionEnd"
       />
-      <el-button v-if="!streaming" type="primary" class="send" title="发送 (Enter)" :disabled="sending || composing || (!draft.trim() && !attachments.length)" @click="emit('send')">发送</el-button>
-      <el-button v-else type="danger" plain class="stop" title="停止当前轮次；后台任务请在执行画布中暂停 / 结束" @click="emit('stop')">停止</el-button>
+      <el-button type="primary" class="send" :title="streaming ? '发送并加入队列 (Enter)' : '发送 (Enter)'" :disabled="sending || composing || (!draft.trim() && !attachments.length)" @click="emit('send')">发送</el-button>
+      <el-button v-if="streaming" type="danger" plain class="stop" title="停止当前轮次；后台任务请在执行画布中暂停 / 结束" @click="emit('stop')">停止</el-button>
     </div>
     <div class="tools">
-      <el-select :model-value="model" size="small" style="width:150px" placeholder="默认模型" @update:model-value="emit('update:model', String($event))">
-        <el-option label="默认模型" value="" />
-        <el-option v-for="item in models" :key="item.code" :label="item.name || item.code" :value="item.code" />
-      </el-select>
+      <ModelCascader
+        :model-value="model"
+        :models="models"
+        :subscriptions="subscriptions"
+        size="small"
+        width="200px"
+        placeholder="跟随角色模型"
+        default-label="跟随角色模型"
+        @update:model-value="emit('update:model', $event)"
+      />
       <el-select
         v-if="thinkingLevels.length"
         :model-value="thinking"

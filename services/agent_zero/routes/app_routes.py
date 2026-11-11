@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -37,6 +39,58 @@ OPENCODE_GO_BASE = "https://opencode.ai/inference/go/openai/v1"
 OPENCODE_GO_MODELS = "https://opencode.ai/inference/go/v1/models"
 OPENCODE_GO_USAGE = "https://opencode.ai/zen/go/v1/usage"
 
+# Command Code Provider API：OpenAI Chat / Responses 与 Anthropic Messages 共用
+# 一个 Key。推理端点在 .../provider/v1，Anthropic SDK 会自动拼 /v1/messages，
+# 所以订阅上的 Anthropic 根地址是 .../provider。
+COMMANDCODE_BASE = "https://api.commandcode.ai/provider/v1"
+COMMANDCODE_ANTHROPIC_BASE = "https://api.commandcode.ai/provider"
+COMMANDCODE_MODELS = "https://api.commandcode.ai/provider/v1/models"
+# 额度走 CLI 使用的内部 billing 接口（非公开 Provider API，字段可能变动）。
+COMMANDCODE_API_BASE = "https://api.commandcode.ai"
+COMMANDCODE_WHOAMI = "/alpha/whoami"
+COMMANDCODE_CREDITS = "/alpha/billing/credits"
+COMMANDCODE_SUBSCRIPTION = "/alpha/billing/subscriptions"
+COMMANDCODE_SUMMARY = "/alpha/usage/summary"
+# 套餐包含的月度额度（美元）；仅用于给「剩余额度」一个分母。
+COMMANDCODE_PLAN_CREDITS = {
+    "individual-go": 10,
+    "individual-go-v1": 10,
+    "individual-goat": 70,
+    "individual-pro": 30,
+    "individual-pro-v1": 80,
+    "individual-provider": 15,
+    "individual-max": 150,
+    "individual-ultra": 300,
+    "teams-pro": 40,
+}
+COMMANDCODE_PLAN_NAMES = {
+    "individual-go": "Go",
+    "individual-go-v1": "Go",
+    "individual-goat": "GOAT",
+    "individual-pro": "Pro",
+    "individual-pro-v1": "Pro",
+    "individual-provider": "Provider",
+    "individual-max": "Max",
+    "individual-ultra": "Ultra",
+    "teams-pro": "Teams Pro",
+}
+
+COMMANDCODE_PRESETS = [
+    {
+        "code": "command-code",
+        "name": "Command Code",
+        "group": "commandcode",
+        "base_url": COMMANDCODE_BASE,
+        "anthropic_base_url": COMMANDCODE_ANTHROPIC_BASE,
+        "models_url": COMMANDCODE_MODELS,
+        "protocol": "openai-chat",
+        "provider": "command-code",
+        "supports_quota": True,
+        "note": "官方 Provider API：需 Provider 及以上套餐，Key 在 Studio 生成；"
+                "Claude 走 Anthropic Messages，GPT 走 OpenAI 兼容协议。",
+    },
+]
+
 OPENCODE_PRESETS = [
     {
         "code": "opencode-go",
@@ -64,9 +118,10 @@ OPENCODE_PRESETS = [
 
 
 # 订阅预设：官方 API、聚合平台、自建 / 本地网关。
-# 编程订阅类的反代预设（WorkBuddy / Trae / Qoder / CodeBuddy 等）已下线，
-# 不再内置也不再展示：这类端点依赖第三方本地转换器与账号登录态，不稳定且难验证。
-PLATFORM_PRESETS = OPENCODE_PRESETS + [
+# Command Code 与 OpenCode 都属于「官方托管的多模型订阅」，有公开、可验证的
+# Provider API，因此单独成组；而依赖本地反代 / 账号登录态的第三方编程订阅
+# （WorkBuddy / Trae / Qoder / CodeBuddy 等）已下线，不再内置也不再展示。
+PLATFORM_PRESETS = COMMANDCODE_PRESETS + OPENCODE_PRESETS + [
     # ── 聚合平台 / 自建网关 ─────────────────────────────────────────────
     {
         "code": "openrouter",
@@ -353,14 +408,85 @@ def _opencode_family(base_url: str) -> str:
     return ""
 
 
+def _is_commandcode(base_url: str) -> bool:
+    """是否 Command Code 的 Provider API 端点。"""
+    try:
+        host = urlparse(str(base_url or "").strip()).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower()
+    return host == "api.commandcode.ai" or host.endswith(".api.commandcode.ai")
+
+
 def _models_url_for(base_url: str) -> str:
     base = str(base_url or "").strip().rstrip("/")
+    if _is_commandcode(base):
+        return COMMANDCODE_MODELS
     family = _opencode_family(base)
     if family == "opencode-go":
         return OPENCODE_GO_MODELS
     if family == "opencode-zen":
         return OPENCODE_ZEN_MODELS
     return f"{base}/models"
+
+
+def _discover_model_entry(item: Any, *, family: str = "",
+                          commandcode: bool = False) -> Optional[Dict[str, Any]]:
+    """把模型列表里的一条记录转成前端可用的条目；无效记录返回 None。"""
+    if isinstance(item, str):
+        mid, owned = item.strip(), ""
+    elif isinstance(item, dict):
+        mid = str(item.get("id") or item.get("name") or "").strip()
+        owned = str(item.get("owned_by") or item.get("owner") or "")
+    else:
+        return None
+    if not mid:
+        return None
+    entry: Dict[str, Any] = {"id": mid, "owned_by": owned}
+    if isinstance(item, dict):
+        display = str(item.get("name") or item.get("display_name") or "").strip()
+        if display:
+            entry["name"] = display
+        context = (item.get("context_length") or item.get("context_window")
+                   or item.get("context"))
+        if isinstance(context, (int, float)) and context > 0:
+            entry["context_window"] = int(context)
+    if commandcode:
+        protocol, supported, note = _endpoint_protocol(
+            item.get("supported_endpoints") if isinstance(item, dict) else None)
+        entry.update({"protocol": protocol, "supported": supported})
+        if note:
+            entry["note"] = note
+    elif family:
+        protocol, supported, note = _opencode_protocol(mid, family)
+        entry.update({"protocol": protocol, "supported": supported})
+        if note:
+            entry["note"] = note
+    return entry
+
+
+def _endpoint_protocol(endpoints: Any) -> tuple[str, bool, str]:
+    """按模型列表里的 supported_endpoints 选择 API 协议。
+
+    Command Code 的 `GET /provider/v1/models` 会返回每个模型的
+    `supported_endpoints`：Claude 只有 ``/messages``，GPT 同时有
+    ``/chat/completions`` 与 ``/responses``。这里优先 Anthropic Messages，
+    其次 OpenAI Chat（兼容面更广），最后 Responses。
+    """
+    if not isinstance(endpoints, list):
+        return "openai-chat", True, ""
+    normalized = [str(item or "").strip().lower().rstrip("/")
+                  for item in endpoints]
+    normalized = [item for item in normalized if item]
+    if not normalized:
+        return "openai-chat", True, ""
+    if any(item.endswith("/messages") for item in normalized):
+        return "anthropic", True, ""
+    if any(item.endswith("/chat/completions") for item in normalized):
+        return "openai-chat", True, ""
+    if any(item.endswith("/responses") for item in normalized):
+        return "openai-response", True, ""
+    return "openai-chat", False, "该模型未声明兼容端点"
 
 
 def _opencode_protocol(model_id: str, family: str) -> tuple[str, bool, str]:
@@ -437,6 +563,7 @@ def _llm_view() -> Dict[str, Any]:
             "api_key": "",
             "context_window": 0,
             "max_tokens": 0,
+            "concurrency": 2,
             "protocol": "openai-chat",
             "vision": False,
             "thinking_levels": [],
@@ -451,6 +578,7 @@ def _llm_view() -> Dict[str, Any]:
         "api_key": MASK if active.get("effective_has_api_key") else "",
         "context_window": int(active.get("effective_context_window") or 0),
         "max_tokens": int(active.get("effective_max_tokens") or 0),
+        "concurrency": int(active.get("effective_concurrency") or 2),
         "protocol": str(active.get("effective_protocol") or "openai-chat"),
         "vision": bool(active.get("effective_vision")),
         "thinking_levels": list(active.get("effective_thinking_levels") or []),
@@ -489,6 +617,7 @@ def app_info(request: Request):
         "llm": _llm_view(),
         "limits": {
             "max_concurrent_runs": settings.max_concurrent_conversation_runs,
+            "max_parallel_member_runs": settings.max_parallel_member_runs,
             "context_compress_percent": settings.context_compress_percent,
             "autonomous_run_max_seconds": settings.autonomous_run_max_seconds,
         },
@@ -589,6 +718,8 @@ class ModelProfileBody(BaseModel):
     api_key: Optional[str] = Field(None, max_length=1000)
     context_window: Optional[int] = Field(None, ge=0, le=10_000_000)
     max_tokens: Optional[int] = Field(None, ge=0, le=1_000_000)
+    # 同一模型档案允许同时在途的 LLM 请求数（默认 2）
+    concurrency: Optional[int] = Field(None, ge=1, le=64)
     protocol: Optional[str] = Field(None, max_length=40)
     vision: Optional[bool] = None
     thinking_levels: Optional[List[str]] = Field(None, max_length=16)
@@ -617,6 +748,7 @@ class SettingsBody(BaseModel):
     api_key: Optional[str] = Field(None, max_length=1000)
     context_window: Optional[int] = Field(None, ge=0, le=10_000_000)
     max_tokens: Optional[int] = Field(None, ge=0, le=1_000_000)
+    concurrency: Optional[int] = Field(None, ge=1, le=64)
     protocol: Optional[str] = Field(None, max_length=40)
     vision: Optional[bool] = None
     thinking_levels: Optional[List[str]] = Field(None, max_length=16)
@@ -637,10 +769,11 @@ class DiscoverModelsBody(BaseModel):
     """读取 OpenAI 兼容端点的 /models 列表。
 
     卡片里可能还没保存（没有 code），所以允许直接传 base_url / api_key；
-    api_key 传掩码或空时，回落到该 code（或默认模型）已保存的密钥。
+    api_key 传掩码或空时，回落到该订阅（或 code / 默认模型）已保存的密钥。
     """
 
     code: Optional[str] = Field(None, max_length=80)
+    subscription_id: Optional[str] = Field(None, max_length=80)
     base_url: Optional[str] = Field(None, max_length=500)
     api_key: Optional[str] = Field(None, max_length=1000)
     protocol: Optional[str] = Field(None, max_length=40)
@@ -740,6 +873,10 @@ def _new_model_map(body: SettingsBody, existing: Dict[str, Any],
             item["context_window"] = profile.context_window
         if profile.max_tokens:
             item["max_tokens"] = profile.max_tokens
+        if profile.concurrency is not None:
+            item["concurrency"] = max(1, min(int(profile.concurrency), 64))
+        elif prev.get("concurrency") is not None:
+            item["concurrency"] = prev["concurrency"]
         proto = str(profile.protocol or "").strip()
         if proto:
             item["protocol"] = llm_mod._normalize_protocol(proto)  # noqa: SLF001
@@ -857,6 +994,16 @@ async def discover_models(body: DiscoverModelsBody):
     if api_key == MASK:
         api_key = ""
     code = str(body.code or "").strip()
+    subscription_id = str(body.subscription_id or "").strip()
+
+    if subscription_id:
+        sub_base, sub_key = await _subscription_endpoint(subscription_id)
+        if not base_url:
+            base_url = sub_base
+        # 只有端点一致时才复用订阅密钥：换了 Base URL 还发旧 key，会把本地
+        # 密钥泄露给另一个服务（也会导致 Invalid credential）。
+        if not api_key and sub_key and base_url == sub_base:
+            api_key = sub_key
 
     if (not base_url or not api_key) and code:
         try:
@@ -911,29 +1058,21 @@ async def discover_models(body: DiscoverModelsBody):
 
     models: List[Dict[str, Any]] = []
     seen = set()
+    commandcode = _is_commandcode(base_url)
     for item in raw_items:
-        if isinstance(item, str):
-            mid, owned = item.strip(), ""
-        elif isinstance(item, dict):
-            mid = str(item.get("id") or item.get("name") or "").strip()
-            owned = str(item.get("owned_by") or item.get("owner") or "")
-        else:
+        entry = _discover_model_entry(item, family=family, commandcode=commandcode)
+        if entry is None:
             continue
-        if not mid or mid in seen:
+        mid = entry["id"]
+        if mid in seen:
             continue
         seen.add(mid)
-        entry = {"id": mid, "owned_by": owned}
-        if family:
-            protocol, supported, note = _opencode_protocol(mid, family)
-            entry.update({"protocol": protocol, "supported": supported})
-            if note:
-                entry["note"] = note
         models.append(entry)
     models.sort(key=lambda m: m["id"].lower())
     return {"code": 0, "data": {
         "base_url": base_url,
         "models_url": models_url,
-        "provider": family,
+        "provider": "command-code" if commandcode else family,
         "count": len(models),
         "models": models,
     }}
@@ -941,7 +1080,7 @@ async def discover_models(body: DiscoverModelsBody):
 
 @router.get("/app/models/presets")
 def model_presets():
-    """内置的订阅平台预设（官方 API、聚合平台、本地网关、OpenCode）。"""
+    """内置的订阅平台预设（官方 API、聚合平台、本地网关、OpenCode、Command Code）。"""
     return {"code": 0, "data": {"items": PLATFORM_PRESETS}}
 
 
@@ -1055,38 +1194,307 @@ def _quota_find_windows(payload: Any) -> Dict[str, Dict[str, Any]]:
     return found
 
 
-@router.get("/app/models/usage")
-async def model_usage(code: str = "", refresh: bool = False):
-    """OpenCode Go 的滚动额度：5 小时 / 1 周 / 1 月。
+def _epoch_seconds(value: Any) -> Optional[float]:
+    """时间戳归一化：兼容秒 / 毫秒（Command Code 的 resetAt 是毫秒）。"""
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ts <= 0:
+        return None
+    return ts / 1000.0 if ts > 1e12 else ts
 
-    OpenCode 实际返回的是百分比 + 重置时间（不返回美元金额），所以前端按
-    percent 画进度条；如果以后返回 usageDollars / limitDollars，也会一并展示。
+
+def _commandcode_window(raw: Any) -> Optional[Dict[str, Any]]:
+    """把 windowLimits.fiveHour / weekly 转成统一的额度窗口。"""
+    if not isinstance(raw, dict):
+        return None
+    cap = _quota_num(raw, "cap", "limit")
+    used = _quota_num(raw, "used", "usage") or 0.0
+    if cap is None or cap <= 0:
+        return None
+    reset_at = _epoch_seconds(raw.get("resetAt") or raw.get("reset_at"))
+    reset_in = None
+    if reset_at is not None:
+        reset_in = max(0.0, reset_at - time.time())
+        if reset_in <= 0:
+            # 窗口已重置：上游仍可能返回上一窗口的 used，按 0 处理。
+            used = 0.0
+    used = max(0.0, min(float(cap), used))
+    return {
+        "used": used,
+        "limit": float(cap),
+        "remaining": max(0.0, float(cap) - used),
+        "percent": max(0.0, min(100.0, used / float(cap) * 100.0)),
+        "reset_in_sec": int(reset_in) if reset_in is not None else None,
+        "status": "exceeded" if raw.get("exceeded") else "",
+    }
+
+
+def _commandcode_quota_snapshot(
+    credits_payload: Dict[str, Any],
+    subscription_payload: Optional[Dict[str, Any]] = None,
+    summary_payload: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """把 Command Code 的 credits / subscriptions / summary 转成统一额度结构。
+
+    额度接口是 CLI 使用的内部 `/alpha/billing/*`，字段可能变动；解析时全部按
+    可选字段处理，拿不到的部分留空而不是报错。
     """
+    credits_raw = credits_payload.get("credits")
+    if not isinstance(credits_raw, dict):
+        return None
+
+    monthly = max(0.0, _quota_num(credits_raw, "monthlyCredits", "monthly_credits") or 0.0)
+    purchased = max(0.0, _quota_num(credits_raw, "purchasedCredits", "purchased_credits") or 0.0)
+    free = max(0.0, _quota_num(credits_raw, "freeCredits", "free_credits") or 0.0)
+    remaining = monthly + purchased + free
+
+    plan_data = (subscription_payload or {}).get("data")
+    plan_data = plan_data if isinstance(plan_data, dict) else {}
+    plan_id = str(plan_data.get("planId") or "").strip()
+    included = float(COMMANDCODE_PLAN_CREDITS.get(plan_id) or 0.0)
+    extra = purchased + free
+    limit = included + extra if included else None
+    percent = None
+    if limit:
+        # 进度条和「剩余 / 总额」保持一致：额外购买的额度也计入分母。
+        percent = max(0.0, min(100.0, (limit - remaining) / limit * 100.0))
+
+    plan: Dict[str, Any] = {}
+    if plan_id:
+        plan = {
+            "id": plan_id,
+            "name": COMMANDCODE_PLAN_NAMES.get(plan_id, plan_id),
+            "status": str(plan_data.get("status") or ""),
+            "period_start": str(plan_data.get("currentPeriodStart") or ""),
+            "period_end": str(plan_data.get("currentPeriodEnd") or ""),
+        }
+
+    windows: Dict[str, Dict[str, Any]] = {}
+    raw_windows = credits_payload.get("windowLimits")
+    if isinstance(raw_windows, dict):
+        for name, key in (("five_hour", "fiveHour"), ("weekly", "weekly")):
+            window = _commandcode_window(raw_windows.get(key))
+            if window is not None:
+                windows[name] = window
+
+    summary: Dict[str, Any] = {}
+    if isinstance(summary_payload, dict):
+        for out_key, names in (
+            ("cost", ("totalCost", "total_cost")),
+            ("requests", ("totalCount", "total_count")),
+            ("tokens", ("totalTokens", "total_tokens")),
+            ("tokens_in", ("totalTokensIn", "total_tokens_in")),
+            ("tokens_out", ("totalTokensOut", "total_tokens_out")),
+        ):
+            value = _quota_num(summary_payload, *names)
+            if value is not None:
+                summary[out_key] = value
+        basis = summary_payload.get("periodBasis") or summary_payload.get("period_basis")
+        if basis:
+            summary["period_basis"] = str(basis)
+
+    result: Dict[str, Any] = {
+        "provider": "command-code",
+        "plan": plan,
+        "credits": {
+            "monthly": monthly,
+            "purchased": purchased,
+            "free": free,
+            "remaining": remaining,
+            "limit": limit,
+            "percent": percent,
+        },
+        "windows": windows,
+        "summary": summary,
+    }
+    if plan.get("period_start"):
+        result["subscribed_at"] = plan["period_start"]
+    return result
+
+
+async def _commandcode_json(
+    client: Any,
+    path: str,
+    headers: Dict[str, str],
+    params: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    resp = await client.get(f"{COMMANDCODE_API_BASE}{path}", headers=headers, params=params)
+    if resp.status_code in (401, 403):
+        raise HTTPException(
+            status_code=400,
+            detail="Command Code API key 无效或已过期，请在订阅里更新密钥",
+        )
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Command Code 额度接口返回格式异常")
+    return data
+
+
+async def _fetch_commandcode_quota(api_key: str) -> Dict[str, Any]:
+    """查询 Command Code 套餐额度：额度余额 + 5 小时 / 周窗口 + 本期用量。"""
     import asyncio
-    import time
 
     import httpx
 
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": _user_agent(),
+        "Authorization": f"Bearer {api_key}",
+    }
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        org_id = ""
+        try:
+            whoami = await _commandcode_json(
+                client, COMMANDCODE_WHOAMI, headers, {"limits": "1"})
+            org = whoami.get("org")
+            if isinstance(org, dict):
+                org_id = str(org.get("id") or "").strip()
+        except Exception:
+            pass
+        params = {"orgId": org_id} if org_id else None
+
+        subscription = None
+        try:
+            subscription = await _commandcode_json(
+                client, COMMANDCODE_SUBSCRIPTION, headers, params)
+        except Exception:
+            pass
+
+        credits: Optional[Dict[str, Any]] = None
+        last_error: Optional[Exception] = None
+        for attempt in range(_QUOTA_RETRIES):
+            try:
+                credits = await _commandcode_json(
+                    client, COMMANDCODE_CREDITS, headers, params)
+                break
+            except HTTPException:
+                raise
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status not in (408, 429) and status < 500:
+                    detail = ""
+                    try:
+                        detail = (e.response.text or "")[:200]
+                    except Exception:
+                        pass
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Command Code 额度查询失败（HTTP {status}）：{detail}",
+                    ) from e
+                last_error = e
+            except Exception as e:  # 网络抖动 / 超时
+                last_error = e
+            if attempt < _QUOTA_RETRIES - 1:
+                await asyncio.sleep(0.8 * (attempt + 1))
+        if credits is None:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Command Code 额度查询失败：{last_error or '上游无响应'}",
+            )
+
+        summary = None
+        try:
+            summary = await _commandcode_json(
+                client, COMMANDCODE_SUMMARY, headers, params)
+        except Exception:
+            pass
+
+    result = _commandcode_quota_snapshot(credits, subscription, summary)
+    if result is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Command Code 额度接口未返回 credits / windowLimits",
+        )
+    return result
+
+
+async def _subscription_endpoint(sub_id: str) -> tuple[str, str]:
+    """返回订阅的 (base_url, api_key)。
+
+    密钥为空时兼容旧配置：从挂在该订阅下的模型档案里找一份可用的 Key。
+    """
     from services.agent_zero.runtime.zero import llm as llm_mod
 
-    resolved = str(code or "").strip() or llm_mod.get_active_model_code()
-    cache_key = resolved
+    sec = llm_mod._llm_section()  # noqa: SLF001
+    sub = llm_mod._entry_dict(  # noqa: SLF001
+        llm_mod._subscriptions_map(sec).get(sub_id))  # noqa: SLF001
+    if not sub:
+        raise HTTPException(status_code=404, detail=f"订阅不存在：{sub_id}")
+    base_url = str(sub.get("base_url") or "").rstrip("/")
+    api_key = str(sub.get("api_key") or "").strip()
+    if api_key:
+        return base_url, api_key
+    for profile in llm_mod.list_model_profiles():
+        if str(profile.get("subscription_id") or "") != sub_id:
+            continue
+        if not profile.get("effective_has_api_key"):
+            continue
+        try:
+            cfg = await llm_mod.get_llm_config(str(profile.get("code") or "")) or {}
+        except Exception:
+            continue
+        base_url = base_url or str(cfg.get("base_url") or "").rstrip("/")
+        api_key = str(cfg.get("api_key") or "").strip()
+        if api_key:
+            break
+    return base_url, api_key
+
+
+@router.get("/app/models/usage")
+async def model_usage(code: str = "", subscription_id: str = "", refresh: bool = False):
+    """订阅额度：OpenCode Go 滚动窗口 / Command Code 套餐额度。
+
+    ``subscription_id`` 优先（不要求先添加模型）；``code`` 保留给旧调用方。
+    """
+    from services.agent_zero.runtime.zero import llm as llm_mod
+
+    sub_id = str(subscription_id or "").strip()
+    resolved = sub_id or str(code or "").strip() or llm_mod.get_active_model_code()
+    cache_key = f"sub:{sub_id}" if sub_id else f"model:{resolved}"
     if not refresh:
         cached = _QUOTA_CACHE.get(cache_key)
         if cached and (time.monotonic() - cached[0]) < _QUOTA_CACHE_TTL:
             return {"code": 0, "data": cached[1]}
-    try:
-        cfg = await llm_mod.get_llm_config(resolved) or {}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"模型配置读取失败：{e}") from e
-    base_url = str(cfg.get("base_url") or "").rstrip("/")
-    api_key = str(cfg.get("api_key") or "")
+
+    base_url = ""
+    api_key = ""
+    if sub_id:
+        base_url, api_key = await _subscription_endpoint(sub_id)
+    else:
+        try:
+            cfg = await llm_mod.get_llm_config(resolved) or {}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"模型配置读取失败：{e}") from e
+        base_url = str(cfg.get("base_url") or "").rstrip("/")
+        api_key = str(cfg.get("api_key") or "")
+
+    if _is_commandcode(base_url):
+        if not api_key or api_key == "EMPTY":
+            raise HTTPException(
+                status_code=400,
+                detail="需要 Command Code API key 才能查询额度；请先编辑订阅并填写密钥",
+            )
+        result = await _fetch_commandcode_quota(api_key)
+        _QUOTA_CACHE[cache_key] = (time.monotonic(), result)
+        return {"code": 0, "data": result}
+
     if _opencode_family(base_url) != "opencode-go":
-        raise HTTPException(status_code=400,
-                            detail="该模型不是 OpenCode Go 端点")
+        raise HTTPException(
+            status_code=400,
+            detail="该订阅不是 OpenCode Go / Command Code，暂不支持额度查询",
+        )
     if not api_key or api_key == "EMPTY":
-        raise HTTPException(status_code=400,
-                            detail="需要 OpenCode Go API key 才能查询额度")
+        raise HTTPException(
+            status_code=400,
+            detail="需要 OpenCode Go API key 才能查询额度",
+        )
+
+    import asyncio
+
+    import httpx
 
     headers = {
         "Accept": "application/json",
@@ -1157,6 +1565,46 @@ async def model_usage(code: str = "", refresh: bool = False):
     }
     _QUOTA_CACHE[cache_key] = (time.monotonic(), result)
     return {"code": 0, "data": result}
+
+
+class PermissionGrantBody(BaseModel):
+    tool: str = Field(..., min_length=1, max_length=200)
+    scope: str = Field(..., max_length=20)
+    role_id: Optional[str] = Field(None, max_length=80)
+    team_id: Optional[str] = Field(None, max_length=80)
+
+
+@router.get("/app/permissions/grants")
+def list_permission_grants(role_id: str = "", team_id: str = ""):
+    """群组 / 角色的永久工具授权（跨会话生效）。"""
+    from services.agent_zero.task_layer import permissions
+
+    items = permissions.list_scope_grants(role_id=role_id, team_id=team_id)
+    return {"code": 0, "data": {"items": items}}
+
+
+@router.post("/app/permissions/grants")
+def create_permission_grant(body: PermissionGrantBody):
+    from services.agent_zero.task_layer import permissions
+
+    try:
+        grant = permissions.add_scope_grant(
+            body.scope, body.tool,
+            role_id=str(body.role_id or ""),
+            team_id=str(body.team_id or ""),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"code": 0, "data": grant}
+
+
+@router.delete("/app/permissions/grants/{grant_id}")
+def delete_permission_grant(grant_id: str):
+    from services.agent_zero.task_layer import permissions
+
+    if not permissions.revoke_scope_grant(grant_id):
+        raise HTTPException(status_code=404, detail="授权不存在")
+    return {"code": 0, "data": {"id": grant_id}}
 
 
 @router.post("/app/models/active")
@@ -1342,6 +1790,14 @@ def ensure_global_agent():
     return {"code": 0, "data": conversation.ensure_global_agent_conversation()}
 
 
+@router.post("/app/global-chat")
+def ensure_global_chat():
+    """Return the persistent global collaboration conversation."""
+    from services.agent_zero.task_layer import conversation
+
+    return {"code": 0, "data": conversation.ensure_global_chat_conversation()}
+
+
 @router.get("/app/attention")
 def app_attention(limit: int = 100):
     """Superagent 面板数据：跨会话的待审批、待回答、未读、运行与授权策略。"""
@@ -1437,6 +1893,8 @@ class McpServerBody(BaseModel):
     headers: Dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
     note: str = ""
+    # 常驻进程：有页面 / 会话状态的服务需要跨工具调用保留状态
+    persistent: bool = False
 
 
 @router.get("/app/mcp")
@@ -1453,6 +1911,8 @@ def list_mcp():
             "install_command": s.get("install_command") or "",
             "env": s.get("env") or {}, "headers": s.get("headers") or {},
             "enabled": s.get("enabled", True), "installed": s.get("installed", False),
+            "persistent": bool(s.get("persistent")),
+            "tool_allowlist": s.get("tool_allowlist") or [],
             "note": s.get("note") or "", "tools": len(cached.get("tools") or []),
             "tool_names": [t.get("name") for t in (cached.get("tools") or [])][:40],
             "created_at": s.get("created_at") or "",
@@ -1472,7 +1932,7 @@ def add_mcp_server(body: McpServerBody):
 
 
 @router.put("/app/mcp/servers/{server_id}")
-def update_mcp_server(server_id: str, body: McpServerBody):
+async def update_mcp_server(server_id: str, body: McpServerBody):
     from services.agent_zero.services import mcp_service
 
     try:
@@ -1483,7 +1943,7 @@ def update_mcp_server(server_id: str, body: McpServerBody):
 
 
 @router.delete("/app/mcp/servers/{server_id}")
-def delete_mcp_server(server_id: str):
+async def delete_mcp_server(server_id: str):
     from services.agent_zero.services import mcp_service
 
     if not mcp_service.delete_server(server_id):

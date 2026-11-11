@@ -131,7 +131,7 @@ STANDALONE_TOOLS: Tuple[str, ...] = (
 )
 
 # 只由对话层按会话类型手动注入的工具，不参与普通工具清单生成。
-GLOBAL_ONLY_TOOLS: Tuple[str, ...] = ("app_manage",)
+GLOBAL_ONLY_TOOLS: Tuple[str, ...] = ("app_manage", "schedule_manage")
 
 # 已经合并进新工具的旧入口（实现保留、可被历史消息调用，但不再下发给模型）。
 # 与 registry.MODEL_HIDDEN 保持一致；这里用于设置页 / 目录的过滤。
@@ -413,7 +413,8 @@ def _translate_merged(code: str, data: Dict[str, Any]) -> Tuple[str, Dict[str, A
     """合并后的工具 → 具体实现（旧工具名与旧调用继续可用）。
 
     - goal_manage：action=report 或带有 status（旧 goal_report 调用）→ goal_report；
-    - delegate：target=team 或带 member_id / member_name → call_team，否则 call_subagent。
+    - delegate：显式 target=team / subagent 优先；target=team 或带 member_id /
+      member_name → call_team；否则（含 target=subagent + assignments）→ call_subagent。
 
     放在 resolve_call 里统一翻译，对话循环与分发器仍按旧的具体工具名分支，
     行为、权限、事件完全不变。
@@ -430,6 +431,10 @@ def _translate_merged(code: str, data: Dict[str, Any]) -> Tuple[str, Dict[str, A
     if code == "delegate":
         target = str(data.get("target") or "").strip().lower()
         out = {k: v for k, v in data.items() if k != "target"}
+        # 显式 target 优先：target=subagent + assignments 是「并行子代理」，
+        # 不能被 assignments 误判成团队成员委派。
+        if target == "subagent":
+            return "call_subagent", out
         if target == "team" or out.get("member_id") or out.get("member_name") \
                 or out.get("assignments"):
             return "call_team", out

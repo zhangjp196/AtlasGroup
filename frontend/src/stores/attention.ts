@@ -18,6 +18,10 @@ export interface AttentionData {
     risk?: string
     note?: string
     conversation_id?: string
+    role_id?: string
+    role_name?: string
+    team_id?: string
+    team_name?: string
   }>
   questions?: Array<{
     id: string

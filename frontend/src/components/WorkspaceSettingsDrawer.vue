@@ -1,11 +1,14 @@
 <script setup lang="ts">
+import { ElButton } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import ListPager from '@/components/ListPager.vue'
 import Modal from '@/components/Modal.vue'
 import WorkEditorDialog, { type WorkSeed } from '@/components/WorkEditorDialog.vue'
 import { api } from '@/api/client'
 import type { Workspace } from '@/api/types'
 import { bytes } from '@/lib/format'
+import { DEFAULT_PAGE_SIZE, pageSlice } from '@/lib/paging'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -43,9 +46,12 @@ const fileText = computed(() => file.value?.text ?? file.value?.content ?? '')
 const boundRoles = computed(() => data.persistentRoles.filter(
   (role) => String(role.workspace_id || '') === String(props.workspace?.id || ''),
 ))
-const boundTeams = computed(() => data.teams.filter(
-  (team) => String(team.workspace_id || '') === String(props.workspace?.id || ''),
-))
+// 绑定到工作区的角色按每页 12 个分页。
+const rolePage = ref(1)
+const pagedBoundRoles = computed(
+  () => pageSlice(boundRoles.value, rolePage.value, DEFAULT_PAGE_SIZE),
+)
+watch(boundRoles, () => { rolePage.value = 1 })
 
 watch(() => props.workspace?.id, (id, old) => {
   if (!props.open || !id) return
@@ -133,8 +139,8 @@ async function toggleArchive(): Promise<void> {
   const ws = props.workspace
   if (!ws || busy.value) return
   const archived = !ws.archived
-  const bindHint = (boundRoles.value.length || boundTeams.value.length)
-    ? `有 ${boundRoles.value.length} 个角色 / ${boundTeams.value.length} 个群组绑定此工作区，归档后它们会回退到默认工作区。`
+  const bindHint = boundRoles.value.length
+    ? `有 ${boundRoles.value.length} 个角色绑定此工作区，归档后它们会回退到默认工作区。`
     : ''
   if (archived && !window.confirm(`归档工作区「${ws.name}」？${bindHint}`)) return
   busy.value = true
@@ -153,8 +159,8 @@ async function toggleArchive(): Promise<void> {
 async function removeWorkspace(): Promise<void> {
   const ws = props.workspace
   if (!ws || busy.value) return
-  const bindHint = (boundRoles.value.length || boundTeams.value.length)
-    ? `有 ${boundRoles.value.length} 个角色 / ${boundTeams.value.length} 个群组绑定此工作区，之后会回退到默认工作区。`
+  const bindHint = boundRoles.value.length
+    ? `有 ${boundRoles.value.length} 个角色绑定此工作区，之后会回退到默认工作区。`
     : ''
   if (!window.confirm(`删除工作区「${ws.name}」？目录本身不会被删除。${bindHint}`)) return
   busy.value = true
@@ -199,11 +205,6 @@ function openRole(id: string): void {
   close()
   void router.push(`/role/${encodeURIComponent(id)}`)
 }
-
-function openTeam(id: string): void {
-  close()
-  void router.push(`/group/${encodeURIComponent(id)}`)
-}
 </script>
 
 <template>
@@ -230,7 +231,6 @@ function openTeam(id: string): void {
             <div class="role-line mono">{{ workspace.chat_only ? '纯聊天工作区，没有本地目录' : (workspace.root_path || '托管目录') }}</div>
             <div class="chips">
               <span class="chip">{{ boundRoles.length }} 个角色</span>
-              <span class="chip">{{ boundTeams.length }} 个群组</span>
               <span v-if="workspace.archived" class="chip">已归档</span>
             </div>
           </div>
@@ -278,7 +278,7 @@ function openTeam(id: string): void {
           <div class="group-section-head"><h3>绑定的角色</h3><span>{{ boundRoles.length }} 个</span></div>
           <div class="sa-recent-list">
             <button
-              v-for="role in boundRoles"
+              v-for="role in pagedBoundRoles"
               :key="role.id"
               class="sa-recent-row"
               type="button"
@@ -291,26 +291,14 @@ function openTeam(id: string): void {
             </button>
             <div v-if="!boundRoles.length" class="ws-empty">还没有角色绑定这个工作区</div>
           </div>
+          <ListPager
+            :page="rolePage"
+            :total="boundRoles.length"
+            :page-size="DEFAULT_PAGE_SIZE"
+            @update:page="rolePage = $event"
+          />
         </section>
 
-        <section class="group-section">
-          <div class="group-section-head"><h3>绑定的群组</h3><span>{{ boundTeams.length }} 个</span></div>
-          <div class="sa-recent-list">
-            <button
-              v-for="team in boundTeams"
-              :key="team.id"
-              class="sa-recent-row"
-              type="button"
-              @click="openTeam(team.id)"
-            >
-              <span class="sa-recent-main">
-                <b>{{ team.name || team.id }}</b>
-                <span>{{ (team.members || []).length }} 个角色</span>
-              </span>
-            </button>
-            <div v-if="!boundTeams.length" class="ws-empty">还没有群组绑定这个工作区</div>
-          </div>
-        </section>
 
         <section class="group-section">
           <div class="group-section-head"><h3>管理</h3></div>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ElDialog } from 'element-plus'
 import { useSlots } from 'vue'
 
 defineProps<{ open: boolean; title: string; width?: string }>()

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -33,7 +34,9 @@ from services.agent_zero.routes import (
     app_routes,
     avatar_routes,
     department_routes,
+    magpie_routes,
     role_routes,
+    schedule_routes,
     task_routes,
     team_routes,
     team_task_routes,
@@ -131,6 +134,19 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
             logger.exception("数据库初始化失败")
             raise
 
+        # 常驻 MCP 进程空闲回收：长期没调用的进程 15 分钟后停掉。
+        async def _mcp_reaper() -> None:
+            from services.agent_zero.services import mcp_service
+
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    await mcp_service.reap_idle()
+                except Exception:
+                    logger.debug("回收空闲 MCP 进程失败", exc_info=True)
+
+        mcp_reaper_task = asyncio.create_task(_mcp_reaper())
+
         try:
             from services.agent_zero.services import team_service
 
@@ -188,6 +204,15 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
         except Exception:
             logger.exception("对话运行 worker 启动失败")
 
+        schedule_ticker_task = None
+        try:
+            from services.agent_zero.services import schedule_service
+
+            schedule_ticker_task = schedule_service.start_ticker()
+            logger.info("定时任务 ticker 已启动")
+        except Exception:
+            logger.exception("定时任务 ticker 启动失败")
+
         try:
             from services.agent_zero.task_layer import run_service
 
@@ -214,10 +239,17 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
         logger.info("%s 就绪（本地单用户 / sqlite）", APP_NAME)
         yield
 
+        if mcp_reaper_task:
+            mcp_reaper_task.cancel()
+            try:
+                await mcp_reaper_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("停止 MCP 空闲回收任务失败", exc_info=True)
         if conv_worker_task:
             try:
                 conv_worker_task.cancel()
-                import asyncio
 
                 try:
                     await conv_worker_task
@@ -225,6 +257,20 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
                     pass
             except Exception:
                 logger.warning("对话运行 worker 停止失败", exc_info=True)
+        if schedule_ticker_task:
+            try:
+                from services.agent_zero.services import schedule_service
+
+                await schedule_service.stop_ticker()
+            except Exception:
+                logger.debug("停止定时任务 ticker 失败", exc_info=True)
+        try:
+            from services.agent_zero.services import mcp_service
+
+            # 常驻 MCP 进程必须显式停：否则关掉应用还会留下子进程。
+            await mcp_service.shutdown_all()
+        except Exception:
+            logger.debug("关闭常驻 MCP 进程失败", exc_info=True)
         try:
             from services.agent_zero.runtime.zero import llm as llm_mod
 
@@ -251,6 +297,7 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
     app.state.web_dir = web_dir
 
     app.include_router(app_routes.router, prefix=API_PREFIX, tags=["应用"])
+    app.include_router(magpie_routes.router, prefix=API_PREFIX, tags=["隐私"])
     app.include_router(task_routes.router, prefix=API_PREFIX, tags=["对话"])
     app.include_router(work_routes.router, prefix=API_PREFIX, tags=["工单助手"])
     app.include_router(workspace_admin_routes.router, prefix=API_PREFIX, tags=["工作区"])
@@ -259,6 +306,7 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
     app.include_router(department_routes.router, prefix=API_PREFIX, tags=["部门"])
     app.include_router(avatar_routes.router, prefix=API_PREFIX, tags=["头像"])
     app.include_router(role_routes.router, prefix=API_PREFIX, tags=["角色"])
+    app.include_router(schedule_routes.router, prefix=API_PREFIX, tags=["定时任务"])
     app.include_router(workspace_routes.router,
                        prefix=f"{API_PREFIX}/workspace", tags=["Workspace"])
 

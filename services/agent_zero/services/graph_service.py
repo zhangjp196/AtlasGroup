@@ -152,8 +152,54 @@ def _collect_run_events(run_id: str, agent: str, agent_id: str) -> Dict[str, Any
     return out
 
 
+def _trace_display_node(display: Dict[str, Any], step: Dict[str, Any],
+                        message_id: str, idx: int, part: int = 0) -> Dict[str, Any]:
+    """一条 `display.type=subagent` → 画布节点（含并行子代理展开）。"""
+    agent = display.get("agent") if isinstance(display.get("agent"), dict) else {}
+    name = str(agent.get("name") or step.get("name") or "子代理")
+    goal = str(display.get("goal") or "")
+    child_trace = display.get("trace") if isinstance(display.get("trace"), list) else []
+    tools = []
+    last_text = ""
+    max_ts = 0
+    for sub in child_trace:
+        if not isinstance(sub, dict):
+            continue
+        try:
+            ts = int(float(sub.get("ts") or 0))
+        except (TypeError, ValueError):
+            ts = 0
+        max_ts = max(max_ts, ts)
+        if sub.get("kind") == "tool":
+            tools.append(_tool_entry(sub))
+        elif sub.get("kind") == "text":
+            text = str(sub.get("text") or "").strip()
+            if text:
+                last_text = text[-400:]
+    return {
+        "id": f"trace-{message_id}-{idx}" + (f"-{part}" if part else ""),
+        "parent_id": "root",
+        "kind": "subagent",
+        "name": name,
+        "role_id": str(agent.get("id") or ""),
+        "goal": goal,
+        "status": "done",
+        "current": "",
+        "text": last_text,
+        "error": "",
+        "tools": tools[:40],
+        "elapsed_ms": max_ts,
+        "started_at": "",
+        "ended_at": "",
+    }
+
+
 def _trace_nodes(conv_id: str) -> List[Dict[str, Any]]:
-    """历史消息 trace 里的子代理（display.type=subagent）。"""
+    """历史消息 trace 里的子代理（display.type=subagent）。
+
+    并行子代理的展示载荷带 `agents: [display...]`，这里逐个子代理展开；
+    单子代理仍是旧的 `display` 结构。
+    """
     found: Dict[str, Dict[str, Any]] = {}
     try:
         messages = conversation.list_messages(conv_id, limit=200)
@@ -169,44 +215,14 @@ def _trace_nodes(conv_id: str) -> List[Dict[str, Any]]:
             display = step.get("display")
             if not isinstance(display, dict) or display.get("type") != "subagent":
                 continue
-            agent = display.get("agent") if isinstance(display.get("agent"), dict) else {}
-            name = str(agent.get("name") or step.get("name") or "子代理")
-            goal = str(display.get("goal") or "")
-            key = f"{name}|{goal}"
-            child_trace = display.get("trace") if isinstance(display.get("trace"), list) else []
-            tools = []
-            last_text = ""
-            max_ts = 0
-            for sub in child_trace:
-                if not isinstance(sub, dict):
-                    continue
-                try:
-                    ts = int(float(sub.get("ts") or 0))
-                except (TypeError, ValueError):
-                    ts = 0
-                max_ts = max(max_ts, ts)
-                if sub.get("kind") == "tool":
-                    tools.append(_tool_entry(sub))
-                elif sub.get("kind") == "text":
-                    text = str(sub.get("text") or "").strip()
-                    if text:
-                        last_text = text[-400:]
-            found[key] = {
-                "id": f"trace-{message.get('id') or 'm'}-{idx}",
-                "parent_id": "root",
-                "kind": "subagent",
-                "name": name,
-                "role_id": str(agent.get("id") or ""),
-                "goal": goal,
-                "status": "done",
-                "current": "",
-                "text": last_text,
-                "error": "",
-                "tools": tools[:40],
-                "elapsed_ms": max_ts,
-                "started_at": "",
-                "ended_at": "",
-            }
+            agents = display.get("agents")
+            parts = ([item for item in agents if isinstance(item, dict)]
+                     if isinstance(agents, list) and agents else [display])
+            for part, item in enumerate(parts):
+                node = _trace_display_node(item, step,
+                                           str(message.get("id") or "m"),
+                                           idx, part if len(parts) > 1 else 0)
+                found[f"{node['name']}|{node['goal']}|{node['id']}"] = node
     return list(found.values())
 
 
@@ -308,7 +324,11 @@ def _run_node(run: Dict[str, Any], name: str, role_id: str,
 
 def _member_run_nodes(runs: List[Dict[str, Any]], root_run_id: str
                       ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """成员 run → 节点（每个 run 一个节点，便于多个后台任务并存）。"""
+    """成员 run → 节点（每个 run 一个节点，便于多个后台任务并存）。
+
+    成员 run 自己派出的**子代理**（subagent_event）也作为第三层节点挂到该成员
+    下面：单个后台任务内部的并行子代理因此能在画布上看到。
+    """
     nodes: List[Dict[str, Any]] = []
     activity: List[Dict[str, Any]] = []
     for run in runs:
@@ -320,6 +340,16 @@ def _member_run_nodes(runs: List[Dict[str, Any]], root_run_id: str
         node, acts = _run_node(run, name, role_id, kind="member")
         nodes.append(node)
         activity.extend(acts)
+        # 任务内子代理：subagent_event 属于这条成员 run，而不是主持 run。
+        sub_nodes, sub_acts = _event_nodes(str(run.get("id") or ""))
+        for sub in sub_nodes:
+            sub["id"] = f"run-{run.get('id')}:{sub.get('id')}"
+            sub["parent_id"] = node["id"]
+            sub["parent_run_id"] = str(run.get("id") or "")
+            sub["run_id"] = ""
+            sub["task_id"] = ""
+            nodes.append(sub)
+        activity.extend(sub_acts)
     return nodes, activity
 
 
@@ -400,7 +430,7 @@ def conversation_graph(conv_id: str) -> Optional[Dict[str, Any]]:
             }
             nodes.append(node)
 
-    edges = [{"from": "root", "to": n["id"],
+    edges = [{"from": str(n.get("parent_id") or "root"), "to": n["id"],
               "kind": n.get("kind") or "delegate"} for n in nodes]
 
     # 角色头像跟随角色当前值：画布 / 任务成员都按 role_id 展示同一张图。

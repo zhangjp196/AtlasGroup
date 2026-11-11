@@ -31,6 +31,9 @@ llm:
   model: gpt-4o-mini
   context_window: 128000
   max_tokens: 4096
+  # 同一模型档案允许同时在途的 LLM 请求数（默认 2）。主对话 / 摘要 / 压缩 /
+  # 团队成员 / 子代理共用这个槽位池；llm.models 里可逐档案覆盖。
+  concurrency: 2
   # 图片支持：开启后该模型可接收上传图片（也可在「设置 → 模型」里逐档案开关）
   vision: false
   # 思考级别：勾选后发送处出现下拉框；留空 / 不配置则不显示
@@ -99,6 +102,12 @@ llm:
   #     provider: opencode-go
   #     base_url: https://opencode.ai/inference/go/openai/v1
   #     anthropic_base_url: https://opencode.ai/inference/go/anthropic
+  #     api_key: ""
+  #   command-code:
+  #     name: Command Code
+  #     provider: command-code
+  #     base_url: https://api.commandcode.ai/provider/v1
+  #     anthropic_base_url: https://api.commandcode.ai/provider
   #     api_key: ""
   # 多模型档案（也可在应用「设置 → 模型」里增删和切换）
   # 未填的 base_url / api_key / context_window / max_tokens / vision / thinking_levels 继承默认配置

@@ -5,7 +5,8 @@
 - 新建对话默认继承上一条对话的档位（按最近更新）；也可在「工单助手 → 授权管理」
   显式设置全局默认档位，显式值优先；
 - 审批时点「始终允许」= 把当前会话的档位升为 always；
-- 「本次对话允许」的按工具授权（permission_grants）仍按对话作用域保存。
+- 「本次对话允许」的按工具授权（permission_grants）仍按对话作用域保存；
+- 「永久」授权按工具写入 permission_scope_grants，挂在角色或群组上，跨会话生效。
 
 判定分两层，互相配合：
 1. **规则打分**（这里）：工具本身的危险等级 + 参数里的高危特征（rm、sudo、
@@ -45,6 +46,11 @@ MODE_LABELS = {
     "session": "Session",
     "always": "Allow",
 }
+
+# 永久授权的作用域：角色 / 群组跨会话生效；「临时」= 只批准当前这一次调用，
+# 「会话内」= 当前 conversation 的 permission_grants。
+PERMANENT_SCOPES = ("role", "team")
+PERMANENT_SCOPE_LABELS = {"role": "角色", "team": "群组"}
 
 DEFAULT_MODE = "once"
 APPROVAL_TIMEOUT_S = 120.0
@@ -265,6 +271,111 @@ def _has_session_grant(conv_id: str, tool: str) -> bool:
     return row is not None
 
 
+def _has_scope_grant(tool: str, role_id: str = "", team_id: str = "") -> bool:
+    """角色 / 群组的永久授权是否覆盖该工具（跨会话生效）。"""
+    rid = str(role_id or "").strip()
+    tid = str(team_id or "").strip()
+    if not rid and not tid:
+        return False
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        row = db.execute(
+            text(f"SELECT 1 FROM {_q('permission_scope_grants')} "
+                 f"WHERE (tool = :t1 OR tool = :t2) "
+                 f"AND ((scope = 'role' AND role_id = :r) "
+                 f"     OR (scope = 'team' AND team_id = :g)) LIMIT 1"),
+            {"t1": tool, "t2": _grant_key(tool), "r": rid, "g": tid},
+        ).first()
+    return row is not None
+
+
+def list_scope_grants(role_id: str = "", team_id: str = "") -> List[Dict[str, Any]]:
+    """列出角色 / 群组的永久工具授权。"""
+    where: List[str] = []
+    params: Dict[str, Any] = {}
+    if str(role_id or "").strip():
+        where.append("role_id = :r")
+        params["r"] = str(role_id).strip()
+    if str(team_id or "").strip():
+        where.append("team_id = :g")
+        params["g"] = str(team_id).strip()
+    clause = " AND ".join(where) if where else "1 = 1"
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT * FROM {_q('permission_scope_grants')} "
+                 f"WHERE {clause} ORDER BY created_at DESC, tool ASC"),
+            params,
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def add_scope_grant(scope: str, tool: str, *, role_id: str = "",
+                    team_id: str = "", created_by: str = "local") -> Dict[str, Any]:
+    """新增永久授权；role / team 二选一。"""
+    scope = str(scope or "").strip()
+    if scope not in PERMANENT_SCOPES:
+        raise ValueError(f"非法永久授权范围: {scope}")
+    tool = str(tool or "").strip()
+    if not tool:
+        raise ValueError("工具不能为空")
+    rid = str(role_id or "").strip()
+    tid = str(team_id or "").strip()
+    if scope == "role" and not rid:
+        raise ValueError("角色授权缺少 role_id")
+    if scope == "team" and not tid:
+        raise ValueError("群组授权缺少 team_id")
+    key = _grant_key(_canon(tool))
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        existing = db.execute(
+            text(f"SELECT * FROM {_q('permission_scope_grants')} "
+                 f"WHERE scope = :s AND tool = :t "
+                 f"AND COALESCE(role_id, '') = :r AND COALESCE(team_id, '') = :g "
+                 f"LIMIT 1"),
+            {"s": scope, "t": key, "r": rid if scope == "role" else "",
+             "g": tid if scope == "team" else ""},
+        ).mappings().first()
+        if existing:
+            return dict(existing)
+        grant_id = zero_store.new_id("pgrant")
+        db.execute(
+            text(f"INSERT INTO {_q('permission_scope_grants')} "
+                 f"(id, scope, role_id, team_id, tool, created_by) "
+                 f"VALUES (:id, :s, :r, :g, :t, :by)"),
+            {"id": grant_id, "s": scope,
+             "r": rid if scope == "role" else None,
+             "g": tid if scope == "team" else None,
+             "t": key, "by": created_by},
+        )
+        db.commit()
+    zero_store.append_audit("local", "permission_grant_add",
+                            args={"scope": scope, "tool": key,
+                                  "role_id": rid, "team_id": tid})
+    return {"id": grant_id, "scope": scope, "role_id": rid, "team_id": tid,
+            "tool": key, "created_by": created_by}
+
+
+def revoke_scope_grant(grant_id: str) -> bool:
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        row = db.execute(
+            text(f"SELECT scope, tool, role_id, team_id "
+                 f"FROM {_q('permission_scope_grants')} WHERE id = :id"),
+            {"id": grant_id},
+        ).mappings().first()
+        if not row:
+            return False
+        db.execute(
+            text(f"DELETE FROM {_q('permission_scope_grants')} WHERE id = :id"),
+            {"id": grant_id},
+        )
+        db.commit()
+    zero_store.append_audit("local", "permission_grant_revoke",
+                            args={"grant_id": grant_id, **dict(row)})
+    return True
+
+
 # 无论档位（询问/自动判断/完全允许）都必须人工确认的操作：
 # Agent Team 的创建——团队由模型动态组建，组建行为本身必须用户批准。
 FORCED_CONFIRM_ACTIONS: Dict[str, set] = {"team_manage": {"create"}}
@@ -297,7 +408,8 @@ def _forced_confirmation(canon: str, args: Dict[str, Any]) -> bool:
 
 
 def decide(conv_id: str, name: str, args: Dict[str, Any],
-           auto_execute: bool = False) -> Dict[str, Any]:
+           auto_execute: bool = False, *, role_id: str = "",
+           team_id: str = "") -> Dict[str, Any]:
     """这一工具调用要不要询问用户？档位是**会话级**的，每次调用实时读取，
     所以运行中途切换档位，后续的工具调用立即按新档位执行。
 
@@ -316,6 +428,10 @@ def decide(conv_id: str, name: str, args: Dict[str, Any],
                 "reasons": reasons or ["创建 Agent 团队"], "mode": mode}
     if risk == "low":
         return {"ask": False, "risk": risk, "reasons": reasons, "mode": mode}
+    # 角色 / 群组的永久授权：跨会话生效，优先于会话档位与单次授权。
+    if (_has_scope_grant(canon, role_id, team_id)
+            or _has_scope_grant(_grant_key(canon), role_id, team_id)):
+        return {"ask": False, "risk": risk, "reasons": reasons, "mode": "permanent"}
     # 用户在这条对话里点过「本次对话允许」→ 同对话内不再问（换对话重新问）
     if _has_session_grant(conv_id, canon) or _has_session_grant(conv_id, _grant_key(canon)):
         return {"ask": False, "risk": risk, "reasons": reasons, "mode": "session"}
@@ -396,26 +512,33 @@ def approval_preview(ws_id: str, name: str, args: Dict[str, Any]) -> Optional[Di
 def create_approval(conv_id: str, run_id: Optional[str], name: str,
                     args: Dict[str, Any], risk: str,
                     reasons: List[str], note: str = "",
-                    preview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    preview: Optional[Dict[str, Any]] = None,
+                    role_id: str = "", team_id: str = "") -> Dict[str, Any]:
     approval_id = zero_store.new_id("appr")
+    role_id = str(role_id or "").strip()
+    team_id = str(team_id or "").strip()
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         db.execute(
             text(f"INSERT INTO {_q('tool_approvals')} "
-                 f"(id, conversation_id, run_id, tool, args, risk, reasons, note, status) "
-                 f"VALUES (:id, :c, :r, :t, :a, :k, :rs, :n, 'pending')"),
+                 f"(id, conversation_id, run_id, tool, args, risk, reasons, note, "
+                 f"status, role_id, team_id) "
+                 f"VALUES (:id, :c, :r, :t, :a, :k, :rs, :n, 'pending', :rid, :tid)"),
             {"id": approval_id, "c": conv_id, "r": run_id, "t": _canon(name),
              "a": json_dump(args), "k": risk, "rs": json_dump(reasons),
-             "n": (note or "")[:1200]},
+             "n": (note or "")[:1200], "rid": role_id or None,
+             "tid": team_id or None},
         )
         db.commit()
     _pending[approval_id] = {"event": asyncio.Event(), "decision": None}
     zero_store.append_audit("local", "permission_ask",
                             args={"approval_id": approval_id, "tool": _canon(name),
-                                  "risk": risk, "reasons": reasons})
+                                  "risk": risk, "reasons": reasons,
+                                  "role_id": role_id, "team_id": team_id})
     return {"id": approval_id, "tool": _canon(name), "args": args,
             "risk": risk, "reasons": reasons, "note": note, "status": "pending",
-            "preview": preview}
+            "preview": preview, "role_id": role_id, "team_id": team_id,
+            "can_grant_role": bool(role_id), "can_grant_team": bool(team_id)}
 
 
 def json_dump(value: Any) -> str:
@@ -473,7 +596,14 @@ def decide_approval(approval_id: str, action: str) -> Dict[str, Any]:
     tool = approval["tool"]
     status = "approved" if action.startswith("approve") else "denied"
     scope = {"approve_once": "once", "approve_session": "session",
+             "approve_role": "role", "approve_team": "team",
              "approve_always": "always", "deny": "none"}.get(action, "once")
+    role_id = str(approval.get("role_id") or "").strip()
+    team_id = str(approval.get("team_id") or "").strip()
+    if scope == "role" and not role_id:
+        raise ValueError("该审批没有关联角色，无法做角色永久授权")
+    if scope == "team" and not team_id:
+        raise ValueError("该审批没有关联群组，无法做群组永久授权")
 
     SessionLocal = get_session_local()
     with SessionLocal() as db:
@@ -492,9 +622,11 @@ def decide_approval(approval_id: str, action: str) -> Dict[str, Any]:
                 )
         db.commit()
 
+    # 永久授权在事务提交后再写，避免 sqlite 嵌套写自己锁自己。
+    if scope in PERMANENT_SCOPES:
+        add_scope_grant(scope, tool, role_id=role_id, team_id=team_id)
     if scope == "always":
         # 「始终允许」= 把当前**会话**的档位升为 always（实时落库，新会话延续它）。
-        # 必须在上面的事务提交之后写：嵌套写会让 sqlite 自己锁自己（database is locked）。
         set_conversation_mode(approval["conversation_id"], "always")
 
     slot = _pending.get(approval_id)

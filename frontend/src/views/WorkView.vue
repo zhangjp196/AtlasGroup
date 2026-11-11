@@ -1,14 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { ElButton, ElInput } from 'element-plus'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import SideDrawer from '@/components/SideDrawer.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import WorkEditorDialog from '@/components/WorkEditorDialog.vue'
 import WorkSettingsDrawer from '@/components/WorkSettingsDrawer.vue'
+import ListPager from '@/components/ListPager.vue'
+import OptionPicker from '@/components/OptionPicker.vue'
+import WorkspacePicker from '@/components/WorkspacePicker.vue'
+import TokenMeter from '@/components/TokenMeter.vue'
 import { api } from '@/api/client'
 import type { WorkItem } from '@/api/types'
 import { shortTime } from '@/lib/format'
+import { clampPage, DEFAULT_PAGE_SIZE, pageCount, pageSlice } from '@/lib/paging'
+import { usageFromCounts } from '@/lib/usage'
 import { useAppStore } from '@/stores/app'
 import { useAttentionStore } from '@/stores/attention'
 import { useDataStore } from '@/stores/data'
@@ -23,12 +30,18 @@ const createOpen = ref(false)
 const filter = ref('open')
 const policyOpen = ref(false)
 const policySaving = ref(false)
+const roleOptions = computed(() => data.persistentRoles.map((role) => ({
+  value: role.id,
+  label: role.name || role.id,
+  description: [role.title, role.expertise].filter(Boolean).join(' · '),
+  tag: role.scope === 'temporary' ? '临时' : '',
+})))
+
 const policyForm = reactive({
   mode: 'observe',
   permission_mode: 'auto',
   default_workspace_id: '',
   default_role_id: '',
-  default_team_id: '',
   auto_execute: false,
 })
 const workMenu = reactive({ open: false, x: 0, y: 0, item: null as WorkItem | null })
@@ -105,6 +118,9 @@ const statusLabels: Record<string, string> = {
 }
 
 const stats = computed(() => data.workStats || {})
+// 工单页头部的 token 汇总（与列表卡片同一口径：按任务 / 会话归集后求和）。
+const workUsage = computed(() => usageFromCounts(stats.value))
+const hasWorkUsage = computed(() => Number(stats.value.tokens || 0) > 0)
 const policy = computed(() => data.workPolicy || {})
 const mode = computed(() => String(policy.value.mode || 'observe'))
 const modeText = computed(() => ({ off: '手动模式', observe: '观察模式', auto: '自动模式' } as Record<string, string>)[mode.value] || '观察模式')
@@ -117,13 +133,38 @@ const permissionText = computed(() => ({
 const defaultWorkspace = computed(() => data.workspaces.find((ws) => ws.id === policy.value.default_workspace_id))
 const defaultWorkspaceText = computed(() => defaultWorkspace.value?.name || String(policy.value.default_workspace_id || '默认'))
 
-const filteredItems = computed(() => {
+const keyword = ref('')
+const page = ref(1)
+const PAGE_SIZE = DEFAULT_PAGE_SIZE
+
+const statusItems = computed(() => {
   const key = filter.value
   if (key === 'all') return data.workItems
   if (key === 'open') return data.workItems.filter((item) => ['inbox', 'working', 'needs_attention'].includes(String(item.status || '')))
   if (key === 'attention') return data.workItems.filter((item) => item.status === 'needs_attention')
   return data.workItems.filter((item) => item.status === key)
 })
+
+const filteredItems = computed(() => {
+  const q = keyword.value.trim().toLowerCase()
+  if (!q) return statusItems.value
+  return statusItems.value.filter((item) => [
+    item.title, item.body, item.attention_reason, item.source,
+    item.source_ref, item.role_name, item.team_name, item.workspace_name,
+  ].map((value) => String(value || '')).join(' ').toLowerCase().includes(q))
+})
+
+const pagedItems = computed(() => pageSlice(filteredItems.value, page.value, PAGE_SIZE))
+const pages = computed(() => pageCount(filteredItems.value.length, PAGE_SIZE))
+const filtersActive = computed(() => filter.value !== 'open' || Boolean(keyword.value.trim()))
+
+watch([filter, keyword], () => { page.value = 1 })
+watch(pages, (total) => { page.value = clampPage(page.value, total) })
+
+function clearFilters(): void {
+  filter.value = 'open'
+  keyword.value = ''
+}
 
 const filterCounts = computed<Record<string, number>>(() => ({
   open: Number(stats.value.open || 0),
@@ -190,7 +231,6 @@ function openPolicy(): void {
   policyForm.permission_mode = String(policy.value.permission_mode || 'auto')
   policyForm.default_workspace_id = String(policy.value.default_workspace_id || '')
   policyForm.default_role_id = String(policy.value.default_role_id || '')
-  policyForm.default_team_id = String(policy.value.default_team_id || '')
   policyForm.auto_execute = Boolean(policy.value.auto_execute)
   policyOpen.value = true
 }
@@ -206,7 +246,6 @@ async function savePolicy(): Promise<void> {
         permission_mode: policyForm.permission_mode,
         default_workspace_id: policyForm.default_workspace_id || null,
         default_role_id: policyForm.default_role_id || null,
-        default_team_id: policyForm.default_team_id || null,
         auto_execute: policyForm.auto_execute,
       },
     })
@@ -247,6 +286,9 @@ function openAttentionConversation(conversationId?: string): void {
               <i class="sa-dot" :class="{ danger: Number(stats.attention || 0) > 0 }" />{{ stats.attention || 0 }} 个需要你
             </span>
           </div>
+        </div>
+        <div v-if="hasWorkUsage" class="sa-hero-usage">
+          <TokenMeter :usage="workUsage" variant="hero" />
         </div>
       </section>
 
@@ -295,6 +337,10 @@ function openAttentionConversation(conversationId?: string): void {
             <div><h2>全部工单</h2><p>点开工单查看详情或派活；按状态筛选。</p></div>
             <span class="sa-count">{{ stats.total || data.workItems.length }}</span>
           </div>
+          <div class="list-toolbar">
+            <el-input v-model="keyword" placeholder="搜索标题 / 说明 / 来源" clearable />
+            <button v-if="filtersActive" class="mini-link" type="button" @click="clearFilters">清除筛选</button>
+          </div>
           <div class="work-filters">
             <button
               v-for="item in filters"
@@ -310,7 +356,7 @@ function openAttentionConversation(conversationId?: string): void {
 
           <div v-if="filteredItems.length" class="tile-grid work-grid">
             <article
-              v-for="item in filteredItems"
+              v-for="item in pagedItems"
               :key="item.id"
               class="tile-card work-tile"
               :class="{ attention: item.status === 'needs_attention' }"
@@ -326,8 +372,14 @@ function openAttentionConversation(conversationId?: string): void {
                 <span v-if="item.priority" class="tag">高</span>
               </div>
               <p class="tile-preview">{{ item.body || item.attention_reason || '没有补充说明' }}</p>
+              <TokenMeter :usage="item.usage" variant="tile" />
               <div class="tile-foot"><span>{{ shortTime(item.updated_at) }}</span><span>{{ statusLabels[String(item.status || '')] || item.status }}</span></div>
             </article>
+          </div>
+          <div v-else-if="data.workItems.length" class="empty">
+            没有符合条件的工单
+            <br />
+            <button class="mini-link" type="button" @click="clearFilters">清除筛选</button>
           </div>
           <div v-else class="sa-onboard">
             <div class="sa-onboard-step"><b>1</b><span>新建一个工单，写清要做什么</span></div>
@@ -335,6 +387,7 @@ function openAttentionConversation(conversationId?: string): void {
             <div class="sa-onboard-step"><b>3</b><span>只有需要授权 / 回答 / 失败时才回来</span></div>
             <button class="btn primary" type="button" @click="createOpen = true">创建第一个工单</button>
           </div>
+          <ListPager :page="page" :pages="pages" :total="filteredItems.length" :page-size="PAGE_SIZE" @update:page="page = $event" />
         </section>
 
         <section class="sa-section sa-policy-card">
@@ -342,7 +395,7 @@ function openAttentionConversation(conversationId?: string): void {
           <div class="sa-policy-row"><span>模式</span><b>{{ modeText }}</b></div>
           <div class="sa-policy-row"><span>新会话权限</span><b>{{ permissionText }}</b></div>
           <div class="sa-policy-row"><span>默认工作区</span><b>{{ defaultWorkspaceText }}</b></div>
-          <p class="sa-policy-note">会话、角色、群组、工作区都可以「新建工单」；工单完成后结果会回写到这里。</p>
+          <p class="sa-policy-note">会话、角色、工作区都可以「新建工单」；工单完成后结果会回写到这里。</p>
           <button class="btn" type="button" @click="openPolicy">调整策略</button>
         </section>
       </div>
@@ -378,24 +431,23 @@ function openAttentionConversation(conversationId?: string): void {
       </div>
       <div class="field">
         <label>默认工作区</label>
-        <select v-model="policyForm.default_workspace_id" class="input">
-          <option value="">默认</option>
-          <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
-        </select>
+        <WorkspacePicker
+          v-model="policyForm.default_workspace_id"
+          :workspaces="data.workspaces"
+          empty-label="默认"
+          placeholder="默认"
+        />
       </div>
       <div class="field">
         <label>默认角色</label>
-        <select v-model="policyForm.default_role_id" class="input">
-          <option value="">默认</option>
-          <option v-for="role in data.roles" :key="role.id" :value="role.id">{{ role.name }}</option>
-        </select>
-      </div>
-      <div class="field">
-        <label>默认群组</label>
-        <select v-model="policyForm.default_team_id" class="input">
-          <option value="">不绑定</option>
-          <option v-for="team in data.teams" :key="team.id" :value="team.id">{{ team.name }}</option>
-        </select>
+        <OptionPicker
+          v-model="policyForm.default_role_id"
+          :items="roleOptions"
+          title="选择默认角色"
+          placeholder="默认"
+          empty-label="默认"
+          empty-hint="使用系统默认角色"
+        />
       </div>
     </div>
     <div class="field" style="margin-top:10px">

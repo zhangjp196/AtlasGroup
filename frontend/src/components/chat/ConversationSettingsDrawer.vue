@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import { ElOption, ElSelect } from 'element-plus'
 import Avatar from '@/components/Avatar.vue'
-import GroupSettingsDrawer from '@/components/GroupSettingsDrawer.vue'
+import ListPager from '@/components/ListPager.vue'
 import SideDrawer from '@/components/SideDrawer.vue'
+import OptionPicker from '@/components/OptionPicker.vue'
+import TokenMeter from '@/components/TokenMeter.vue'
+import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
-import type { Conversation, Role, Team, TeamMember } from '@/api/types'
+import type { Conversation, Role, TokenUsage } from '@/api/types'
 import { GLOBAL_AGENT_ZONE } from '@/lib/derive'
+import { DEFAULT_PAGE_SIZE, pageSlice } from '@/lib/paging'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -22,46 +27,117 @@ const saving = ref(false)
 const removing = ref(false)
 const tempRoles = ref<Role[]>([])
 const tempLoading = ref(false)
-const groupOpen = ref(false)
 const tempOpen = ref(false)
 const tempSaving = ref(false)
 const tempForm = reactive({ name: '', expertise: '', persona: '' })
+// 用量走轻量接口：不拉转录，只取聚合后的 token 数字。
+const usage = ref<TokenUsage | null>(null)
+const usageLoading = ref(false)
 
 const draft = reactive({
   title: '',
   role_id: '',
-  team_id: '',
+  participant_ids: [] as string[],
+  workspace_id: '',
+  workspace_follow: true,
 })
 
 const isGlobal = computed(() => String(props.conversation?.zone || '') === GLOBAL_AGENT_ZONE)
-const selectedTeam = computed<Team | null>(() => data.teams.find((team) => team.id === draft.team_id) || null)
-const groupTeams = computed(() => data.teams.filter((team) => (team.members || []).length))
+
+// 角色 / 临时角色同样每页 12 条，避免抽屉里一次铺满。
+const tempPage = ref(1)
+const pagedTempRoles = computed(
+  () => pageSlice(tempRoles.value, tempPage.value, DEFAULT_PAGE_SIZE),
+)
+watch(tempRoles, () => { tempPage.value = 1 })
 const availableRoles = computed(() => [
   ...data.persistentRoles.filter((role) => role.id !== 'default'),
   ...tempRoles.value.filter((role) => !data.persistentRoles.some((item) => item.id === role.id)),
 ])
-const memberIds = computed(() => new Set((selectedTeam.value?.members || []).map((member) => String(member.id || ''))))
-const conversationWorkspace = computed(() => {
-  const wsId = String(props.conversation?.workspace_id || '')
-  return data.workspaces.find((ws) => ws.id === wsId) || null
+
+const roleOptions = computed(() => [
+  // 旧会话可能还绑着兜底角色：允许原样保留，但不作为新建选项。
+  ...(draft.role_id === 'default'
+    ? [{ value: 'default', label: '未指定角色（旧会话）', description: '请选择一个真实角色' }]
+    : []),
+  ...availableRoles.value.map((role) => ({
+    value: role.id,
+    label: role.name || role.id,
+    description: [role.title, role.expertise].filter(Boolean).join(' · '),
+    tag: role.scope === 'temporary' ? '临时' : '',
+  })),
+])
+
+// 参与角色 = 私有参与团队里的成员（不含主持角色）。
+const participantOptions = computed(() => availableRoles.value
+  .filter((role) => role.id !== draft.role_id)
+  .map((role) => ({
+    value: role.id,
+    label: role.name || role.id,
+    description: [role.title, role.expertise].filter(Boolean).join(' · '),
+    tag: role.scope === 'temporary' ? '临时' : '',
+  })))
+
+// 「跟随角色」时实际会使用的工作区。
+const followWorkspace = computed(() => {
+  const roleId = draft.role_id || 'default'
+  const role = data.roles.find((item) => item.id === roleId)
+  return data.workspaces.find((ws) => ws.id === String(role?.workspace_id || '')) || null
+})
+const conversationWorkspace = computed(() => (draft.workspace_follow
+  ? followWorkspace.value
+  : data.workspaces.find((ws) => ws.id === draft.workspace_id) || null))
+
+// 跟随模式下切换角色：选择器与提示同步到新的默认工作区。
+watch(followWorkspace, (ws) => {
+  if (draft.workspace_follow) draft.workspace_id = ws?.id || ''
 })
 
 function loadDraft(): void {
   const conv = props.conversation
+  const team = data.teams.find((item) => item.id === conv?.team_id)
   draft.title = conv?.title || ''
-  draft.role_id = conv?.role_id || 'default'
-  draft.team_id = conv?.team_id || ''
+  draft.role_id = conv?.role_id || String(team?.leader?.id || '') || 'default'
+  draft.participant_ids = (team?.members || [])
+    .map((member) => String(member.id || ''))
+    .filter((id) => Boolean(id) && id !== draft.role_id)
+  draft.workspace_id = conv?.workspace_id || ''
+  draft.workspace_follow = !conv?.workspace_custom
+}
+
+function onFollowChange(): void {
+  if (draft.workspace_follow) draft.workspace_id = followWorkspace.value?.id || draft.workspace_id
+}
+
+function onWorkspaceChange(): void {
+  draft.workspace_follow = false
 }
 
 watch(() => [props.open, props.conversation?.id], () => {
   if (!props.open) {
-    groupOpen.value = false
     tempOpen.value = false
     return
   }
   loadDraft()
   void loadTempRoles()
+  void loadUsage()
 }, { immediate: true })
+
+async function loadUsage(): Promise<void> {
+  const conv = props.conversation
+  if (!conv?.id) {
+    usage.value = null
+    return
+  }
+  usageLoading.value = true
+  try {
+    usage.value = await api<TokenUsage>(`/conversations/${encodeURIComponent(conv.id)}/usage`)
+  } catch {
+    usage.value = conv.usage || conv.usage_total || null
+  } finally {
+    usageLoading.value = false
+  }
+}
 
 async function loadTempRoles(): Promise<void> {
   const conv = props.conversation
@@ -76,18 +152,6 @@ async function loadTempRoles(): Promise<void> {
     tempRoles.value = []
   } finally {
     tempLoading.value = false
-  }
-}
-
-function memberBrief(role: Role): TeamMember {
-  return {
-    id: role.id,
-    name: role.name,
-    title: role.title || '',
-    department: role.department || '',
-    avatar: role.avatar || '',
-    expertise: role.expertise || '',
-    model_code: role.model_code || '',
   }
 }
 
@@ -114,12 +178,10 @@ async function createTempRole(): Promise<void> {
         session_id: conv.id,
       },
     })
-    const team = selectedTeam.value
-    if (team) {
-      const members = [...(team.members || []), memberBrief(role)]
-      await api(`/teams/${encodeURIComponent(team.id)}`, { method: 'PATCH', body: { members } })
-    }
     await Promise.all([data.loadAll(), loadTempRoles()])
+    if (!draft.participant_ids.includes(role.id) && role.id !== draft.role_id) {
+      draft.participant_ids = [...draft.participant_ids, role.id]
+    }
     tempOpen.value = false
     app.toast(`已创建临时角色：${role.name}`, 'ok', 2600)
   } catch (error) {
@@ -129,34 +191,26 @@ async function createTempRole(): Promise<void> {
   }
 }
 
-async function addTempToTeam(role: Role): Promise<void> {
-  const team = selectedTeam.value
-  if (!team) {
-    app.toast('先给会话绑定一个群组，再加入群聊', 'bad')
+function addTempToConversation(role: Role): void {
+  if (role.id === draft.role_id) {
+    app.toast('主持角色已经在本会话中', 'ok', 1800)
     return
   }
-  if (memberIds.value.has(role.id)) {
-    app.toast('这个角色已经在群里了', 'ok', 1800)
+  if (draft.participant_ids.includes(role.id)) {
+    app.toast('这个角色已经是参与角色', 'ok', 1800)
     return
   }
-  try {
-    const members = [...(team.members || []), memberBrief(role)]
-    await api(`/teams/${encodeURIComponent(team.id)}`, { method: 'PATCH', body: { members } })
-    await data.loadAll()
-    app.toast(`已把「${role.name}」加入群聊`)
-  } catch (error) {
-    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  if (draft.participant_ids.length >= 12) {
+    app.toast('参与角色最多 12 个', 'bad')
+    return
   }
+  draft.participant_ids = [...draft.participant_ids, role.id]
 }
 
 async function removeTempRole(role: Role): Promise<void> {
   if (!window.confirm(`删除临时角色「${role.name}」？`)) return
   try {
-    const team = selectedTeam.value
-    if (team && memberIds.value.has(role.id)) {
-      const members = (team.members || []).filter((member) => String(member.id || '') !== role.id)
-      await api(`/teams/${encodeURIComponent(team.id)}`, { method: 'PATCH', body: { members } })
-    }
+    draft.participant_ids = draft.participant_ids.filter((id) => id !== role.id)
     await api(`/roles/${encodeURIComponent(role.id)}`, { method: 'DELETE' })
     await Promise.all([data.loadAll(), loadTempRoles()])
     app.toast('临时角色已删除')
@@ -185,21 +239,32 @@ async function save(): Promise<void> {
   }
   saving.value = true
   try {
-    const body: Record<string, unknown> = {
-      title,
-    }
+    const body: Record<string, unknown> = { title }
     if (!isGlobal.value) {
-      if (draft.team_id) {
-        body.team_id = draft.team_id
-      } else {
-        body.team_id = ''
-        body.role_id = draft.role_id || ''
-      }
+      body.role_id = draft.role_id || ''
+      // 工作区默认跟随角色；用户手动选择后只作用于本会话，
+      // 同一角色的其他会话仍然可以各自使用不同工作区。
+      body.workspace_follow = draft.workspace_follow
+      if (!draft.workspace_follow) body.workspace_id = draft.workspace_id
     }
-    const updated = await api<Conversation>(
+    await api<Conversation>(
       `/conversations/${encodeURIComponent(conv.id)}/settings`,
       { method: 'PATCH', body },
     )
+    let updated: Conversation = conv
+    if (!isGlobal.value) {
+      const result = await api<{ conversation: Conversation }>(
+        `/conversations/${encodeURIComponent(conv.id)}/participants`,
+        {
+          method: 'PUT',
+          body: {
+            role_ids: draft.participant_ids,
+            leader_id: draft.role_id || undefined,
+          },
+        },
+      )
+      updated = result.conversation || conv
+    }
     await data.loadAll()
     emit('saved', updated)
     app.toast('会话设置已保存')
@@ -226,10 +291,6 @@ async function removeConversation(): Promise<void> {
   }
 }
 
-function onGroupSaved(): void {
-  groupOpen.value = false
-  void data.loadAll()
-}
 </script>
 
 <template>
@@ -239,7 +300,7 @@ function onGroupSaved(): void {
       <header class="side-drawer-head">
         <div>
           <h2>会话管理</h2>
-          <p>{{ draft.title || conversation?.title || '未命名会话' }} · {{ isGlobal ? '全局 Agent' : '角色与群组' }}</p>
+          <p>{{ draft.title || conversation?.title || '未命名会话' }} · {{ isGlobal ? '全局 Agent' : '角色与参与角色' }}</p>
         </div>
         <button class="iconbtn" type="button" title="关闭" aria-label="关闭" @click="emit('close')">
           <svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" /></svg>
@@ -258,51 +319,80 @@ function onGroupSaved(): void {
           </div>
           <div class="field">
             <label>工作区</label>
-            <input class="input" :value="conversationWorkspace?.name || '默认工作区'" readonly />
-            <small class="role-line">工作区由所选角色 / 群组决定，切换角色或群组会自动更新。</small>
+            <template v-if="!isGlobal">
+              <WorkspacePicker
+                v-model="draft.workspace_id"
+                :workspaces="data.workspaces"
+                :disabled="draft.workspace_follow"
+                empty-label="默认工作区"
+                placeholder="默认工作区"
+                title="选择本会话使用的工作区"
+                @update:model-value="onWorkspaceChange"
+              />
+              <label class="conv-follow">
+                <input v-model="draft.workspace_follow" type="checkbox" @change="onFollowChange" />
+                跟随角色
+              </label>
+              <small v-if="draft.workspace_follow" class="role-line">
+                切换角色时自动更新；当前为「{{ followWorkspace?.name || '默认工作区' }}」。
+              </small>
+              <small v-else class="role-line">
+                本会话固定使用「{{ conversationWorkspace?.name || '默认工作区' }}」，切换角色不会覆盖。
+              </small>
+            </template>
+            <template v-else>
+              <input class="input" value="默认工作区" readonly />
+              <small class="role-line">全局 Agent 固定使用默认工作区。</small>
+            </template>
           </div>
+        </section>
+
+        <section class="group-section">
+          <div class="group-section-head">
+            <h3>Token 用量</h3>
+            <span>{{ usageLoading ? '统计中…' : '输入 / 输出 / 速度 / 缓存' }}</span>
+          </div>
+          <TokenMeter :usage="usage || conversation?.usage" variant="panel" headless />
         </section>
 
         <template v-if="!isGlobal">
           <section class="group-section">
             <div class="group-section-head">
-              <h3>角色 / 群组</h3>
-              <span>单聊选角色，群聊选群组</span>
+              <h3>角色</h3>
+              <span>主持角色 + 参与角色</span>
             </div>
             <div class="field">
-              <label>群组（优先于单聊）</label>
-              <select v-model="draft.team_id" class="input">
-                <option value="">不开群聊（单聊）</option>
-                <option v-for="team in groupTeams" :key="team.id" :value="team.id">
-                  {{ team.name }} · {{ (team.members || []).length }} 个角色
-                </option>
-              </select>
+              <label>主持角色</label>
+              <OptionPicker
+                v-model="draft.role_id"
+                :items="roleOptions"
+                title="选择主持角色"
+                placeholder="选择角色"
+              />
             </div>
-            <div v-if="!draft.team_id" class="field">
-              <label>单聊角色</label>
-              <select v-model="draft.role_id" class="input">
-                <option value="default">通用助手（默认）</option>
-                <option v-for="role in availableRoles" :key="role.id" :value="role.id">
-                  {{ role.name }}{{ role.title ? ` · ${role.title}` : '' }}{{ role.scope === 'temporary' ? '（临时）' : '' }}
-                </option>
-              </select>
-            </div>
-
-            <div v-if="selectedTeam" class="conv-group-preview">
-              <div class="group-section-head">
-                <h3>群成员 · {{ (selectedTeam.members || []).length }} 人</h3>
-                <button class="btn small" type="button" @click="groupOpen = true">编辑群资料</button>
-              </div>
-              <div class="group-member-list">
-                <div v-for="member in selectedTeam.members || []" :key="member.id || member.name" class="group-member">
-                  <Avatar :name="member.name || '角'" :avatar="member.avatar" round />
-                  <div class="group-member-main">
-                    <div class="group-member-name"><span>{{ member.name }}</span></div>
-                    <div class="group-member-sub">{{ [member.title, member.department, member.expertise].filter(Boolean).join(' · ') || '群成员' }}</div>
-                  </div>
-                </div>
-                <div v-if="!(selectedTeam.members || []).length" class="group-empty">这个群还没有成员，先编辑群资料添加。</div>
-              </div>
+            <div class="field">
+              <label>参与角色（最多 12 个）</label>
+              <ElSelect
+                v-model="draft.participant_ids"
+                multiple
+                filterable
+                collapse-tags
+                collapse-tags-tooltip
+                :multiple-limit="12"
+                placeholder="只有主持角色参与"
+                style="width:100%"
+              >
+                <ElOption
+                  v-for="role in participantOptions"
+                  :key="role.value"
+                  :label="role.label"
+                  :value="role.value"
+                >
+                  <span>{{ role.label }}</span>
+                  <small v-if="role.description" class="role-line" style="margin-left:8px">{{ role.description }}</small>
+                </ElOption>
+              </ElSelect>
+              <small class="role-line">参与角色只属于本会话；可以 @ 调用，也可以派遣后台任务。</small>
             </div>
           </section>
 
@@ -313,14 +403,14 @@ function onGroupSaved(): void {
               <button class="btn small" type="button" @click="openTempRole">＋ 新建</button>
             </div>
             <div class="group-member-list">
-              <div v-for="role in tempRoles" :key="role.id" class="group-member">
+              <div v-for="role in pagedTempRoles" :key="role.id" class="group-member">
                 <Avatar :name="role.name || '角'" :avatar="role.avatar" round />
                 <div class="group-member-main">
                   <div class="group-member-name"><span>{{ role.name }}</span><span class="tag grp">临时</span></div>
                   <div class="group-member-sub">{{ [role.title, role.expertise].filter(Boolean).join(' · ') || '本会话临时角色' }}</div>
                 </div>
                 <div class="group-member-actions">
-                  <button v-if="selectedTeam && !memberIds.has(role.id)" class="btn small" type="button" @click="addTempToTeam(role)">入群</button>
+                  <button v-if="role.id !== draft.role_id && !draft.participant_ids.includes(role.id)" class="btn small" type="button" @click="addTempToConversation(role)">加入会话</button>
                   <button class="btn small" type="button" @click="promoteTempRole(role)">保存为持久</button>
                   <button class="iconbtn" type="button" title="删除" aria-label="删除" @click="removeTempRole(role)">
                     <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13" /></svg>
@@ -328,8 +418,14 @@ function onGroupSaved(): void {
                 </div>
               </div>
               <div v-if="tempLoading" class="group-empty">加载临时角色…</div>
-              <div v-else-if="!tempRoles.length" class="group-empty">还没有临时角色。新建后可以加入当前群聊。</div>
+              <div v-else-if="!tempRoles.length" class="group-empty">还没有临时角色。新建后可以加入当前会话。</div>
             </div>
+            <ListPager
+              :page="tempPage"
+              :total="tempRoles.length"
+              :page-size="DEFAULT_PAGE_SIZE"
+              @update:page="tempPage = $event"
+            />
           </section>
         </template>
 
@@ -362,13 +458,5 @@ function onGroupSaved(): void {
         <button class="btn primary" :disabled="!tempForm.name.trim() || tempSaving" @click="createTempRole">{{ tempSaving ? '创建中…' : '创建' }}</button>
       </template>
     </SideDrawer>
-
-    <GroupSettingsDrawer
-      :open="groupOpen"
-      :team="selectedTeam"
-      @close="groupOpen = false"
-      @saved="onGroupSaved"
-      @deleted="() => { groupOpen = false; draft.team_id = ''; void data.loadAll() }"
-    />
   </Teleport>
 </template>

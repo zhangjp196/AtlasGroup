@@ -23,7 +23,7 @@ const activeModel = computed(() => {
         <span class="about-logo">A</span>
         <div>
           <h1>{{ data.info?.name || 'AtlasX' }}</h1>
-          <p>本地单用户 Agent 工作台 · {{ data.info?.version || '3.7.0' }}</p>
+          <p>本地单用户 Agent 工作台 · {{ data.info?.version || '3.10.3' }}</p>
         </div>
       </div>
 

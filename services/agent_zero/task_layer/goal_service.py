@@ -257,12 +257,8 @@ def continue_prompt(goal: Dict[str, Any]) -> str:
     )
 
 
-def after_run_finished(conversation_id: str, run_id: str,
-                       usage: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """run 成功收尾后：记账 + 若目标仍 active 则入队续跑 run。返回续跑 run（若有）。
-
-    只在 run 状态为 done 时调用；用户停止 / 失败的 run 不自动续跑。
-    """
+def _account_run(conversation_id: str, usage: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把这一轮 run 的 token / 次数记到目标上，返回刷新后的目标。"""
     goal = active_goal(conversation_id)
     if not goal:
         return None
@@ -276,45 +272,93 @@ def after_run_finished(conversation_id: str, run_id: str,
             {"t": tokens, "id": goal["id"]},
         )
         db.commit()
-        goal = get_goal(conversation_id) or goal
+    return get_goal(conversation_id) or goal
 
-    # 模型在 run 内已宣布完成（status 不再是 active）→ 不续跑
-    if goal.get("status") != "active":
-        return None
-    # 模型标记「等待用户」：暂停自动续跑，等用户回复 / goal_manage(resume)。
-    if is_blocked(goal):
-        logger.info("目标 %s 处于等待用户状态，暂停自动续跑", goal["id"])
-        return None
+
+def _budget_available(goal: Dict[str, Any]) -> bool:
+    """预算 / 续跑次数还有余额；用尽则把目标标成 exhausted。"""
     budget = int(goal.get("token_budget") or 0)
     used = int(goal.get("tokens_used") or 0)
     runs_used = int(goal.get("runs_used") or 0)
     max_runs = int(goal.get("max_runs") or 0)
-    if (budget and used >= budget) or (max_runs > 0 and runs_used >= max_runs):
-        SessionLocal = get_session_local()
-        with SessionLocal() as db:
-            db.execute(
-                text(f"UPDATE {_q('goals')} SET status = 'exhausted', updated_at = datetime('now','localtime') "
-                     f"WHERE id = :id AND status = 'active'"),
-                {"id": goal["id"]},
-            )
-            db.commit()
-        logger.info("目标 %s 预算/次数用尽（runs=%s/%s, tokens=%s/%s），停止自动续跑",
-                    goal["id"], runs_used, max_runs or "∞", used, budget or "∞")
-        return None
+    if not ((budget and used >= budget) or (max_runs > 0 and runs_used >= max_runs)):
+        return True
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"UPDATE {_q('goals')} SET status = 'exhausted', updated_at = datetime('now','localtime') "
+                 f"WHERE id = :id AND status = 'active'"),
+            {"id": goal["id"]},
+        )
+        db.commit()
+    logger.info("目标 %s 预算/次数用尽（runs=%s/%s, tokens=%s/%s），停止自动续跑",
+                goal["id"], runs_used, max_runs or "∞", used, budget or "∞")
+    return False
 
+
+def _enqueue_continuation(conversation_id: str, run_id: str,
+                          prompt: str) -> Optional[Dict[str, Any]]:
+    """入队一条自动续跑 run（沿用上一轮的思考级别）。"""
     from services.agent_zero.task_layer import conversation, run_service
 
-    prompt = continue_prompt(goal)
     try:
         previous = run_service.get_run(run_id) or {}
         msg = conversation.send_message(conversation_id, prompt, "system", queued=True)
-        run = run_service.create_run(
+        return run_service.create_run(
             conversation_id, "system",
             content=prompt, mode="autonomous",
             queued_msg_id=msg.get("id"),
             thinking_level=previous.get("thinking_level"),
         )
-        return run
-    except Exception as e:  # 续跑失败不影响已完成 run
+    except Exception as e:  # 续跑失败不影响已完成的 run
         logger.warning("目标模式自动续跑入队失败: %s", e)
         return None
+
+
+def _can_continue(goal: Optional[Dict[str, Any]]) -> bool:
+    if not goal or goal.get("status") != "active":
+        return False
+    # 模型标记「等待用户」：暂停自动续跑，等用户回复 / goal_manage(resume)。
+    if is_blocked(goal):
+        logger.info("目标 %s 处于等待用户状态，暂停自动续跑", goal["id"])
+        return False
+    return _budget_available(goal)
+
+
+def after_run_finished(conversation_id: str, run_id: str,
+                       usage: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """run 成功收尾后：记账 + 若目标仍 active 则入队续跑 run。返回续跑 run（若有）。
+
+    只在 run 状态为 done 时调用；用户停止的 run 不自动续跑（失败走
+    ``after_run_failed``，同样自动继续）。
+    """
+    goal = _account_run(conversation_id, usage)
+    if not _can_continue(goal):
+        return None
+    return _enqueue_continuation(conversation_id, run_id, continue_prompt(goal))
+
+
+def after_run_failed(conversation_id: str, run_id: str, error: str = "",
+                     usage: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """run 失败后：目标仍 active 就自动入队一条「诊断 + 重试」run。
+
+    失败不再直接停在工单上等人：先让角色自己看错误、修环境 / 改做法，改不动
+    再用 goal_report(status="blocked") 交回人。成员 run（team_task_id）不在这里
+    续跑——后台任务失败由任务层统一交回主持。
+    """
+    from services.agent_zero.task_layer import run_service
+
+    run = run_service.get_run(run_id) or {}
+    if str(run.get("team_task_id") or "").strip():
+        return None
+    goal = _account_run(conversation_id, usage or {})
+    if not _can_continue(goal):
+        return None
+    prompt = (
+        f"（失败后自动继续）目标：{goal.get('objective')}\n"
+        f"上一轮运行失败：{error or run.get('error') or '未知错误'}\n"
+        "先判断失败原因（环境 / 依赖 / 权限 / 命令写错），能修的先修再重试，"
+        "不要重复同一种失败做法；需要人决定时调用 goal_report(status=\"blocked\")，"
+        "真正完成时调用 goal_report(status=\"achieved\") 并给出结论。"
+    )
+    return _enqueue_continuation(conversation_id, run_id, prompt)

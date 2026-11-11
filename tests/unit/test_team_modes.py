@@ -103,6 +103,20 @@ def test_roster_mode_hints(app_env):
     assert "@成员名" in text
 
 
+def test_orchestrate_roster_limits_participants(app_env):
+    """编排模式不再提示「覆盖全员」：默认只挑相关的一两个成员。"""
+    ws = _init(app_env)
+    team = ts.create_team(
+        ws, "研发群", mode="orchestrate", max_speakers=2,
+        leader={"name": "主持"},
+        members=[{"name": "后端"}, {"name": "前端"}, {"name": "测试"}],
+    )
+    text = ts.roster_text(team)
+    assert "默认只挑 1–2 个专长匹配的成员" in text
+    assert "本轮最多 2 名成员参与" in text
+    assert "尽量覆盖" not in text
+
+
 # ── 旧群组惰性归一 ──────────────────────────────────────────────────────
 
 def test_legacy_group_workspace_is_normalized_to_default_team(app_env):

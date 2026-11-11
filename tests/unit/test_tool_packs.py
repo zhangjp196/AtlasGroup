@@ -438,7 +438,8 @@ def test_chat_seq_calls_names_are_resolvable():
     # 「当前工具」必须都能归一（propose_task / background_task 由对话层定义，
     # 不在 registry）
     bad = {n for n in conversation._SEQ_CALLS_TOOLS
-           if n not in ("propose_task", "background_task")
+           if n not in ("propose_task", "background_task", "role_discussion",
+                        "proactive_send")
            and registry.canonical(n) not in known}
     assert not bad, f"_SEQ_CALLS_TOOLS 有无法归一的工具名：{sorted(bad)}"
     # 历史兼容名单里除 todo（→ todo_write 别名）外都是已下线的名字

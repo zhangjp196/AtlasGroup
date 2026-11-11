@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { ElButton, ElDropdown, ElDropdownItem, ElDropdownMenu, ElInput, ElTree } from 'element-plus'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import DepartmentEditorDialog from '@/components/DepartmentEditorDialog.vue'
+import ListPager from '@/components/ListPager.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import RoleEditorDialog from '@/components/RoleEditorDialog.vue'
 import RoleSettingsDrawer from '@/components/RoleSettingsDrawer.vue'
 import WorkEditorDialog, { type WorkSeed } from '@/components/WorkEditorDialog.vue'
 import { api } from '@/api/client'
-import type { Conversation, Department, Role } from '@/api/types'
+import type { Department, Role } from '@/api/types'
 import { departmentPath, departmentRoleCounts, departmentSubtree, orderedDepartments } from '@/lib/derive'
+import { clampPage, DEFAULT_PAGE_SIZE, pageCount, pageSlice } from '@/lib/paging'
 import { useAppStore } from '@/stores/app'
+import { useChatWindowsStore } from '@/stores/chatWindows'
 import { useDataStore } from '@/stores/data'
 
 interface DeptNode {
@@ -25,6 +29,7 @@ interface DeptNode {
 
 const data = useDataStore()
 const app = useAppStore()
+const chatWindows = useChatWindowsStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -47,6 +52,7 @@ const menuItems = computed<ContextMenuItem[]>(() => {
     { label: '打开角色详情', action: 'detail' },
     { label: '编辑角色', action: 'edit' },
     { label: '发起单聊', action: 'chat' },
+    { label: role?.status === 'offline' ? '设为在线' : '设为离线', action: 'presence' },
     { label: '复制名字', action: 'copy' },
     { label: '', action: '', separator: true },
     { label: '删除角色', action: 'delete', danger: true, disabled: Boolean(role?.system) },
@@ -70,6 +76,19 @@ async function onMenu(action: string): Promise<void> {
     return
   }
   if (action === 'chat') return startRoleChat(role.id)
+  if (action === 'presence') {
+    try {
+      await api(`/roles/${encodeURIComponent(role.id)}`, {
+        method: 'PATCH',
+        body: { status: role.status === 'offline' ? 'online' : 'offline' },
+      })
+      await data.loadRoles()
+      app.toast(role.status === 'offline' ? '角色已上线' : '角色已离线')
+    } catch (error) {
+      app.toast(error instanceof Error ? error.message : String(error), 'bad')
+    }
+    return
+  }
   if (action === 'copy') {
     try {
       await navigator.clipboard.writeText(role.name)
@@ -84,7 +103,7 @@ async function onMenu(action: string): Promise<void> {
       app.toast('系统角色不能删除', 'bad')
       return
     }
-    if (!window.confirm(`删除角色「${role.name}」？引用它的群组 / 会话会失去该角色。`)) return
+    if (!window.confirm(`删除角色「${role.name}」？引用它的会话会失去该角色。`)) return
     try {
       await api(`/roles/${encodeURIComponent(role.id)}`, { method: 'DELETE' })
       await data.loadAll()
@@ -126,14 +145,48 @@ function onDeptNode(node: DeptNode): void {
   selectedDept.value = node.id
 }
 
+// 角色列表的筛选：部门（左侧树）+ 关键词 + 持久/临时，再分页。
+// 角色多起来以后，一屏铺几十张卡片既找不到人、也不好翻，必须能筛能翻页。
+const query = ref('')
+const scope = ref<'all' | 'persistent' | 'temporary'>('all')
+const page = ref(1)
+const PAGE_SIZE = DEFAULT_PAGE_SIZE
+
+const orgRoles = computed(() => data.roles.filter(
+  (role) => role.id !== 'default' && role.id !== 'global-agent',
+))
+const scopedRoles = computed(() => orgRoles.value.filter((role) => {
+  if (selectedDept.value === 'all') return true
+  if (selectedDept.value === '') return !role.department_id
+  return departmentSubtree(selectedDept.value, data.departments).has(role.department_id || '')
+}))
+
 const visibleRoles = computed(() => {
-  const scoped = data.roles.filter((role) => {
-    if (selectedDept.value === 'all') return true
-    if (selectedDept.value === '') return !role.department_id
-    return departmentSubtree(selectedDept.value, data.departments).has(role.department_id || '')
+  const q = query.value.trim().toLowerCase()
+  return scopedRoles.value.filter((role) => {
+    if (scope.value === 'persistent' && role.scope === 'temporary') return false
+    if (scope.value === 'temporary' && role.scope !== 'temporary') return false
+    if (!q) return true
+    const haystack = [
+      role.name, role.title, role.expertise, role.department,
+      role.model_code, workspaceName(role.workspace_id),
+      ...(role.tools || []),
+    ].map((value) => String(value || '')).join(' ').toLowerCase()
+    return haystack.includes(q)
   })
-  return scoped
 })
+
+const pagedRoles = computed(() => pageSlice(visibleRoles.value, page.value, PAGE_SIZE))
+const pages = computed(() => pageCount(visibleRoles.value.length, PAGE_SIZE))
+const filtersActive = computed(() => Boolean(query.value.trim()) || scope.value !== 'all')
+
+watch([selectedDept, query, scope], () => { page.value = 1 })
+watch(pages, (total) => { page.value = clampPage(page.value, total) })
+
+function clearFilters(): void {
+  query.value = ''
+  scope.value = 'all'
+}
 
 // 角色面板显示各自的在办工单数（后台任务会自动建单）。
 const openWorkByRole = computed(() => {
@@ -196,13 +249,10 @@ function onRoleDeleted(): void {
 async function startRoleChat(id: string): Promise<void> {
   const role = data.roles.find((item) => item.id === id)
   if (!role) return
-  try {
-    const conv = await api<Conversation>('/conversations', { method: 'POST', body: { role_id: role.id } })
-    await data.loadAll()
-    void router.push(`/conv/${conv.id}`)
-  } catch (error) {
-    app.toast(error instanceof Error ? error.message : String(error), 'bad')
-  }
+  const existing = data.conversations.find((conv) => conv.role_id === role.id
+    && (Number(conv.message_count || 0) > 0 || conv.last_message))
+  if (existing) chatWindows.openConversation(existing.id)
+  else chatWindows.openDraft(role.id)
 }
 
 function startRoleWork(id: string): void {
@@ -274,10 +324,10 @@ function onWorkSaved(): void {
           <button class="mini-link" type="button" @click="openDeptRoot">＋ 根部门</button>
         </div>
         <button class="dept-flat" :class="{ active: selectedDept === 'all' }" type="button" @click="selectedDept = 'all'">
-          <span class="dept-name">全部角色</span><span class="dept-count">{{ data.roles.length }}</span>
+          <span class="dept-name">全部角色</span><span class="dept-count">{{ orgRoles.length }}</span>
         </button>
         <button class="dept-flat" :class="{ active: selectedDept === '' }" type="button" @click="selectedDept = ''">
-          <span class="dept-name">未安排</span><span class="dept-count">{{ data.roles.filter((r) => !r.department_id).length }}</span>
+          <span class="dept-name">未安排</span><span class="dept-count">{{ orgRoles.filter((r) => !r.department_id).length }}</span>
         </button>
         <div class="org-tree-sep" />
         <el-tree
@@ -320,13 +370,26 @@ function onWorkSaved(): void {
           <span class="org-count">{{ visibleRoles.length }} 个角色</span>
         </div>
 
+        <div class="list-toolbar">
+          <el-input v-model="query" placeholder="搜索名字 / 岗位 / 部门 / 模型 / 工具" clearable />
+          <div class="seg" role="group" aria-label="角色范围">
+            <button class="seg-btn" :class="{ on: scope === 'all' }" type="button" @click="scope = 'all'">全部</button>
+            <button class="seg-btn" :class="{ on: scope === 'persistent' }" type="button" @click="scope = 'persistent'">持久</button>
+            <button class="seg-btn" :class="{ on: scope === 'temporary' }" type="button" @click="scope = 'temporary'">临时</button>
+          </div>
+          <button v-if="filtersActive" class="mini-link" type="button" @click="clearFilters">清除筛选</button>
+        </div>
+
         <div class="role-grid">
-          <article v-for="role in visibleRoles" :key="role.id" class="role-card" @click="openRole(role)" @contextmenu.prevent.stop="openMenu($event, role)">
+          <article v-for="role in pagedRoles" :key="role.id" class="role-card" @click="openRole(role)" @contextmenu.prevent.stop="openMenu($event, role)">
             <div class="role-top">
               <Avatar :name="role.name" :avatar="role.avatar" round />
               <span style="min-width:0">
                 <b>{{ role.name }}</b><br />
                 <span class="role-line">{{ role.title || role.expertise || '未填写岗位' }}</span>
+              </span>
+              <span class="role-presence" :class="{ off: role.status === 'offline' }" :title="role.status === 'offline' ? '离线' : '在线'">
+                <i />{{ role.status === 'offline' ? '离线' : '在线' }}
               </span>
               <span class="tag" :class="{ tmp: role.scope === 'temporary' }" style="margin-left:auto">
                 {{ role.scope === 'temporary' ? '临时' : (role.source === 'llm' ? 'LLM' : '持久') }}
@@ -342,7 +405,11 @@ function onWorkSaved(): void {
             </div>
           </article>
         </div>
-        <div v-if="!visibleRoles.length" class="empty">{{ data.roles.length ? '这个范围还没有角色' : '还没有角色，点右上角新建' }}</div>
+        <div v-if="!visibleRoles.length" class="empty">
+          <template v-if="filtersActive">没有符合筛选条件的角色<br /><button class="mini-link" type="button" @click="clearFilters">清除筛选</button></template>
+          <template v-else>{{ orgRoles.length ? '这个范围还没有角色' : '还没有角色，点右上角新建' }}</template>
+        </div>
+        <ListPager :page="page" :pages="pages" :total="visibleRoles.length" :page-size="PAGE_SIZE" @update:page="page = $event" />
       </section>
     </div>
   </div>
@@ -385,3 +452,10 @@ function onWorkSaved(): void {
     @select="onMenu"
   />
 </template>
+
+<style scoped>
+.role-presence { display: inline-flex; align-items: center; gap: 4px; color: #15803d; font-size: 11px; }
+.role-presence i { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; }
+.role-presence.off { color: var(--faint); }
+.role-presence.off i { background: var(--faint); }
+</style>

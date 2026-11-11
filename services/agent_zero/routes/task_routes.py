@@ -52,7 +52,8 @@ def create_conversation(body: CreateConvBody):
         role_id = body.role_id or GLOBAL_ROLE_ID
     else:
         role_id = body.role_id or DEFAULT_ROLE_ID
-    # 工作区由角色 / 群组绑定决定；显式 workspace_id 仍优先（后台任务等内部入口）。
+    # 工作区由角色 / 群组绑定决定；显式 workspace_id 优先（会话 / 后台任务等入口），
+    # 并标记为本会话手动指定，之后切换角色 / 群组不覆盖。
     ws_id = (str(body.workspace_id or "").strip()
              or conversation.workspace_for_conversation(role_id, body.team_id)
              or DEFAULT_WORKSPACE_ID)
@@ -65,6 +66,8 @@ def create_conversation(body: CreateConvBody):
             bound_workspace_id=body.bound_workspace_id,
             model_code=body.model_code, thinking_level=body.thinking_level,
             permission_mode=body.permission_mode, run_mode=body.run_mode,
+            workspace_custom=bool(str(body.workspace_id or "").strip()
+                                  or str(body.bound_workspace_id or "").strip()),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -73,6 +76,83 @@ def create_conversation(body: CreateConvBody):
 
 class ConversationTitleBody(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
+
+
+class ConversationParticipantsBody(BaseModel):
+    role_ids: List[str] = Field(default_factory=list, max_length=12)
+    leader_id: Optional[str] = Field(None, max_length=120)
+
+
+@router.put("/conversations/{conv_id}/participants")
+def set_conversation_participants(conv_id: str, body: ConversationParticipantsBody):
+    """Set conversation-local participants without modifying a shared legacy team."""
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+    from services.agent_zero.services import team_service
+
+    conv = conversation.get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    if conv.get("zone") == conversation.GLOBAL_AGENT_ZONE:
+        raise HTTPException(status_code=400, detail="管理会话不能添加参与角色")
+    old_team = team_service.get_team(str(conv.get("team_id") or "")) or {}
+    leader_id = (str(body.leader_id or "").strip()
+                 or str((old_team.get("leader") or {}).get("id") or "")
+                 or str(conv.get("role_id") or DEFAULT_ROLE_ID))
+    leader = zero_store.get_role(leader_id) or zero_store.get_role(DEFAULT_ROLE_ID)
+    if not leader:
+        raise HTTPException(status_code=400, detail="会话主持角色不存在")
+    if leader_id == GLOBAL_ROLE_ID and conv.get("zone") != conversation.GLOBAL_AGENT_ZONE:
+        raise HTTPException(status_code=400, detail="AtlasX 全局角色只能用于全局 Agent")
+    if str(leader.get("scope") or "") == "temporary" \
+            and str(leader.get("session_id") or "") != conv_id:
+        raise HTTPException(status_code=400, detail="临时角色不属于当前会话")
+    role_ids = list(dict.fromkeys(str(r).strip() for r in body.role_ids if str(r).strip()))
+    members = []
+    for role_id in role_ids:
+        role = zero_store.get_role(role_id)
+        if not role or role_id == GLOBAL_ROLE_ID:
+            raise HTTPException(status_code=400, detail=f"角色不存在: {role_id}")
+        if role.get("scope") == "temporary" and role.get("session_id") != conv_id:
+            raise HTTPException(status_code=400, detail="不能使用其他会话的临时角色")
+        if role_id != str(leader.get("id")):
+            members.append({"id": role_id})
+
+    # 主持角色可以随参与角色一起调整：直接写回会话，私有参与团队同步 leader。
+    if str(conv.get("role_id") or "") != str(leader.get("id") or ""):
+        SessionLocal = get_session_local()
+        with SessionLocal() as db:
+            db.execute(
+                text("UPDATE conversations SET role_id = :rid, "
+                     "updated_at = datetime('now','localtime') WHERE id = :id"),
+                {"rid": str(leader.get("id")), "id": conv_id},
+            )
+            db.commit()
+
+    workspace_id = (str(conv.get("workspace_id") or "")
+                    or str(leader.get("group_id") or "")
+                    or DEFAULT_WORKSPACE_ID)
+    current_team_id = str(conv.get("team_id") or "")
+    private_prefix = f"participants-{conv_id}-"
+    existing = (old_team if current_team_id.startswith(private_prefix)
+                and team_service.bound_conversation_ids(current_team_id) == [conv_id] else None)
+    team_id = current_team_id if existing else f"{private_prefix}{zero_store.new_id('set')}"
+    if existing:
+        team = team_service.update_team(
+            team_id, leader={"id": leader["id"]}, members=members,
+            workspace_id=workspace_id)
+    else:
+        team = team_service.create_team(
+            workspace_id,
+            str(conv.get("title") or "会话参与角色"),
+            leader={"id": leader["id"]}, members=members,
+            mode=str(old_team.get("mode") or "orchestrate"), team_id=team_id,
+        )
+    if current_team_id != team_id:
+        team_service.bind_team(conv_id, team_id)
+    conversation.sync_conversation_workspace(conv_id)
+    return {"code": 0, "data": {"conversation": conversation.get_conversation(conv_id), "team": team}}
 
 
 @router.patch("/conversations/{conv_id}")
@@ -89,7 +169,7 @@ def update_conversation_title(conv_id: str, body: ConversationTitleBody):
 
 
 class ConversationSettingsBody(BaseModel):
-    """会话管理：标题 / 单聊角色 / 群组 / 绑定工作区。
+    """会话管理：标题 / 单聊角色 / 群组 / 工作区。
 
     未出现在请求里的字段保持不变；显式传空字符串表示清空（如 team_id="" 退出群聊）。
     """
@@ -97,6 +177,11 @@ class ConversationSettingsBody(BaseModel):
     title: Optional[str] = Field(None, max_length=200)
     role_id: Optional[str] = Field(None, max_length=80)
     team_id: Optional[str] = Field(None, max_length=80)
+    # 手动指定本会话工作区；传空字符串表示回到角色 / 群组默认工作区。
+    workspace_id: Optional[str] = Field(None, max_length=80)
+    # true = 清除手动指定，重新跟随角色 / 群组（与 workspace_id 同时出现时优先）。
+    workspace_follow: Optional[bool] = None
+    # 旧字段：等价于手动指定 workspace_id。
     bound_workspace_id: Optional[str] = Field(None, max_length=80)
 
 
@@ -167,19 +252,27 @@ def update_conversation_settings(conv_id: str, body: ConversationSettingsBody):
         elif current_team:
             team_service.bind_team(conv_id, None, notice="你已退出群聊")
 
-    if "bound_workspace_id" in fields:
+    role_changed = ("role_id" in fields
+                    and str(body.role_id or "").strip() != str(conv.get("role_id") or ""))
+    team_changed = ("team_id" in fields
+                    and str(body.team_id or "").strip() != str(conv.get("team_id") or ""))
+    if role_changed or team_changed:
+        conversation.sync_conversation_workspace(conv_id)
+
+    # 工作区最后处理：同一次保存里既切角色 / 群组又选工作区时，显式选择优先。
+    follow = ("workspace_follow" in fields and bool(body.workspace_follow))
+    if follow:
+        conversation.sync_conversation_workspace(conv_id, force=True)
+    elif "workspace_id" in fields:
+        try:
+            conversation.set_conversation_workspace(conv_id, body.workspace_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    elif "bound_workspace_id" in fields:
         try:
             conversation.update_bound_workspace(conv_id, body.bound_workspace_id or None)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-
-    if "role_id" in fields or "team_id" in fields:
-        role_changed = ("role_id" in fields
-                        and str(body.role_id or "").strip() != str(conv.get("role_id") or ""))
-        team_changed = ("team_id" in fields
-                        and str(body.team_id or "").strip() != str(conv.get("team_id") or ""))
-        if role_changed or team_changed:
-            conversation.sync_conversation_workspace(conv_id)
 
     updated = conversation.get_conversation(conv_id) or conv
     updated["created_at"] = str(updated.get("created_at") or "")
@@ -773,11 +866,25 @@ def get_conversation(conv_id: str):
     conv["created_at"] = str(conv.get("created_at") or "")
     conv["updated_at"] = str(conv.get("updated_at") or "")
     conv["vision"] = conversation.chat_vision_for(conv)
+    usage = conversation.usage_total(conv_id)
     return {"code": 0, "data": {
         **conv,
         "messages": conversation.list_messages(conv_id),
-        "usage_total": conversation.usage_total(conv_id),
+        # usage 与 usage_total 同源：新前端读 usage，旧字段保留兼容。
+        "usage": usage,
+        "usage_total": usage,
     }}
+
+
+@router.get("/conversations/{conv_id}/usage")
+def get_conversation_usage(conv_id: str):
+    """会话 token 用量（输入 / 输出 / 速度 / 缓存 / 上下文占用）。
+
+    轻量接口：不返回消息转录，会话管理抽屉与聊天头部轮询都不必拉整段历史。
+    """
+    if not conversation.get_conversation(conv_id):
+        raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    return {"code": 0, "data": conversation.usage_total(conv_id)}
 
 
 @router.get("/conversations/{conv_id}/graph")
@@ -1030,15 +1137,19 @@ class BoundWorkspaceBody(BaseModel):
 
 @router.patch("/conversations/{conv_id}/workspace")
 def set_conversation_workspace(conv_id: str, body: BoundWorkspaceBody):
-    """会话级工作区绑定（空 = 纯聊天）；工作区只提供文件上下文。"""
+    """切换会话工作区（空 = 回到角色 / 群组的默认工作区）。"""
     if not conversation.get_conversation(conv_id):
         raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
     try:
-        conv = conversation.update_bound_workspace(conv_id, body.workspace_id)
+        conv = conversation.set_conversation_workspace(
+            conv_id, body.workspace_id,
+            follow=not str(body.workspace_id or "").strip())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"code": 0, "data": {"id": conv_id,
-                                "bound_workspace_id": (conv or {}).get("bound_workspace_id") or ""}}
+    data = dict(conv or {})
+    # 兼容旧前端：bound_workspace_id 已是历史字段，空值统一返回 ""。
+    data["bound_workspace_id"] = data.get("bound_workspace_id") or ""
+    return {"code": 0, "data": data}
 
 
 @router.post("/conversations/{conv_id}/read")
@@ -1193,7 +1304,21 @@ async def run_stream(run_id: str, since: int = 0, interval: float = 0.5):
             backlog = run_service.list_events(run_id, since=cursor, limit=1000)
             if backlog:
                 cursor = int(backlog[-1].get("_seq") or cursor)
-                yield _frame(run_service.get_run(run_id), backlog, cursor)
+                # 补齐历史时分帧下发（每帧最多 120 条）：整段重放（刷新、事后打开
+                # 会话、群聊里好几个角色轮流说）如果塞进一帧，前端会在同一个 tick
+                # 里渲染上千段内容——观感就是「等半天之后疯狂输出」，主线程也跟着卡。
+                # 分帧后浏览器能边收边画，并且按「发言角色」分组渲染。
+                _replay = run_service.get_run(run_id)
+                for _i in range(0, len(backlog), 120):
+                    part = backlog[_i:_i + 120]
+                    # 每帧的 last_seq 必须是**这一帧**的末尾（而不是整段历史的末尾）：
+                    # 前端用 last_seq 推进游标，一帧就推到末尾会让后续分帧被整段跳过。
+                    yield _frame(_replay if _i == 0 else None, part,
+                                 int(part[-1].get("_seq") or cursor))
+                    if _i + 120 < len(backlog):
+                        # 让出一帧：浏览器才有机会把上一块画出来，而不是把
+                        # 上千条事件攒到同一个渲染周期里一次性铺开。
+                        await asyncio.sleep(0.01)
             # **已到终态就别再挂着连接**：补齐时 run 可能已经结束（刷新页面 /
             # 事后打开会话 / 排队消息刚跑完）。过去的实现只在 while 里、且只在
             # 「一次轮询没读到事件」的分支才发 run_end——若 run 在补齐阶段就已
@@ -1371,7 +1496,7 @@ def stop_process(process_id: str, kind: str = "tool"):
 # ── 危险操作审批 ────────────────────────────────────────────────────────
 
 class ApprovalBody(BaseModel):
-    action: str = Field(..., description="approve_once | approve_session | approve_always | deny")
+    action: str = Field(..., description="approve_once | approve_session | approve_role | approve_team | approve_always | deny")
 
 
 @router.get("/conversations/{conv_id}/approvals")
@@ -1442,7 +1567,8 @@ async def decide_approval(approval_id: str, body: ApprovalBody):
     from services.agent_zero.task_layer import permissions
 
     action = (body.action or "").strip()
-    if action not in ("approve_once", "approve_session", "approve_always", "deny"):
+    if action not in ("approve_once", "approve_session", "approve_role",
+                      "approve_team", "approve_always", "deny"):
         raise HTTPException(status_code=400, detail=f"非法审批动作: {body.action}")
     try:
         result = permissions.decide_approval(approval_id, action)

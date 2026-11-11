@@ -53,6 +53,7 @@ class RoleUpdateBody(BaseModel):
     model_code: Optional[str] = Field(None, max_length=80)
     scope: Optional[str] = Field(None, pattern="^(persistent|temporary)$")
     session_id: Optional[str] = Field(None, max_length=80)
+    status: Optional[str] = Field(None, pattern="^(online|offline)$")
 
 
 def _public(role: Dict[str, Any],
@@ -72,6 +73,7 @@ def _public(role: Dict[str, Any],
         "expertise": str(role.get("expertise") or ""),
         "avatar": str(role.get("avatar") or ""),
         "tools": tools,
+        "status": str(envelope.get("status") or "online"),
         "model_code": str(role.get("model_code") or ""),
         "scope": str(role.get("scope") or "persistent"),
         "source": str(role.get("source") or "user"),
@@ -120,6 +122,8 @@ def _envelope(tools: Optional[List[str]], current: Optional[Dict[str, Any]]) -> 
     except Exception:
         picked = [str(t) for t in tools if str(t).strip()]
     env = dict(zero_store.DEFAULT_ENVELOPE)
+    if current and isinstance(current.get("envelope"), dict) and "status" in current["envelope"]:
+        env["status"] = current["envelope"]["status"]
     if picked:
         env["tools"] = picked
     return env
@@ -199,6 +203,9 @@ def update_role(role_id: str, body: RoleUpdateBody):
         if "department_id" in fields_set else None)
     workspace_id = (_workspace_value(body.workspace_id)
                     if "workspace_id" in fields_set else current.get("group_id"))
+    envelope = _envelope(body.tools, current)
+    if body.status is not None:
+        envelope["status"] = body.status
     role = zero_store.upsert_role({
         "id": role_id,
         "group_id": workspace_id or None,
@@ -209,7 +216,7 @@ def update_role(role_id: str, body: RoleUpdateBody):
         "expertise": (body.expertise if body.expertise is not None
                       else current.get("expertise")),
         "avatar": body.avatar if body.avatar is not None else current.get("avatar"),
-        "envelope": _envelope(body.tools, current),
+        "envelope": envelope,
         "model_code": (body.model_code if body.model_code is not None
                        else current.get("model_code")),
         "scope": scope,

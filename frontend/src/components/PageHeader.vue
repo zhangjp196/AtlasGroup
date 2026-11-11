@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ElBreadcrumb, ElBreadcrumbItem, ElTag } from 'element-plus'
 import { computed } from 'vue'
 import { hueOf } from '@/lib/format'
 
@@ -11,9 +12,9 @@ const props = defineProps<{
 const MARKS: Record<string, string> = {
   工单: '工',
   会话: '会',
+  定时: '时',
   工作区: '区',
   组织与角色: '组',
-  群组: '群',
   设置: '设',
   关于: '关',
 }

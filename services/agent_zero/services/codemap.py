@@ -49,7 +49,11 @@ MAX_FILES = 800
 MAX_DEPTH = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 SYMBOLS_PER_FILE = 12
-SCAN_TTL_S = 3.0
+# 增量扫描的最小间隔（秒）。这段扫描是**同步**的，挂在每一轮系统提示拼装前，
+# 群聊里每个发言角色还会各来一次；以前 3s 等于「几乎每轮都重扫整个工作区」，
+# 大仓库能吃掉几秒的首字延迟。写文件 / 外部变更都会显式 invalidate()，所以
+# 拉长到 30s 只会让「外部编辑器改了文件」最多晚半分钟反映在提示里。
+SCAN_TTL_S = 30.0
 
 _store = GdagStore()
 # ws_id -> {"entries": {path: entry}, "sigs": {path: sig},

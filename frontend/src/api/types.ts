@@ -3,6 +3,26 @@ export interface ListResponse<T> {
   total?: number
 }
 
+/** token 用量：会话 / 工单 / 任务 / 单条回复统一用这个口径。 */
+export interface TokenUsage {
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+  cached_tokens?: number
+  cache_rate?: number
+  llm_ms?: number
+  /** 生成速度（输出 token / 秒） */
+  speed?: number
+  /** 历史字段别名：全局用量统计里叫 tokens_per_second */
+  tokens_per_second?: number
+  rounds?: number
+  turns?: number
+  avg_tokens_per_turn?: number
+  last_prompt_tokens?: number
+  max_context_tokens?: number
+  [key: string]: unknown
+}
+
 export interface Workspace {
   id: string
   name: string
@@ -24,6 +44,8 @@ export interface Conversation {
   id: string
   title?: string
   workspace_id?: string
+  /** true = 本会话手动指定工作区，切换主持角色不会覆盖 */
+  workspace_custom?: boolean
   bound_workspace_id?: string
   team_id?: string
   role_id?: string
@@ -37,6 +59,8 @@ export interface Conversation {
   unread?: boolean
   unread_count?: number
   running_count?: number
+  usage?: TokenUsage
+  usage_total?: TokenUsage
   last_read_at?: string
   last_message?: string
   message_count?: number
@@ -91,9 +115,11 @@ export interface Message {
   task_id?: string
   task_title?: string
   task_status?: string
+  task_continued?: boolean
   summary?: string
   attachments?: Attachment[]
   duration_ms?: number
+  usage?: TokenUsage
   error?: string
   interrupted?: boolean
   created_at?: string
@@ -116,6 +142,7 @@ export interface Role {
   session_id?: string
   created_at?: string
   system?: boolean
+  status?: 'online' | 'offline'
 }
 
 export interface TeamMember {
@@ -163,6 +190,9 @@ export interface ModelProfile {
   thinking_levels?: string[]
   context_window?: number
   max_tokens?: number
+  /** 同一模型档案允许同时在途的 LLM 请求数（默认 2） */
+  concurrency?: number
+  effective_concurrency?: number
   subscription_id?: string
   channel_id?: string
   channel_name?: string
@@ -224,6 +254,7 @@ export interface AppInfo {
   }
   limits?: {
     max_concurrent_runs?: number
+    max_parallel_member_runs?: number
     context_compress_percent?: number
     autonomous_run_max_seconds?: number
   }
@@ -269,6 +300,12 @@ export interface Approval {
   risk?: 'low' | 'medium' | 'high' | string
   note?: string
   status?: string
+  role_id?: string
+  role_name?: string
+  team_id?: string
+  team_name?: string
+  can_grant_role?: boolean
+  can_grant_team?: boolean
 }
 
 export interface Question {
@@ -298,10 +335,43 @@ export interface WorkItem {
   attention_reason?: string
   result_summary?: string
   run_id?: string
+  usage?: TokenUsage
   finished_at?: string
   created_at?: string
   updated_at?: string
   [key: string]: unknown
+}
+
+export interface ScheduledTask {
+  id: string
+  title: string
+  prompt: string
+  workspace_id?: string
+  role_id?: string
+  conversation_id?: string
+  trigger_mode: 'scheduled' | 'smart' | 'manual' | string
+  schedule_kind: 'once' | 'interval' | 'daily' | 'weekly' | 'smart' | string
+  schedule: Record<string, unknown>
+  condition?: string
+  status: 'active' | 'paused' | 'done' | string
+  run_mode?: string
+  auto_execute?: boolean
+  max_runs?: number
+  run_count?: number
+  last_run_at?: string
+  last_status?: string
+  last_run_id?: string
+  last_conversation_id?: string
+  last_result?: string
+  next_run_at?: string
+  meta?: Record<string, unknown>
+  created_at?: string
+  updated_at?: string
+}
+
+export interface ScheduleListResponse {
+  items: ScheduledTask[]
+  stats?: { total?: number; active?: number; smart?: number; paused?: number }
 }
 
 export interface AgentTool {
@@ -388,6 +458,7 @@ export interface TeamTaskMember {
   run_id?: string
   run_status?: string
   error?: string
+  usage?: TokenUsage
   started_at?: string
   finished_at?: string
 }
@@ -402,6 +473,7 @@ export interface TeamTask {
   goal?: string
   status?: string
   members?: TeamTaskMember[]
+  usage?: TokenUsage
   active_runs?: number
   done_members?: number
   total_members?: number
@@ -432,6 +504,10 @@ export interface McpServer {
   headers?: Record<string, string>
   enabled?: boolean
   installed?: boolean
+  /** 常驻进程：有页面 / 会话状态的服务 */
+  persistent?: boolean
+  /** 只注入模型的工具名（空 = 全部） */
+  tool_allowlist?: string[]
   note?: string
   tools?: number
   tool_names?: string[]
@@ -467,7 +543,19 @@ export interface SlashCommand {
 
 export interface WorkItemsResponse {
   items: WorkItem[]
-  stats?: { open?: number; attention?: number; done?: number; [key: string]: number | undefined }
+  stats?: {
+    open?: number
+    attention?: number
+    done?: number
+    tokens?: number
+    prompt_tokens?: number
+    completion_tokens?: number
+    cached_tokens?: number
+    llm_ms?: number
+    rounds?: number
+    turns?: number
+    [key: string]: number | undefined
+  }
   policy?: Record<string, unknown>
 }
 
@@ -504,6 +592,8 @@ export interface RunEvent {
     args?: unknown
     display?: { diff?: string }
   }
+  usage?: TokenUsage
+  context_tokens?: number
   todo_update?: { items?: Array<{ content: string; status: string }> }
   tool_approval?: Approval
   approval_decided?: { id: string; status?: string }
@@ -517,4 +607,31 @@ export interface RunEvent {
   org_update?: unknown
   role_update?: unknown
   app_update?: unknown
+  schedule_update?: unknown
+}
+
+export interface MagpieSettings {
+  enabled: boolean
+  secrets: boolean
+  pii: boolean
+  paths: boolean
+}
+
+export interface MagpieStats {
+  redacted_total: number
+  by_kind: Record<string, number>
+  since?: string
+}
+
+export interface MagpieStatus {
+  enabled: boolean
+  settings: MagpieSettings
+  stats: MagpieStats
+  categories: Array<{ key: string; label: string }>
+}
+
+export interface MagpieTestResult {
+  masked: string
+  redacted: number
+  by_kind: Record<string, number>
 }

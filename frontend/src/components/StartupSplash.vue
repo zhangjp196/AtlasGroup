@@ -2,7 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { playSound } from '@/lib/sound'
 
-const props = withDefaults(defineProps<{ duration?: number }>(), { duration: 5000 })
+const props = withDefaults(defineProps<{ duration?: number; ready?: boolean }>(), {
+  duration: 5000,
+  ready: false,
+})
 const emit = defineEmits<{ (e: 'done'): void }>()
 
 const progress = ref(0)
@@ -22,6 +25,9 @@ let raf = 0
 let timer = 0
 let leaveTimer = 0
 let started = 0
+// 数据加载完（ready）且动画至少播这么久，就提前收尾：不再固定等满 duration。
+// 这样首屏就绪快时不会白等 5 秒，慢机器上仍然有完整动画兜底。
+const MIN_VISIBLE = 900
 
 function finishNow(): void {
   if (leaving.value) return
@@ -38,6 +44,10 @@ function skip(): void {
 function tick(now: number): void {
   if (!started) started = now
   const elapsed = now - started
+  if (props.ready && elapsed >= MIN_VISIBLE) {
+    finishNow()
+    return
+  }
   const ratio = Math.min(1, elapsed / Math.max(600, props.duration))
   // 前段快、后段慢：观感上“快到了”，又不会空转。
   progress.value = Math.min(100, Math.round((1 - Math.pow(1 - ratio, 1.7)) * 100))

@@ -1,16 +1,18 @@
 <script setup lang="ts">
+import { ElButton, ElCheckbox, ElCheckboxGroup, ElEmpty, ElForm, ElFormItem, ElInput, ElInputNumber, ElMenu, ElMenuItem, ElOption, ElSelect, ElSwitch, ElTag } from 'element-plus'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import SideDrawer from '@/components/SideDrawer.vue'
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api/client'
-import type { HookSummary, McpServer, ModelProfile, PlatformPreset, Skill, SlashCommand, Subscription, ToolItem, Workspace } from '@/api/types'
+import type { HookSummary, MagpieStatus, MagpieTestResult, McpServer, ModelProfile, PlatformPreset, Skill, SlashCommand, Subscription, ToolItem, Workspace } from '@/api/types'
 import { ACTION_COMMANDS } from '@/lib/commands'
 import { playSound } from '@/lib/sound'
 import { THEMES, type ThemeId, type ThemeSchedule } from '@/lib/theme'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 import PageHeader from '@/components/PageHeader.vue'
+import ModelFlow from '@/components/ModelFlow.vue'
 
 const app = useAppStore()
 const data = useDataStore()
@@ -24,20 +26,13 @@ const roleCountByWs = computed(() => {
   }
   return map
 })
-const teamCountByWs = computed(() => {
-  const map = new Map<string, number>()
-  for (const team of data.teams) {
-    const id = String(team.workspace_id || '')
-    if (id) map.set(id, (map.get(id) || 0) + 1)
-  }
-  return map
-})
 
-type Tab = 'models' | 'usage' | 'mcp' | 'skills' | 'commands' | 'appearance' | 'tools' | 'runtime' | 'workspaces'
+type Tab = 'models' | 'usage' | 'magpie' | 'mcp' | 'skills' | 'commands' | 'appearance' | 'tools' | 'runtime' | 'workspaces'
 const tab = ref<Tab>('models')
 const tabs: Array<{ id: Tab; label: string }> = [
   { id: 'models', label: '模型与订阅' },
   { id: 'usage', label: '用量' },
+  { id: 'magpie', label: '本机脱敏' },
   { id: 'mcp', label: 'MCP 服务' },
   { id: 'skills', label: '技能' },
   { id: 'commands', label: '命令与钩子' },
@@ -112,6 +107,88 @@ const usageTotals = computed<UsageTotals>(() => usageSummary.value?.totals || {}
 const usageDaily = computed(() => usage.value?.daily || [])
 const usageMax = computed(() => Math.max(1, ...usageDaily.value.map((day) => Number(day.total_tokens || 0))))
 
+// ── Magpie 本机脱敏 ────────────────────────────────────────
+const magpie = ref<MagpieStatus | null>(null)
+const magpieLoading = ref(false)
+const magpieSaving = ref(false)
+const magpieTesting = ref(false)
+const magpieTestText = ref('联系 alice@example.com，密钥 sk-abcdefghijklmnopqrstuvwxyz123456，路径 /Users/alice/project/a.txt')
+const magpieTestResult = ref<MagpieTestResult | null>(null)
+const magpieForm = reactive({
+  enabled: true,
+  secrets: true,
+  pii: true,
+  paths: true,
+})
+const KIND_LABELS: Record<string, string> = {
+  SECRET: '密钥', JWT: 'JWT', PRIVATEKEY: '私钥', EMAIL: '邮箱',
+  PHONE: '手机号', ID: '身份证', IP: 'IP', PATH: '本机路径',
+}
+
+const magpieRuleCount = computed(() => [
+  magpieForm.secrets, magpieForm.pii, magpieForm.paths,
+].filter(Boolean).length)
+
+function openMagpie(): void {
+  tab.value = 'magpie'
+  if (!magpie.value) void loadMagpie()
+  if (!usage.value) void loadUsage()
+}
+
+function kindSummary(byKind?: Record<string, number>): string {
+  return Object.entries(byKind || {})
+    .filter(([, count]) => Number(count) > 0)
+    .map(([kind, count]) => `${KIND_LABELS[kind] || kind} ${count}`)
+    .join(' · ')
+}
+
+async function loadMagpie(): Promise<void> {
+  magpieLoading.value = true
+  try {
+    magpie.value = await api<MagpieStatus>('/app/magpie')
+    const settings = magpie.value.settings
+    magpieForm.enabled = Boolean(settings?.enabled)
+    magpieForm.secrets = Boolean(settings?.secrets)
+    magpieForm.pii = Boolean(settings?.pii)
+    magpieForm.paths = Boolean(settings?.paths)
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  } finally {
+    magpieLoading.value = false
+  }
+}
+
+async function saveMagpie(): Promise<void> {
+  if (magpieSaving.value) return
+  magpieSaving.value = true
+  try {
+    magpie.value = await api<MagpieStatus>('/app/magpie/settings', {
+      method: 'PUT',
+      body: { ...magpieForm },
+    })
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+    await loadMagpie()
+  } finally {
+    magpieSaving.value = false
+  }
+}
+
+async function testMagpie(): Promise<void> {
+  if (magpieTesting.value) return
+  magpieTesting.value = true
+  try {
+    magpieTestResult.value = await api<MagpieTestResult>('/app/magpie/test', {
+      method: 'POST',
+      body: { text: magpieTestText.value },
+    })
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  } finally {
+    magpieTesting.value = false
+  }
+}
+
 function fmtTokens(value?: number): string {
   const n = Number(value || 0)
   if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(2)} 亿`
@@ -138,22 +215,31 @@ async function loadUsage(): Promise<void> {
   }
 }
 
+let quotaRequestSeq = 0
+
 async function loadQuota(force = false): Promise<void> {
-  if (!supportsQuota.value) {
+  const sub = selectedSubscription.value
+  const seq = ++quotaRequestSeq
+  if (!sub || !supportsQuota.value) {
     quota.value = null
     quotaError.value = ''
+    quotaLoading.value = false
     return
   }
   quotaLoading.value = true
   quotaError.value = ''
   try {
-    const code = encodeURIComponent(quotaModelCode.value)
-    quota.value = await api<QuotaData>(`/app/models/usage?code=${code}${force ? '&refresh=true' : ''}`)
+    const params = new URLSearchParams({ subscription_id: sub.id })
+    if (force) params.set('refresh', 'true')
+    const result = await api<QuotaData>(`/app/models/usage?${params.toString()}`)
+    if (seq !== quotaRequestSeq) return
+    quota.value = result
   } catch (error) {
+    if (seq !== quotaRequestSeq) return
     quota.value = null
     quotaError.value = error instanceof Error ? error.message : String(error)
   } finally {
-    quotaLoading.value = false
+    if (seq === quotaRequestSeq) quotaLoading.value = false
   }
 }
 
@@ -172,6 +258,42 @@ function formatReset(seconds?: number | null): string {
   return `${Math.max(1, Math.floor(n / 60))} 分钟后重置`
 }
 
+function formatMoney(value?: number | null): string {
+  const n = Number(value || 0)
+  return `$${n.toFixed(2)}`
+}
+
+function formatCredits(credits?: QuotaCredits | null): string {
+  if (!credits) return ''
+  const remaining = formatMoney(credits.remaining)
+  const limit = Number(credits.limit || 0)
+  return limit > 0 ? `${remaining} / ${formatMoney(limit)}` : remaining
+}
+
+function formatTokens(value?: number | null): string {
+  const n = Number(value || 0)
+  if (!n) return '0'
+  if (n >= 100000000) return `${(n / 100000000).toFixed(2)} 亿`
+  if (n >= 10000) return `${(n / 10000).toFixed(1)} 万`
+  return String(Math.round(n))
+}
+
+function formatContextWindow(value?: number | null): string {
+  const n = Number(value || 0)
+  if (!n) return ''
+  if (n >= 1000000) return `${Number((n / 1000000).toFixed(1))}M 上下文`
+  if (n >= 1000) return `${Math.round(n / 1000)}K 上下文`
+  return `${n} 上下文`
+}
+
+function subscriptionQuotaLabel(sub: Subscription): string {
+  const provider = String(sub.provider || '')
+  const base = String(sub.base_url || '')
+  if (provider === 'command-code' || /api\.commandcode\.ai/i.test(base)) return 'Command Code 额度可查'
+  if (provider === 'opencode-go' || /opencode\.ai\/inference\/go/i.test(base)) return 'Go 额度可查'
+  return ''
+}
+
 function modelPayload(clearSubId = ''): Array<Record<string, unknown>> {
   return data.models
     .filter((item) => item.code !== 'default')
@@ -188,6 +310,7 @@ function modelPayload(clearSubId = ''): Array<Record<string, unknown>> {
         thinking_levels: item.thinking_levels,
         context_window: item.context_window,
         max_tokens: item.max_tokens,
+        concurrency: item.concurrency,
         subscription_id: belongs ? undefined : item.subscription_id,
         channel_id: belongs ? undefined : item.channel_id,
         channel_name: belongs ? undefined : item.channel_name,
@@ -212,7 +335,7 @@ async function deleteSubscription(sub: Subscription): Promise<void> {
   const inUse = data.models.some((model) => model.code === data.activeModel
     && (model.subscription_id || model.channel_id || '') === sub.id)
   if (inUse) {
-    app.toast('当前默认模型属于这个订阅，请先切换默认模型再删除', 'bad', 4500)
+    app.toast('当前系统模型属于这个订阅，请先切换系统模型再删除', 'bad', 4500)
     return
   }
   if (!window.confirm(`删除订阅「${sub.name || sub.id}」？它下面的模型会保留，但会解除订阅绑定。`)) return
@@ -281,6 +404,7 @@ function setSoundEnabled(value: boolean): void {
 }
 const mcpServers = ref<McpServer[]>([])
 const mcpNpm = ref(true)
+
 const PACK_LABELS: Record<string, string> = {
   fs: '文件',
   net: '联网与计算',
@@ -349,7 +473,7 @@ const itemMenuItems = computed<ContextMenuItem[]>(() => {
   if (itemMenu.kind === 'model') {
     return [
       { label: '编辑模型', action: 'edit' },
-      { label: '设为默认', action: 'activate', disabled: itemMenu.enabled },
+      { label: '设为系统模型', action: 'activate', disabled: itemMenu.enabled },
       { label: '复制模型 code', action: 'copy' },
       { label: '', action: '', separator: true },
       { label: '删除模型', action: 'delete', danger: true, disabled: itemMenu.enabled },
@@ -429,10 +553,48 @@ interface QuotaWindow {
   status?: string
 }
 
+interface QuotaCredits {
+  monthly?: number
+  purchased?: number
+  free?: number
+  remaining?: number
+  limit?: number | null
+  percent?: number | null
+}
+
+interface QuotaPlan {
+  id?: string
+  name?: string
+  status?: string
+  period_start?: string
+  period_end?: string
+}
+
+interface QuotaSummary {
+  cost?: number
+  requests?: number
+  tokens?: number
+  tokens_in?: number
+  tokens_out?: number
+  period_basis?: string
+}
+
 interface QuotaData {
   provider?: string
   windows?: Record<string, QuotaWindow>
+  credits?: QuotaCredits
+  plan?: QuotaPlan
+  summary?: QuotaSummary
   subscribed_at?: string
+}
+
+interface DiscoveredModel {
+  id: string
+  name?: string
+  protocol?: string
+  supported?: boolean
+  note?: string
+  context_window?: number
 }
 
 const quota = ref<QuotaData | null>(null)
@@ -457,14 +619,29 @@ const subscriptionModels = computed(() => {
     .filter((model) => model.code !== 'default' && (model.subscription_id || model.channel_id || '') === id)
     .filter((model) => !q || `${model.name || ''} ${model.code} ${model.model || ''}`.toLowerCase().includes(q))
 })
-const unassignedModels = computed(() => data.models.filter((model) => model.code !== 'default' && !(model.subscription_id || model.channel_id)))
-const quotaModelCode = computed(() => subscriptionModels.value[0]?.code || '')
-const supportsQuota = computed(() => {
+const isOpencodeGoSubscription = computed(() => {
   const sub = selectedSubscription.value
-  if (!sub || !quotaModelCode.value) return false
+  if (!sub) return false
   return sub.provider === 'opencode-go'
     || /opencode\.ai\/inference\/go/i.test(String(sub.base_url || ''))
+})
+const isCommandCodeSubscription = computed(() => {
+  const sub = selectedSubscription.value
+  if (!sub) return false
+  return sub.provider === 'command-code'
+    || /api\.commandcode\.ai/i.test(String(sub.base_url || ''))
+})
+const supportsQuota = computed(() => {
+  const sub = selectedSubscription.value
+  if (!sub) return false
+  return isOpencodeGoSubscription.value
+    || isCommandCodeSubscription.value
     || Boolean((sub as Record<string, unknown>).supports_quota)
+})
+const quotaTitle = computed(() => {
+  if (isCommandCodeSubscription.value) return 'Command Code 额度'
+  if (isOpencodeGoSubscription.value) return 'OpenCode Go 额度'
+  return '套餐额度'
 })
 const quotaEntries = computed(() => {
   const windows = quota.value?.windows || {}
@@ -513,13 +690,82 @@ const hookForm = reactive({ event: 'PreToolUse', command: '', matcher: '*', time
 const subForm = reactive({ name: '', provider: '', protocol: 'openai-chat', base_url: '', anthropic_base_url: '', api_key: '', models_url: '' })
 const modelForm = reactive({
   code: '', name: '', model: '', subscription_id: '', protocol: 'openai-chat',
-  context_window: 0, max_tokens: 0, vision: false,
+  context_window: 0, max_tokens: 0, concurrency: 2, vision: false,
   thinking_levels: [] as string[],
 })
 const discoverOpen = ref(false)
 const discovering = ref(false)
-const discoveredModels = ref<Array<{ id: string; protocol?: string; supported?: boolean; note?: string }>>([])
+const discoveredModels = ref<DiscoveredModel[]>([])
 const discoveredSelected = ref<string[]>([])
+const discoverQuery = ref('')
+const discoverProtocol = ref('all')
+const discoverHideAdded = ref(true)
+
+const existingModelCodes = computed(() => new Set(data.models.map((model) => model.code)))
+const discoveredAddable = computed(() => discoveredModels.value.filter(
+  (item) => item.supported !== false && !existingModelCodes.value.has(item.id),
+))
+const discoverProtocolOptions = computed(() => {
+  const count = (protocol: string) => discoveredModels.value.filter(
+    (item) => (item.protocol || 'openai-chat') === protocol,
+  ).length
+  return [
+    { value: 'all', label: `全部协议 · ${discoveredModels.value.length}` },
+    { value: 'anthropic', label: `Anthropic Messages · ${count('anthropic')}` },
+    { value: 'openai-chat', label: `OpenAI Chat · ${count('openai-chat')}` },
+    { value: 'openai-response', label: `OpenAI Responses · ${count('openai-response')}` },
+  ]
+})
+const filteredDiscoveredModels = computed(() => {
+  const q = discoverQuery.value.trim().toLowerCase()
+  return discoveredModels.value.filter((item) => {
+    if (discoverProtocol.value !== 'all'
+      && (item.protocol || 'openai-chat') !== discoverProtocol.value) return false
+    if (discoverHideAdded.value && existingModelCodes.value.has(item.id)) return false
+    if (!q) return true
+    return `${item.name || ''} ${item.id}`.toLowerCase().includes(q)
+  })
+})
+const discoverableModels = computed(() => filteredDiscoveredModels.value.filter(
+  (item) => item.supported !== false && !existingModelCodes.value.has(item.id),
+))
+const discoverSelectedCount = computed(() => discoveredAddable.value.filter(
+  (item) => discoveredSelected.value.includes(item.id),
+).length)
+const discoverAllSelected = computed(() => discoverableModels.value.length > 0
+  && discoverableModels.value.every((item) => discoveredSelected.value.includes(item.id)))
+const discoverPartiallySelected = computed(() => !discoverAllSelected.value
+  && discoverableModels.value.some((item) => discoveredSelected.value.includes(item.id)))
+
+function toggleDiscoverAll(checked: boolean | string | number): void {
+  const ids = discoverableModels.value.map((item) => item.id)
+  if (checked) {
+    discoveredSelected.value = Array.from(new Set([...discoveredSelected.value, ...ids]))
+  } else {
+    discoveredSelected.value = discoveredSelected.value.filter((id) => !ids.includes(id))
+  }
+}
+
+function clearDiscoverSelection(): void {
+  discoveredSelected.value = []
+}
+
+function discoverMeta(item: DiscoveredModel): string {
+  const parts: string[] = []
+  if (item.name && item.name !== item.id) parts.push(item.id)
+  if (item.context_window) parts.push(formatContextWindow(item.context_window))
+  if (item.note) parts.push(item.note)
+  return parts.join(' · ')
+}
+
+const discoveredEmptyHint = computed(() => {
+  if (discoveredAddable.value.length) return '没有匹配的模型；清空搜索或切换协议筛选试试。'
+  if (discoveredModels.value.length
+    && discoveredModels.value.every((item) => existingModelCodes.value.has(item.id))) {
+    return '这个端点返回的模型都已添加。'
+  }
+  return '当前筛选下没有可添加的模型。'
+})
 
 onMounted(async () => {
   await Promise.all([data.loadAll(), data.loadInfo()])
@@ -610,12 +856,20 @@ function watchTab(id: string | number): void {
   const next = String(id) as Tab
   tab.value = next
   if (['mcp', 'skills', 'commands'].includes(next) && !legacyLoading.value) void loadLegacy()
-  if (next === 'usage' && !usage.value) void loadUsage()
+  if (next === 'usage') {
+    if (!usage.value) void loadUsage()
+    if (!magpie.value) void loadMagpie()
+  }
+  if (next === 'magpie') {
+    if (!magpie.value) void loadMagpie()
+    if (!usage.value) void loadUsage()
+  }
 }
 
-const PLATFORM_GROUPS = ['custom', 'opencode', 'aggregator', 'local', 'official'] as const
+const PLATFORM_GROUPS = ['custom', 'commandcode', 'opencode', 'aggregator', 'local', 'official'] as const
 const PLATFORM_LABELS: Record<string, string> = {
   custom: '自定义',
+  commandcode: 'COMMAND CODE',
   opencode: 'OPENCODE',
   aggregator: '聚合平台',
   local: '本地网关',
@@ -699,6 +953,7 @@ function openAdd(kind: AddKind): void {
     modelForm.protocol = 'openai-chat'
     modelForm.context_window = 0
     modelForm.max_tokens = 0
+    modelForm.concurrency = 2
     modelForm.vision = false
     modelForm.thinking_levels = []
   }
@@ -713,6 +968,7 @@ function openEditModel(model: ModelProfile): void {
   modelForm.protocol = model.protocol || 'openai-chat'
   modelForm.context_window = Number(model.context_window || 0)
   modelForm.max_tokens = Number(model.max_tokens || 0)
+  modelForm.concurrency = Number(model.concurrency || 2)
   modelForm.vision = Boolean(model.vision)
   modelForm.thinking_levels = [...(model.thinking_levels || [])]
   addKind.value = 'model'
@@ -778,6 +1034,8 @@ async function saveAdd(): Promise<void> {
       await data.loadAll()
       app.toast(editingSubId.value ? '订阅已更新' : '订阅已添加')
       editingSubId.value = ''
+      // 订阅的 Key / 端点可能刚改过，额度立即按新配置重查。
+      void loadQuota(true)
     } else if (kind === 'model') {
       const code = modelForm.code.trim()
       if (!code) throw new Error('模型 code 不能为空')
@@ -796,6 +1054,7 @@ async function saveAdd(): Promise<void> {
           thinking_levels: item.thinking_levels,
           context_window: item.context_window,
           max_tokens: item.max_tokens,
+          concurrency: item.concurrency,
           subscription_id: item.subscription_id,
           channel_id: item.channel_id,
           channel_name: item.channel_name,
@@ -808,6 +1067,7 @@ async function saveAdd(): Promise<void> {
         protocol: modelForm.protocol,
         context_window: modelForm.context_window || undefined,
         max_tokens: modelForm.max_tokens || undefined,
+        concurrency: modelForm.concurrency || 2,
         vision: modelForm.vision,
         thinking_levels: modelForm.thinking_levels,
         subscription_id: modelForm.subscription_id || undefined,
@@ -846,12 +1106,15 @@ async function discoverModels(): Promise<void> {
   if (!sub) return
   discovering.value = true
   try {
-    const out = await api<{ models: Array<{ id: string; protocol?: string; supported?: boolean; note?: string }> }>(
+    const out = await api<{ models: DiscoveredModel[] }>(
       '/app/models/discover',
-      { method: 'POST', body: { base_url: sub.base_url || '', api_key: sub.api_key || '', code: data.activeModel || '' } },
+      { method: 'POST', body: { subscription_id: sub.id, base_url: sub.base_url || '', api_key: sub.api_key || '', code: data.activeModel || '' } },
     )
     discoveredModels.value = out.models || []
-    discoveredSelected.value = discoveredModels.value.map((item) => item.id)
+    discoveredSelected.value = []
+    discoverQuery.value = ''
+    discoverProtocol.value = 'all'
+    discoverHideAdded.value = true
     discoverOpen.value = true
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad', 5000)
@@ -864,9 +1127,13 @@ async function addDiscovered(): Promise<void> {
   const sub = selectedSubscription.value
   if (!sub) return
   const existing = new Set(data.models.map((item) => item.code))
-  const picked = discoveredModels.value.filter((item) => discoveredSelected.value.includes(item.id) && !existing.has(item.id))
+  const picked = discoveredModels.value.filter((item) => (
+    discoveredSelected.value.includes(item.id)
+    && item.supported !== false
+    && !existing.has(item.id)
+  ))
   if (!picked.length) {
-    app.toast('没有可添加的新模型')
+    app.toast('选中的模型都已添加或暂不支持，请重新勾选')
     return
   }
   const models: ModelProfile[] = data.models
@@ -882,6 +1149,7 @@ async function addDiscovered(): Promise<void> {
       thinking_levels: item.thinking_levels,
       context_window: item.context_window,
       max_tokens: item.max_tokens,
+      concurrency: item.concurrency,
       subscription_id: item.subscription_id,
       channel_id: item.channel_id,
       channel_name: item.channel_name,
@@ -889,9 +1157,10 @@ async function addDiscovered(): Promise<void> {
   for (const item of picked) {
     models.push({
       code: item.id,
-      name: item.id,
+      name: item.name || item.id,
       model: item.id,
       protocol: item.protocol || 'openai-chat',
+      context_window: item.context_window || undefined,
       vision: false,
       subscription_id: sub.id,
       channel_id: sub.id,
@@ -910,7 +1179,7 @@ async function addDiscovered(): Promise<void> {
 
 async function removeModel(model: ModelProfile): Promise<void> {
   if (data.activeModel === model.code) {
-    app.toast('当前默认模型不能删除，请先切换默认模型', 'bad')
+    app.toast('当前系统模型不能删除，请先切换系统模型', 'bad')
     return
   }
   if (!window.confirm(`删除模型「${model.name || model.code}」？`)) return
@@ -928,6 +1197,7 @@ async function removeModel(model: ModelProfile): Promise<void> {
         thinking_levels: item.thinking_levels,
         context_window: item.context_window,
         max_tokens: item.max_tokens,
+        concurrency: item.concurrency,
         subscription_id: item.subscription_id,
         channel_id: item.channel_id,
         channel_name: item.channel_name,
@@ -943,7 +1213,7 @@ async function removeModel(model: ModelProfile): Promise<void> {
 async function activate(code: string): Promise<void> {
   try {
     await data.activateModel(code)
-    app.toast('默认模型已切换')
+    app.toast('系统模型已切换')
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
   }
@@ -1018,7 +1288,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
                     <el-tag v-if="data.activeModel && data.models.find((m) => m.code === data.activeModel)?.subscription_id === sub.id" size="small" type="success">当前</el-tag>
                   </span>
                   <small>{{ sub.provider || sub.base_url || '未配置端点' }}</small>
-                  <small v-if="sub.provider === 'opencode-go'" style="color:var(--accent-ink)">Go 额度可查</small>
+                  <small v-if="subscriptionQuotaLabel(sub)" style="color:var(--accent-ink)">{{ subscriptionQuotaLabel(sub) }}</small>
                   <small>{{ data.models.filter((m) => m.code !== 'default' && (m.subscription_id || m.channel_id) === sub.id).length }} 个模型</small>
                 </span>
                 <span class="sub-check">{{ selectedSubscriptionId === sub.id ? '✓' : '' }}</span>
@@ -1046,12 +1316,25 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
 
             <div v-if="supportsQuota" class="quota-card">
               <div class="quota-head">
-                <b>OpenCode Go 额度</b>
-                <span>{{ quotaLoading ? '刷新中…' : (quota ? '实时' : '未查询') }}</span>
+                <b>{{ quotaTitle }}</b>
+                <el-tag v-if="quota?.plan?.name" size="small" type="info">{{ quota.plan.name }}</el-tag>
+                <span class="quota-status">{{ quotaLoading ? '刷新中…' : (quota ? '实时' : '未查询') }}</span>
                 <el-button size="small" text :loading="quotaLoading" @click="loadQuota(true)">刷新</el-button>
               </div>
               <div v-if="quotaError" class="quota-error">{{ quotaError }}</div>
-              <template v-else-if="quotaEntries.length">
+              <template v-else>
+                <div v-if="quota?.credits" class="quota-window">
+                  <div class="quota-window-head">
+                    <b>剩余额度</b>
+                    <span>{{ formatCredits(quota?.credits) }}</span>
+                  </div>
+                  <div v-if="quota?.credits?.limit" class="quota-bar">
+                    <i :class="quotaTone(quota?.credits?.percent)" :style="{ width: `${Math.max(0, Math.min(100, Number(quota?.credits?.percent || 0)))}%` }" />
+                  </div>
+                  <small v-if="Number(quota?.credits?.purchased || 0) + Number(quota?.credits?.free || 0) > 0" class="quota-extra">
+                    含额外额度 {{ formatMoney(Number(quota?.credits?.purchased || 0) + Number(quota?.credits?.free || 0)) }}
+                  </small>
+                </div>
                 <div v-for="item in quotaEntries" :key="item.key" class="quota-window">
                   <div class="quota-window-head">
                     <b>{{ item.label }}</b>
@@ -1061,8 +1344,11 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
                     <i :class="quotaTone(item.percent)" :style="{ width: `${Math.max(0, Math.min(100, Number(item.percent || 0)))}%` }" />
                   </div>
                 </div>
+                <div v-if="quota?.summary" class="quota-extra">
+                  本期 {{ formatMoney(quota?.summary?.cost) }} · {{ quota?.summary?.requests || 0 }} 次请求<template v-if="quota?.summary?.tokens"> · {{ formatTokens(quota?.summary?.tokens) }} tokens</template>
+                </div>
+                <div v-if="!quota?.credits && !quotaEntries.length" class="quota-error" style="color:var(--faint)">还没有额度数据，点「刷新」查询。</div>
               </template>
-              <div v-else class="quota-error" style="color:var(--faint)">还没有额度数据，点「刷新」查询。</div>
             </div>
 
             <div class="model-list">
@@ -1079,17 +1365,20 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
                     <el-tag v-if="model.vision" size="small" type="info">图片</el-tag>
                     <el-tag v-if="data.activeModel === model.code" size="small" type="success">当前</el-tag>
                   </div>
-                  <small>{{ model.model || model.code }} · {{ model.protocol || 'openai-chat' }}</small>
+                  <small>{{ model.model || model.code }} · {{ protocolLabel(model.protocol) }} · 并发 {{ model.effective_concurrency || model.concurrency || 2 }}<template v-if="model.context_window"> · {{ formatContextWindow(model.context_window) }}</template></small>
                   <small v-if="model.thinking_levels?.length">think：{{ model.thinking_levels.join(' / ') }}</small>
                 </div>
                 <div class="model-actions">
                   <el-button size="small" text @click="openEditModel(model)">编辑</el-button>
-                  <el-button v-if="data.activeModel !== model.code" size="small" text @click="activate(model.code)">设为默认</el-button>
+                  <el-button v-if="data.activeModel !== model.code" size="small" text @click="activate(model.code)">设为系统模型</el-button>
                   <el-button size="small" text @click="removeModel(model)" :disabled="data.activeModel === model.code">删除</el-button>
                 </div>
               </div>
               <el-empty v-if="!subscriptionModels.length" :description="selectedSubscription ? '这个订阅下还没有模型' : '先在左侧选择一个订阅'" :image-size="56">
-                <el-button v-if="selectedSubscription" size="small" type="primary" @click="openAdd('model')">添加模型</el-button>
+                <template v-if="selectedSubscription">
+                  <el-button size="small" type="primary" :loading="discovering" @click="discoverModels">从端点获取</el-button>
+                  <el-button size="small" @click="openAdd('model')">手动添加</el-button>
+                </template>
               </el-empty>
             </div>
             <footer class="models-pane-foot">
@@ -1118,7 +1407,8 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
                   {{ period.label }}
                 </button>
               </div>
-              <el-button size="small" style="margin-left:auto" :loading="usageLoading" @click="loadUsage">刷新</el-button>
+              <el-button size="small" style="margin-left:auto" @click="openMagpie">本机脱敏</el-button>
+              <el-button size="small" :loading="usageLoading" @click="loadUsage">刷新</el-button>
             </div>
           </div>
 
@@ -1167,6 +1457,103 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
               <div v-if="!(usageSummary?.models || []).length" class="empty">还没有调用记录</div>
             </div>
           </div>
+        </template>
+      </template>
+
+      <template v-else-if="tab === 'magpie'">
+        <div v-if="magpieLoading && !magpie" class="detail-section"><div class="empty">加载本机脱敏状态…</div></div>
+        <template v-else>
+          <section class="magpie-head">
+            <div class="magpie-head-main">
+              <div class="magpie-eyebrow">本机脱敏 · MAGPIE</div>
+              <h2>敏感信息不出这台电脑</h2>
+              <p>
+                请求出站前，把密钥、邮箱 / 手机号 / 身份证 / IP、本机绝对路径替换为 ⟦MG_…⟧ 占位符；
+                模型回复与工具参数在本机还原。模型只看到占位符。
+              </p>
+              <div class="magpie-hero-stats">
+                <span><b>{{ magpieRuleCount }}</b> 类规则已启用</span>
+                <span>规则全部在本机执行</span>
+                <span>{{ magpieForm.enabled ? '脱敏已开启' : '脱敏已关闭' }}</span>
+              </div>
+            </div>
+            <div class="magpie-head-side">
+              <span class="magpie-state" :class="{ on: magpieForm.enabled }">
+                {{ magpieForm.enabled ? '已开启' : '已关闭' }}
+              </span>
+              <el-switch v-model="magpieForm.enabled" :loading="magpieSaving" @change="saveMagpie" />
+            </div>
+          </section>
+
+          <ModelFlow
+            :total-tokens="Number(usageTotals.total_tokens || 0)"
+            :model-name="usageSummary?.top_model?.name || ''"
+            :model-tokens="Number(usageSummary?.top_model?.total_tokens || 0)"
+            :redacted="Number(magpie?.stats?.redacted_total || 0)"
+            :enabled="magpieForm.enabled"
+          />
+
+          <div class="magpie-grid">
+            <section class="detail-section magpie-rules">
+              <div class="toolbar">
+                <h3 style="margin:0">脱敏规则</h3>
+                <span class="role-line">分类开关</span>
+              </div>
+              <p class="hintline">关闭某类后，对应信息会按原文发送给模型。</p>
+              <div class="magpie-rule-list">
+                <div class="magpie-rule">
+                  <div>
+                    <b>密钥 / Token</b>
+                    <small>sk-… / ghp_… / JWT / Bearer / 私钥块 / password=…</small>
+                  </div>
+                  <el-switch v-model="magpieForm.secrets" :disabled="!magpieForm.enabled" @change="saveMagpie" />
+                </div>
+                <div class="magpie-rule">
+                  <div>
+                    <b>个人信息</b>
+                    <small>邮箱 / 手机号 / 18 位身份证 / IPv4</small>
+                  </div>
+                  <el-switch v-model="magpieForm.pii" :disabled="!magpieForm.enabled" @change="saveMagpie" />
+                </div>
+                <div class="magpie-rule">
+                  <div>
+                    <b>本机绝对路径</b>
+                    <small>/Users/… / /home/… / C:\Users\…</small>
+                  </div>
+                  <el-switch v-model="magpieForm.paths" :disabled="!magpieForm.enabled" @change="saveMagpie" />
+                </div>
+              </div>
+            </section>
+
+            <section class="detail-section magpie-preview-card">
+              <div class="toolbar">
+                <h3 style="margin:0">脱敏预览</h3>
+                <span class="role-line">只在本机执行，不写入统计</span>
+              </div>
+              <el-input
+                v-model="magpieTestText"
+                type="textarea"
+                :rows="4"
+                :disabled="!magpieForm.enabled"
+                placeholder="粘贴一段包含密钥 / 邮箱 / 路径的文本…"
+              />
+              <div class="magpie-preview-actions">
+                <el-button size="small" type="primary" :loading="magpieTesting" :disabled="!magpieForm.enabled" @click="testMagpie">
+                  预览脱敏
+                </el-button>
+                <span v-if="magpieTestResult" class="role-line">
+                  已脱敏 {{ magpieTestResult.redacted }} 处 · {{ kindSummary(magpieTestResult.by_kind) }}
+                </span>
+              </div>
+              <pre v-if="magpieTestResult" class="magpie-preview">{{ magpieTestResult.masked }}</pre>
+              <div v-else class="empty" style="padding:18px 8px">预览结果会显示在这里</div>
+            </section>
+          </div>
+
+          <p class="hintline magpie-foot">
+            占位符映射只在本次 LLM 调用的内存里，不落库。正则识别是尽力而为，
+            不保证覆盖所有敏感信息，也不替代隔离环境；脱敏失败时按原文发送并记录日志。
+          </p>
         </template>
       </template>
 
@@ -1232,7 +1619,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
             <div v-for="ws in data.activeWorkspaces" :key="ws.id" class="file-row" style="cursor:default">
               <span>▣</span>
               <span class="fname">{{ ws.name }}<small style="color:var(--faint)"> · {{ ws.root_path || '纯聊天' }}</small></span>
-              <span class="fsize">{{ roleCountByWs.get(ws.id) || 0 }} 角色 · {{ teamCountByWs.get(ws.id) || 0 }} 群组</span>
+              <span class="fsize">{{ roleCountByWs.get(ws.id) || 0 }} 角色</span>
               <el-button size="small" @click="router.push(`/ws/${ws.id}`)">打开</el-button>
               <el-button size="small" @click="renameWorkspace(ws)">改名</el-button>
               <el-button size="small" @click="toggleWorkspace(ws)">归档</el-button>
@@ -1329,6 +1716,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
           <h3>限制</h3>
           <dl class="kv">
             <dt>并发 run</dt><dd>{{ data.info?.limits?.max_concurrent_runs ?? '—' }}</dd>
+            <dt>单群成员并行</dt><dd>{{ data.info?.limits?.max_parallel_member_runs ?? '—' }}</dd>
             <dt>上下文压缩阈值</dt><dd>{{ data.info?.limits?.context_compress_percent ?? '—' }}%</dd>
             <dt>自主运行上限</dt><dd>{{ data.info?.limits?.autonomous_run_max_seconds ?? '—' }}s</dd>
           </dl>
@@ -1347,7 +1735,12 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
           <div class="file-list">
             <div v-for="server in mcpServers" :key="server.id" class="file-row" style="cursor:default" @contextmenu.prevent.stop="openItemMenu($event, 'mcp', { id: server.id, name: server.name || server.id, enabled: server.enabled })">
               <span>{{ server.enabled ? '●' : '○' }}</span>
-              <span class="fname">{{ server.name || server.id }}<small style="color:var(--faint)"> · {{ server.type }} · {{ server.tools || 0 }} 个工具</small></span>
+              <span class="fname">
+                {{ server.name || server.id }}
+                <small style="color:var(--faint)">
+                  · {{ server.type }} · {{ server.tools || 0 }} 个工具<template v-if="server.persistent"> · 常驻</template>
+                </small>
+              </span>
               <el-tag size="small" :type="server.installed ? 'success' : 'info'">{{ server.installed ? '已安装' : '未安装' }}</el-tag>
               <el-button size="small" @click="toggleMcp(server)">{{ server.enabled ? '停用' : '启用' }}</el-button>
               <el-button size="small" type="danger" plain @click="deleteMcp(server)">删除</el-button>
@@ -1404,8 +1797,7 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
       </template>
 
 
-        <SideDrawer :open="platformOpen" title="平台预设" subtitle="官方 API、聚合平台，以及自建 / 本地网关。" width="680px" @close="platformOpen = false">
-          <p style="margin:0;color:var(--faint);font-size:11px">官方 API、聚合平台，以及自建 / 本地网关。</p>
+        <SideDrawer :open="platformOpen" title="平台预设" subtitle="官方 API、编程订阅、聚合平台，以及自建 / 本地网关。" width="680px" @close="platformOpen = false">
           <el-input v-model="platformSearch" placeholder="搜索平台" clearable />
           <div v-if="platformLoading" class="empty">加载平台预设…</div>
           <div v-else class="platform-groups">
@@ -1477,12 +1869,17 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
                 >
                   <el-option v-for="level in ['minimal', 'low', 'medium', 'high', 'xhigh']" :key="level" :label="level" :value="level" />
                 </el-select>
+                <small class="role-line">可多选；输入自定义名称后回车即可新增，多个档位会同时出现在聊天输入框里。</small>
               </el-form-item>
               <el-form-item label="上下文窗口 / 最大输出">
                 <div style="display:flex;gap:8px">
                   <el-input-number v-model="modelForm.context_window" :min="0" :step="1000" controls-position="right" />
                   <el-input-number v-model="modelForm.max_tokens" :min="0" :step="1000" controls-position="right" />
                 </div>
+              </el-form-item>
+              <el-form-item label="并发上限">
+                <el-input-number v-model="modelForm.concurrency" :min="1" :max="64" controls-position="right" />
+                <span class="hintline" style="margin-left:8px">同一模型同时在途的请求数，默认 2</span>
               </el-form-item>
               <el-form-item label="图片支持"><el-switch v-model="modelForm.vision" /></el-form-item>
             </template>
@@ -1533,26 +1930,65 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
           </template>
         </SideDrawer>
 
-        <SideDrawer :open="discoverOpen" title="获取模型" subtitle="选择要添加的模型" width="620px" @close="discoverOpen = false">
-          <p style="margin:0;color:var(--faint);font-size:11px">来自订阅「{{ selectedSubscription?.name || selectedSubscription?.id }}」的模型列表。</p>
+        <SideDrawer
+          :open="discoverOpen"
+          title="获取模型"
+          :subtitle="`${selectedSubscription?.name || selectedSubscription?.id || ''} · 共 ${discoveredModels.length} 个模型`"
+          width="760px"
+          @close="discoverOpen = false"
+        >
+          <div class="discover-toolbar">
+            <el-input v-model="discoverQuery" placeholder="搜索模型 ID / 名称" clearable />
+            <el-select v-model="discoverProtocol" style="width:200px">
+              <el-option v-for="option in discoverProtocolOptions" :key="option.value" :label="option.label" :value="option.value" />
+            </el-select>
+            <el-switch v-model="discoverHideAdded" active-text="隐藏已添加" />
+          </div>
+
           <div v-if="!discoveredModels.length" class="empty">端点没有返回模型。</div>
-          <el-checkbox-group v-else v-model="discoveredSelected" class="discover-list">
-            <el-checkbox
-              v-for="item in discoveredModels"
-              :key="item.id"
-              :value="item.id"
-              :disabled="item.supported === false || data.models.some((m) => m.code === item.id)"
-              class="discover-row"
-            >
-              <span class="discover-main">
-                <b>{{ item.id }}</b>
-                <small>{{ item.protocol || 'openai-chat' }}{{ item.supported === false ? ' · 暂不支持' : '' }}{{ data.models.some((m) => m.code === item.id) ? ' · 已添加' : '' }}</small>
-              </span>
-            </el-checkbox>
-          </el-checkbox-group>
+          <template v-else>
+            <div class="discover-summary">
+              <el-checkbox
+                :model-value="discoverAllSelected"
+                :indeterminate="discoverPartiallySelected"
+                :disabled="!discoverableModels.length"
+                @change="toggleDiscoverAll"
+              >
+                全选当前筛选（{{ discoverableModels.length }} 个可添加）
+              </el-checkbox>
+              <el-button v-if="discoverSelectedCount" size="small" text @click="clearDiscoverSelection">清空已选</el-button>
+              <span>已选 {{ discoverSelectedCount }} 个 · 共 {{ discoveredModels.length }} 个</span>
+            </div>
+
+            <div v-if="!filteredDiscoveredModels.length" class="empty">
+              {{ discoveredEmptyHint }}
+            </div>
+            <el-checkbox-group v-else v-model="discoveredSelected" class="discover-list">
+              <el-checkbox
+                v-for="item in filteredDiscoveredModels"
+                :key="item.id"
+                :value="item.id"
+                :disabled="item.supported === false || existingModelCodes.has(item.id)"
+                class="discover-row"
+              >
+                <span class="discover-main">
+                  <span class="discover-title">
+                    <b>{{ item.name || item.id }}</b>
+                    <el-tag size="small" type="info" effect="plain">{{ protocolLabel(item.protocol) }}</el-tag>
+                    <el-tag v-if="existingModelCodes.has(item.id)" size="small" type="success">已添加</el-tag>
+                    <el-tag v-else-if="item.supported === false" size="small" type="warning">暂不支持</el-tag>
+                  </span>
+                  <small v-if="discoverMeta(item)">{{ discoverMeta(item) }}</small>
+                </span>
+              </el-checkbox>
+            </el-checkbox-group>
+          </template>
+
           <template #footer>
+            <span class="discover-foot">已选 {{ discoverSelectedCount }} 个</span>
+            <span class="spacer" />
             <el-button @click="discoverOpen = false">取消</el-button>
-            <el-button type="primary" :disabled="!discoveredSelected.length" @click="addDiscovered">添加选中 {{ discoveredSelected.length }}</el-button>
+            <el-button type="primary" :disabled="!discoverSelectedCount" @click="addDiscovered">添加选中 {{ discoverSelectedCount }} 个</el-button>
           </template>
         </SideDrawer>
       </div>

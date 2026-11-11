@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 
 PERIODS = (("1d", 1), ("7d", 7), ("30d", 30), ("all", 0))
 
+# 单条实体（会话 / 工单 / 任务 / run）的用量口径与总览一致：
+# 输入 = 各轮 prompt 之和，输出 = 各轮 completion 之和，速度与缓存按总量重算。
+USAGE_AGG_KEYS = ("prompt_tokens", "completion_tokens", "cached_tokens",
+                  "llm_ms", "rounds", "turns")
+
 
 def _as_dict(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
@@ -88,9 +93,14 @@ def _channel_map() -> Dict[str, str]:
 def _load_events() -> List[Dict[str, Any]]:
     SessionLocal = get_session_local()
     with SessionLocal() as db:
+        # 只取「助手消息 + 带 usage」的节点：usage 页每次刷新都会走这里，
+        # 先全表取回再在 Python 里过滤，历史一长就是几百毫秒。
+        # json_extract 写法能命中 idx_gdag_by 表达式索引。
         rows = db.execute(
             text(f"SELECT props, created_at FROM {_q('gdag_nodes')} "
-                 f"WHERE type = 'fact'")
+                 f"WHERE type = 'fact' "
+                 f"  AND json_extract(props, '$.by') = 'assistant' "
+                 f"  AND json_extract(props, '$.usage') IS NOT NULL")
         ).mappings().all()
     events: List[Dict[str, Any]] = []
     for row in rows:
@@ -126,6 +136,158 @@ def _load_events() -> List[Dict[str, Any]]:
         })
     events.sort(key=lambda e: e["ts"], reverse=True)
     return events
+
+
+def _as_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _usage_agg_sql(column: str, stage: Optional[str] = None) -> str:
+    if column not in ("conversation_id", "run_id"):
+        raise ValueError(f"unsupported usage group: {column}")
+    sums = ", ".join(
+        f"SUM(CAST(json_extract(props, '$.usage.{key}') AS INTEGER)) AS {key}"
+        for key in USAGE_AGG_KEYS if key != "turns"
+    )
+    # turns = 有 usage 的助手消息条数（usage 本身不存 turns 字段）。
+    sums += ", COUNT(*) AS turns"
+    # 一律用 json_extract 而不是 ->>：表达式索引建在 json_extract 上，
+    # ->> 写法命中不了索引，会长成「每次全表扫 gdag_nodes」。
+    stage_filter = "  AND json_extract(props, '$.stage') = :stage " if stage else ""
+    return (
+        f"SELECT json_extract(props, '$.{column}') AS grp, {sums} "
+        f"FROM {_q('gdag_nodes')} "
+        f"WHERE type = 'fact' "
+        f"  AND json_extract(props, '$.by') = 'assistant' "
+        f"  AND json_extract(props, '$.usage') IS NOT NULL "
+        f"  AND json_extract(props, '$.{column}') "
+        f"      IN (SELECT value FROM json_each(:values)) "
+        f"{stage_filter}"
+        f"GROUP BY grp"
+    )
+
+
+def _finish_usage(row: Dict[str, Any]) -> Dict[str, Any]:
+    """把 SUM 出来的原始字段补成前端直接可用的口径（缓存率 / 速度 / 均值）。"""
+    prompt = _int(row.get("prompt_tokens"))
+    completion = _int(row.get("completion_tokens"))
+    cached = _int(row.get("cached_tokens"))
+    if prompt:
+        cached = min(cached, prompt)
+    llm_ms = _int(row.get("llm_ms"))
+    rounds = _int(row.get("rounds"))
+    turns = _int(row.get("turns"))
+    total = prompt + completion
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "cached_tokens": cached,
+        "cache_rate": round(cached / prompt * 100, 1) if prompt else 0.0,
+        "llm_ms": llm_ms,
+        "speed": round(completion / (llm_ms / 1000), 1) if llm_ms else 0.0,
+        "rounds": rounds,
+        "turns": turns,
+        "avg_tokens_per_turn": round(total / turns, 1) if turns else 0.0,
+    }
+
+
+def empty_usage() -> Dict[str, Any]:
+    return _finish_usage({})
+
+
+def sum_usage(usages: Optional[Any]) -> Dict[str, Any]:
+    """把多份用量相加（速度 / 缓存率按合计重算，不做平均）。"""
+    sums = {key: 0 for key in USAGE_AGG_KEYS}
+    for usage in usages or []:
+        if not isinstance(usage, dict):
+            continue
+        for key in USAGE_AGG_KEYS:
+            sums[key] += _int(usage.get(key))
+    return _finish_usage(sums)
+
+
+def _aggregate(column: str, values: Optional[Any],
+               stage: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    ids = [str(item).strip() for item in (values or []) if str(item or "").strip()]
+    if not ids:
+        return {}
+    params: Dict[str, Any] = {"values": json.dumps(sorted(set(ids)))}
+    if stage:
+        params["stage"] = stage
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(_usage_agg_sql(column, stage)), params,
+        ).mappings().all()
+    return {str(row["grp"]): _finish_usage(dict(row))
+            for row in rows if str(row.get("grp") or "")}
+
+
+def usage_by_conversation(conversation_ids: Optional[Any] = None,
+                          stage: Optional[str] = None
+                          ) -> Dict[str, Dict[str, Any]]:
+    """按会话聚合 token 用量（一次查询覆盖整页列表，避免 N+1）。
+
+    ``stage='exploration'`` 只算前台对话轮次，与 ``conversation.usage_total``
+    口径一致（后台任务的 task 阶段由任务 / 工单各自统计，不重复计入会话）。
+    """
+    return _aggregate("conversation_id", conversation_ids, stage)
+
+
+def usage_by_run(run_ids: Optional[Any] = None) -> Dict[str, Dict[str, Any]]:
+    """按 run 聚合 token 用量（后台任务成员 run 精确归因）。"""
+    return _aggregate("run_id", run_ids)
+
+
+def task_run_map(task_ids: Optional[Any] = None) -> Dict[str, List[str]]:
+    """群组后台任务 → 成员 run id 列表。"""
+    ids = [str(item).strip() for item in (task_ids or []) if str(item or "").strip()]
+    if not ids:
+        return {}
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(f"SELECT id, members FROM {_q('team_tasks')} "
+                 f"WHERE id IN (SELECT value FROM json_each(:ids))"),
+            {"ids": json.dumps(sorted(set(ids)))},
+        ).mappings().all()
+    out: Dict[str, List[str]] = {}
+    for row in rows:
+        run_ids = []
+        for member in _as_list(row.get("members")):
+            if not isinstance(member, dict):
+                continue
+            run_id = str(member.get("run_id") or "").strip()
+            if run_id:
+                run_ids.append(run_id)
+        out[str(row["id"])] = run_ids
+    return out
+
+
+def usage_by_task(task_ids: Optional[Any] = None) -> Dict[str, Dict[str, Any]]:
+    """按群组后台任务聚合 token（= 各成员 run 的用量之和）。"""
+    run_map = task_run_map(task_ids)
+    run_usage = usage_by_run({rid for ids in run_map.values() for rid in ids})
+    out: Dict[str, Dict[str, Any]] = {}
+    for task_id, run_ids in run_map.items():
+        sums = {key: 0 for key in USAGE_AGG_KEYS}
+        for run_id in run_ids:
+            usage = run_usage.get(run_id)
+            if not usage:
+                continue
+            for key in USAGE_AGG_KEYS:
+                sums[key] += _int(usage.get(key))
+        out[task_id] = _finish_usage(sums)
+    return out
 
 
 def _empty_totals() -> Dict[str, Any]:

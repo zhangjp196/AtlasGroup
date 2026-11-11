@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ElButton } from 'element-plus'
 import { ref } from 'vue'
 import Avatar from '@/components/Avatar.vue'
 import { useAppStore } from '@/stores/app'

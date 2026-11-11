@@ -1,6 +1,7 @@
 import type { Conversation, Department, Role, Team } from '@/api/types'
 
 export const GLOBAL_AGENT_ZONE = 'global-agent'
+export const GLOBAL_CHAT_ZONE = 'global-chat'
 
 export const MODE_LABEL: Record<string, string> = {
   orchestrate: '主持编排',
@@ -27,9 +28,10 @@ export function conversationParts(conv: Conversation, teams: Team[], roles: Role
 
 export function conversationTitle(conv: Conversation, teams: Team[], roles: Role[]): string {
   if (String(conv.zone || '') === GLOBAL_AGENT_ZONE) return '全局Agent'
+  if (String(conv.zone || '') === GLOBAL_CHAT_ZONE) return '全局对话'
   const { team, role, isGroup } = conversationParts(conv, teams, roles)
   if (isGroup && team) return team.name
-  // 兜底角色「通用助手」不占标题：单聊优先显示用户/AI 生成的会话标题。
+  // 兜底角色不占标题：单角色会话优先显示用户/AI 生成的会话标题。
   if (role && role.id !== 'default') return role.name
   return conv.title || role?.name || '未命名会话'
 }
@@ -38,11 +40,15 @@ export function conversationMeta(conv: Conversation, teams: Team[], roles: Role[
   if (String(conv.zone || '') === GLOBAL_AGENT_ZONE) {
     return { kind: '全局Agent', sub: '全局消息 · 跨会话通知' }
   }
+  if (String(conv.zone || '') === GLOBAL_CHAT_ZONE) {
+    const { members } = conversationParts(conv, teams, roles)
+    return { kind: '全局对话', sub: `${members.length} 个参与角色` }
+  }
   const { team, role, members, isGroup } = conversationParts(conv, teams, roles)
   if (isGroup && team) {
-    return { kind: '群聊', sub: `${members.length} 个角色 · ${modeLabel(team.mode)}` }
+    return { kind: '多角色', sub: `${members.length} 个角色` }
   }
-  return { kind: '单聊', sub: role ? `角色：${roleLabel(role)}` : '通用助手' }
+  return { kind: '单角色', sub: role ? `角色：${roleLabel(role)}` : '未指定角色' }
 }
 
 export function conversationIsGroup(conv: Conversation, teams: Team[]): boolean {

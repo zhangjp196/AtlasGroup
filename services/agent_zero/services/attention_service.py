@@ -68,32 +68,39 @@ def conversation_sessions(limit: int = 100) -> List[Dict[str, Any]]:
 
 
 def unread_conversations(limit: int = 100) -> List[Dict[str, Any]]:
+    """未读会话（最近一条助手消息晚于已读水位）。
+
+    别在这里对每个会话做相关子查询：那是 O(会话数 × 全表) 的扫描，300 个会话
+    就要 1s。改成先用一次分组聚合拿到每个会话的「最近助手消息时间」，再与
+    会话表 JOIN 过滤；未读条数 / 最后一条预览交给按页批量统计。
+    """
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         rows = db.execute(
-            text(f"SELECT c.id, c.title, c.role_id, c.team_id, c.bound_workspace_id, "
-                 f"c.updated_at, "
-                 f"(SELECT COUNT(*) FROM {_q('gdag_nodes')} g "
-                 f" WHERE g.type = 'fact' AND g.props->>'conversation_id' = c.id "
-                 f" AND g.props->>'by' = 'assistant' "
-                 f" AND g.props->>'stage' = 'exploration' "
-                 f" AND COALESCE(g.props->>'kind', '') <> 'checkpoint' "
-                 f" AND g.created_at > COALESCE(c.last_read_at, '')) AS unread_count, "
-                 f"(SELECT g.props->>'content' FROM {_q('gdag_nodes')} g "
-                 f" WHERE g.type = 'fact' AND g.props->>'conversation_id' = c.id "
-                 f" AND g.props->>'stage' = 'exploration' "
-                 f" AND COALESCE(g.props->>'kind', '') <> 'checkpoint' "
-                 f" ORDER BY g.created_at DESC, g.rowid DESC LIMIT 1) AS last_message "
-                 f"FROM {_q('conversations')} c WHERE c.archived = 0 "
-                 f"AND COALESCE(c.zone, '') <> 'global-agent' "
-                 f"AND COALESCE((SELECT MAX(g.created_at) FROM {_q('gdag_nodes')} g "
-                 f" WHERE g.type = 'fact' AND g.props->>'conversation_id' = c.id "
-                 f" AND g.props->>'by' = 'assistant'), '') "
-                 f"> COALESCE(c.last_read_at, '') "
+            text(f"WITH last_seen AS ("
+                 f"  SELECT json_extract(props, '$.conversation_id') AS cid, "
+                 f"         MAX(created_at) AS last_at "
+                 f"  FROM {_q('gdag_nodes')} "
+                 f"  WHERE type = 'fact' "
+                 f"    AND json_extract(props, '$.by') = 'assistant' "
+                 f"  GROUP BY cid) "
+                 f"SELECT c.id, c.title, c.role_id, c.team_id, c.bound_workspace_id, "
+                 f"       c.updated_at, c.last_read_at "
+                 f"FROM {_q('conversations')} c "
+                 f"JOIN last_seen l ON l.cid = c.id "
+                 f"WHERE c.archived = 0 "
+                 f"  AND COALESCE(c.zone, '') <> 'global-agent' "
+                 f"  AND COALESCE(l.last_at, '') > COALESCE(c.last_read_at, '') "
                  f"ORDER BY c.updated_at DESC, c.id DESC LIMIT :n"),
             {"n": _limit(limit)},
         ).mappings().all()
-    return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        conversation._page_message_stats(db, out)
+    for item in out:
+        item.pop("last_read_at", None)
+        item.pop("message_count", None)
+        item.pop("unread", None)
+    return out
 
 
 def snapshot(limit: int = 100) -> Dict[str, Any]:

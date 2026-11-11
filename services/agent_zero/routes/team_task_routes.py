@@ -133,10 +133,10 @@ def stop_team_task(conv_id: str, task_id: str):
 
 @router.post("/conversations/{conv_id}/team-tasks/{task_id}/continue")
 def continue_team_task(conv_id: str, task_id: str):
-    """把已完成的后台任务结果交回主会话（用户点「继续对话」才触发）。
+    """把已完成的后台任务结果交回主会话。
 
-    后台任务结束时只写通知、不自动唤醒主持：避免每完成一个后台任务就烧一轮
-    主会话 token。这里由用户显式触发，汇总成员结果后创建一条主持 run。
+    任务结束（完成 / 失败）时系统会自动交回；这个接口是手动补交入口，
+    自动交回没有发生时（例如异常），用户可以点「继续对话」。
     """
     _task_or_404(conv_id, task_id)
     try:

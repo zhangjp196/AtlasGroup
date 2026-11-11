@@ -312,6 +312,8 @@ def _resolve_llm_config(llm_code: str, *, use_active: bool = True) -> Dict[str, 
     if not code and base.get("hidden_default"):
         # 用户删除了默认模型/渠道：不再回落到 config.yaml 的 base 配置。
         return {
+            "code": code or "default",
+            "concurrency": _int0(base.get("concurrency")) or 2,
             "model": "",
             "base_url": "",
             "api_base": "",
@@ -325,6 +327,12 @@ def _resolve_llm_config(llm_code: str, *, use_active: bool = True) -> Dict[str, 
         }
     base_url = str(base.get("base_url") or base.get("api_base") or "").rstrip("/")
     return {
+        # 并发限流按「解析后的档案 code」分桶：同一档案的主模型 / 摘要 / 压缩
+        # 共用同一个槽位池；切换默认模型后自然落到新档案的池子。
+        # 不存在的 code 实际用的是默认段配置，归到 default 池，避免同一模型
+        # 因为别名不同而绕开并发上限。
+        "code": code if (code and entry is not None) else "default",
+        "concurrency": _int0(base.get("concurrency")) or 2,
         "model": str(base.get("model") or ""),
         "base_url": base_url,
         "api_base": base_url,
@@ -509,6 +517,7 @@ def list_model_profiles() -> List[Dict[str, Any]]:
     top_mt = _int0(sec.get("max_tokens"))
     top_vision = bool(sec.get("vision"))
     top_thinking = normalize_thinking_levels(sec.get("thinking_levels"))
+    top_concurrency = _int0(sec.get("concurrency")) or 2
 
     out: List[Dict[str, Any]] = []
 
@@ -524,6 +533,7 @@ def list_model_profiles() -> List[Dict[str, Any]]:
             "base_url": top_base,
             "context_window": top_cw,
             "max_tokens": top_mt,
+            "concurrency": top_concurrency,
             "vision": top_vision,
             "thinking_levels": top_thinking,
             "channel_id": str(sec.get("channel_id") or ""),
@@ -537,6 +547,7 @@ def list_model_profiles() -> List[Dict[str, Any]]:
             "effective_base_url": str(default_cfg.get("base_url") or ""),
             "effective_context_window": _int0(default_cfg.get("context_window")),
             "effective_max_tokens": _int0(default_cfg.get("max_tokens")),
+            "effective_concurrency": _int0(default_cfg.get("concurrency")) or 2,
             "effective_vision": bool(default_cfg.get("vision")),
             "effective_thinking_levels": normalize_thinking_levels(
                 default_cfg.get("thinking_levels")),
@@ -566,6 +577,7 @@ def list_model_profiles() -> List[Dict[str, Any]]:
             "base_url": str(entry.get("base_url") or "").rstrip("/"),
             "context_window": _int0(entry.get("context_window")),
             "max_tokens": _int0(entry.get("max_tokens")),
+            "concurrency": _int0(entry.get("concurrency")) or top_concurrency,
             "vision": bool(entry.get("vision", top_vision)),
             "thinking_levels": normalize_thinking_levels(
                 entry["thinking_levels"] if "thinking_levels" in entry else top_thinking),
@@ -580,6 +592,7 @@ def list_model_profiles() -> List[Dict[str, Any]]:
             "effective_base_url": str(cfg.get("base_url") or ""),
             "effective_context_window": _int0(cfg.get("context_window")),
             "effective_max_tokens": _int0(cfg.get("max_tokens")),
+            "effective_concurrency": _int0(cfg.get("concurrency")) or 2,
             "effective_vision": bool(cfg.get("vision")),
             "effective_thinking_levels": normalize_thinking_levels(
                 cfg.get("thinking_levels")),
@@ -854,6 +867,123 @@ async def close_llm_clients() -> None:
             await client.aclose()
         except Exception:  # pragma: no cover - 关闭失败不影响退出
             logger.debug("关闭 LLM HTTP 连接池失败", exc_info=True)
+
+
+# 每个模型档案的并发槽位。同一 code 的主对话 / 摘要 / 压缩 / 团队成员 / 子代理
+# 共用一池；配置改了就换一个新闸门（在途请求继续用旧池跑完）。
+_MODEL_SLOTS: Dict[str, Dict[str, Any]] = {}
+_MODEL_SLOTS_LOCK = threading.Lock()
+MODEL_CONCURRENCY_DEFAULT = 2
+MODEL_CONCURRENCY_MAX = 64
+
+
+def model_concurrency(cfg: Dict[str, Any]) -> int:
+    try:
+        value = int(cfg.get("concurrency") or MODEL_CONCURRENCY_DEFAULT)
+    except (TypeError, ValueError):
+        value = MODEL_CONCURRENCY_DEFAULT
+    if value <= 0:
+        value = MODEL_CONCURRENCY_DEFAULT
+    return max(1, min(value, MODEL_CONCURRENCY_MAX))
+
+
+def _wake_future(fut: "asyncio.Future[None]") -> None:
+    """线程安全地唤醒等待者；等待任务已被取消时安静忽略。"""
+    if not fut.done():
+        fut.set_result(None)
+
+
+class _ModelGate:
+    """跨事件循环的模型并发闸门。
+
+    只用 `asyncio.Semaphore` 时，每个事件循环各拿一个实例：桌面端的记忆重建
+    线程、测试里的新循环、以及主服务循环会各自看到一份「空池」，配置看似
+    失效（总并发 = 上限 × 循环数）。这里用线程锁维护全局计数，把空闲槽位
+    直接转交给下一个等待者，既跨循环生效，也不会阻塞事件循环线程。
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = int(limit)
+        self._lock = threading.Lock()
+        self._active = 0
+        # [(事件循环, Future)]；future 完成 = 槽位已转交给它，计数不变。
+        self._waiters: List[tuple] = []
+
+    def locked(self) -> bool:
+        with self._lock:
+            return self._active >= self.limit
+
+    def _prune_locked(self) -> None:
+        self._waiters = [(loop, fut) for loop, fut in self._waiters
+                         if not fut.done()]
+
+    async def acquire(self) -> None:
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            self._prune_locked()
+            if self._active < self.limit:
+                self._active += 1
+                return
+            fut: "asyncio.Future[None]" = loop.create_future()
+            self._waiters.append((loop, fut))
+        try:
+            await fut
+        except asyncio.CancelledError:
+            with self._lock:
+                for idx, (wait_loop, wait_fut) in enumerate(self._waiters):
+                    if wait_fut is fut:
+                        # 还在排队：直接退出，不占槽位。
+                        self._waiters.pop(idx)
+                        break
+                else:
+                    # 槽位已经转给我了（future 已完成）但任务被取消：
+                    # 把槽位让给下一个等待者，避免并发上限被永久吞掉。
+                    self._wake_one_locked()
+            raise
+
+    def release(self) -> None:
+        with self._lock:
+            self._wake_one_locked()
+
+    def _wake_one_locked(self) -> None:
+        while self._waiters:
+            loop, fut = self._waiters.pop(0)
+            if fut.done():
+                continue
+            try:
+                loop.call_soon_threadsafe(_wake_future, fut)
+            except RuntimeError:  # 事件循环已关闭：跳过这个等待者
+                continue
+            # 槽位从当前持有者直接转交，_active 不变。
+            return
+        self._active = max(0, self._active - 1)
+
+
+def _model_semaphore(cfg: Dict[str, Any]) -> _ModelGate:
+    code = str(cfg.get("code") or "default")
+    limit = model_concurrency(cfg)
+    with _MODEL_SLOTS_LOCK:
+        entry = _MODEL_SLOTS.get(code)
+        if entry and entry["limit"] == limit:
+            return entry["gate"]
+        gate = _ModelGate(limit)
+        _MODEL_SLOTS[code] = {"limit": limit, "gate": gate}
+        return gate
+
+
+@asynccontextmanager
+async def _model_slot(cfg: Dict[str, Any]) -> AsyncIterator[None]:
+    """占用模型档案的一个并发槽位；等待期间可被 run 的取消打断。"""
+    code = str(cfg.get("code") or "default")
+    gate = _model_semaphore(cfg)
+    if gate.locked():
+        logger.debug("模型 %s 达到并发上限 %d，等待空闲槽位",
+                     code, model_concurrency(cfg))
+    await gate.acquire()
+    try:
+        yield
+    finally:
+        gate.release()
 
 
 @asynccontextmanager
@@ -1418,6 +1548,17 @@ def get_run_stall_timeout() -> float:
     return max(0.0, min(value, 86400.0))
 
 
+def _magpie_prepare(messages: List[Dict[str, Any]]):
+    """本机脱敏：返回（发给模型的消息, 本次调用的还原器或 None）。"""
+    try:
+        from services.agent_zero.services import magpie_service
+
+        return magpie_service.redact_messages(messages)
+    except Exception as e:  # 隐私层故障不应阻断对话；失败时明确记录
+        logger.warning("magpie 脱敏不可用，本次按原文发送: %s", e)
+        return messages, None
+
+
 async def _llm_chat_once(
     llm_code: str,
     messages: List[Dict[str, Any]],
@@ -1429,19 +1570,27 @@ async def _llm_chat_once(
     """单次非流式调用（无重试）；协议派发由模型档案决定。"""
     cfg = await get_llm_config(llm_code)
     api_base = str(cfg.get("api_base") or "")
+    masked_messages, magpie = _magpie_prepare(messages)
     tool_defs = _tool_definitions(tools)
     settings = _model_settings(cfg, temperature, max_tokens, timeout, bool(tool_defs))
     params = ModelRequestParameters(function_tools=tool_defs)
     try:
-        async with _open_model(cfg) as model:
-            response = await model.request(_to_model_messages(messages), settings, params)
+        async with _model_slot(cfg):
+            async with _open_model(cfg) as model:
+                response = await model.request(
+                    _to_model_messages(masked_messages), settings, params)
     except LlmError:
         raise
     except Exception as e:
         raise _request_error(e, llm_code, api_base) from e
+    content = _text_of_parts(response.parts)
+    calls = _tool_calls_of(response.parts)
+    if magpie is not None:
+        content = magpie.restore_text(content)
+        calls = magpie.restore_obj(calls)
     return LlmResult(
-        content=_text_of_parts(response.parts),
-        tool_calls=_tool_calls_of(response.parts),
+        content=content,
+        tool_calls=calls,
         usage=_usage_pair(response.usage),
         model=str(response.model_name or cfg.get("model") or ""),
     )
@@ -1692,6 +1841,9 @@ async def _llm_chat_stream_full_once(
     """单次流式调用（无重试）：把 pydantic-ai 事件翻成运行时既有事件语义。"""
     cfg = await get_llm_config(llm_code)
     api_base = str(cfg.get("api_base") or "")
+    masked_messages, magpie = _magpie_prepare(messages)
+    text_stream = magpie.stream() if magpie is not None else None
+    think_stream = magpie.stream() if magpie is not None else None
     tool_defs = _tool_definitions(tools)
     settings = _model_settings(cfg, temperature, max_tokens, timeout, bool(tool_defs))
     params = ModelRequestParameters(function_tools=tool_defs)
@@ -1707,59 +1859,72 @@ async def _llm_chat_stream_full_once(
     # 不要把正常的长参数生成误判成卡死。
     last_progress = 0.0
     try:
-        async with _open_model(cfg) as model:
-            async with model.request_stream(
-                _to_model_messages(messages), settings, params
-            ) as stream:
-                async for event in stream:
-                    if isinstance(event, PartStartEvent):
-                        part = event.part
-                        if isinstance(part, TextPart):
-                            if part.content:
-                                acc_text.append(str(part.content))
-                                yield {"type": "delta", "content": str(part.content)}
-                        elif isinstance(part, ThinkingPart):
-                            if part.content:
-                                acc_think.append(str(part.content))
-                                yield {"type": "thinking", "content": str(part.content)}
-                        elif isinstance(part, ToolCallPart):
-                            if part.tool_name:
-                                names[event.index] = str(part.tool_name)
-                                if event.index not in prepared:
-                                    prepared.add(event.index)
-                                    # 工具名一出现就上报「准备调用」：参数 JSON（尤其
-                                    # write_file 全文）生成期间前端不能只剩空白。
-                                    yield {"type": "tool_preparing",
-                                           "id": str(part.tool_call_id or ""),
-                                           "name": str(part.tool_name)}
-                    elif isinstance(event, PartDeltaEvent):
-                        delta = event.delta
-                        if isinstance(delta, TextPartDelta):
-                            if delta.content_delta:
-                                acc_text.append(str(delta.content_delta))
-                                yield {"type": "delta", "content": str(delta.content_delta)}
-                        elif isinstance(delta, ThinkingPartDelta):
-                            if delta.content_delta:
-                                acc_think.append(str(delta.content_delta))
-                                yield {"type": "thinking", "content": str(delta.content_delta)}
-                        elif isinstance(delta, ToolCallPartDelta):
-                            piece = delta.tool_name_delta
-                            if piece:
-                                names[event.index] = names.get(event.index, "") + str(piece)
-                                if event.index not in prepared:
-                                    prepared.add(event.index)
-                                    yield {"type": "tool_preparing",
+        async with _model_slot(cfg):
+            async with _open_model(cfg) as model:
+                async with model.request_stream(
+                    _to_model_messages(masked_messages), settings, params
+                ) as stream:
+                    async for event in stream:
+                        if isinstance(event, PartStartEvent):
+                            part = event.part
+                            if isinstance(part, TextPart):
+                                if part.content:
+                                    piece = str(part.content)
+                                    acc_text.append(piece)
+                                    out = text_stream.feed(piece) if text_stream else piece
+                                    if out:
+                                        yield {"type": "delta", "content": out}
+                            elif isinstance(part, ThinkingPart):
+                                if part.content:
+                                    piece = str(part.content)
+                                    acc_think.append(piece)
+                                    out = think_stream.feed(piece) if think_stream else piece
+                                    if out:
+                                        yield {"type": "thinking", "content": out}
+                            elif isinstance(part, ToolCallPart):
+                                if part.tool_name:
+                                    names[event.index] = str(part.tool_name)
+                                    if event.index not in prepared:
+                                        prepared.add(event.index)
+                                        # 工具名一出现就上报「准备调用」：参数 JSON（尤其
+                                        # write_file 全文）生成期间前端不能只剩空白。
+                                        yield {"type": "tool_preparing",
+                                               "id": str(part.tool_call_id or ""),
+                                               "name": str(part.tool_name)}
+                        elif isinstance(event, PartDeltaEvent):
+                            delta = event.delta
+                            if isinstance(delta, TextPartDelta):
+                                if delta.content_delta:
+                                    piece = str(delta.content_delta)
+                                    acc_text.append(piece)
+                                    out = text_stream.feed(piece) if text_stream else piece
+                                    if out:
+                                        yield {"type": "delta", "content": out}
+                            elif isinstance(delta, ThinkingPartDelta):
+                                if delta.content_delta:
+                                    piece = str(delta.content_delta)
+                                    acc_think.append(piece)
+                                    out = think_stream.feed(piece) if think_stream else piece
+                                    if out:
+                                        yield {"type": "thinking", "content": out}
+                            elif isinstance(delta, ToolCallPartDelta):
+                                piece = delta.tool_name_delta
+                                if piece:
+                                    names[event.index] = names.get(event.index, "") + str(piece)
+                                    if event.index not in prepared:
+                                        prepared.add(event.index)
+                                        yield {"type": "tool_preparing",
+                                               "id": str(delta.tool_call_id or ""),
+                                               "name": names[event.index]}
+                                now = time.monotonic()
+                                if now - last_progress >= 2.0:
+                                    last_progress = now
+                                    yield {"type": "tool_progress",
                                            "id": str(delta.tool_call_id or ""),
-                                           "name": names[event.index]}
-                            now = time.monotonic()
-                            if now - last_progress >= 2.0:
-                                last_progress = now
-                                yield {"type": "tool_progress",
-                                       "id": str(delta.tool_call_id or ""),
-                                       "index": event.index}
-                response = stream.get()
-                usage = _usage_event(stream.usage)
-                finish_reason = _finish_reason(stream.finish_reason)
+                                           "index": event.index}
+                    response = stream.get()
+                    usage = _usage_event(stream.usage)
+                    finish_reason = _finish_reason(stream.finish_reason)
     except LlmError:
         raise
     except Exception as e:
@@ -1768,8 +1933,14 @@ async def _llm_chat_stream_full_once(
     calls = _tool_calls_of(getattr(response, "parts", []))
     if not finish_reason:
         finish_reason = "tool_calls" if calls else "stop"
-    yield {"type": "done", "content": "".join(acc_text),
-           "reasoning": "".join(acc_think), "tool_calls": calls,
+    content = "".join(acc_text)
+    reasoning = "".join(acc_think)
+    if magpie is not None:
+        content = magpie.restore_text(content)
+        reasoning = magpie.restore_text(reasoning)
+        calls = magpie.restore_obj(calls)
+    yield {"type": "done", "content": content,
+           "reasoning": reasoning, "tool_calls": calls,
            "usage": usage, "finish_reason": finish_reason}
 
 

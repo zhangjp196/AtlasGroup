@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ElButton, ElTag } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
 import { api } from '@/api/client'
 import { useAppStore } from '@/stores/app'
@@ -77,10 +78,13 @@ async function decide(id: string, action: string): Promise<void> {
             <el-button text size="small" @click="go(item.conversation_id)">定位</el-button>
           </div>
           <small v-if="item.note">{{ item.note }}</small>
+          <small v-if="item.role_name || item.team_name">授权对象：{{ item.role_name || item.role_id }}<template v-if="item.team_name"> · 会话 {{ item.team_name }}</template></small>
           <div class="gi-actions">
-            <el-button size="small" type="primary" :loading="busy === `approval-${item.id}`" @click="decide(item.id, 'approve_once')">允许一次</el-button>
+            <el-button size="small" type="primary" :loading="busy === `approval-${item.id}`" @click="decide(item.id, 'approve_once')">仅本次</el-button>
             <el-button size="small" @click="decide(item.id, 'approve_session')">本会话</el-button>
-            <el-button size="small" @click="decide(item.id, 'approve_always')">始终</el-button>
+            <el-button v-if="item.role_id" size="small" @click="decide(item.id, 'approve_role')">角色永久</el-button>
+            <el-button v-if="item.team_id" size="small" @click="decide(item.id, 'approve_team')">本会话永久</el-button>
+            <el-button v-if="!item.role_id && !item.team_id" size="small" @click="decide(item.id, 'approve_always')">始终</el-button>
             <el-button size="small" type="danger" plain @click="decide(item.id, 'deny')">拒绝</el-button>
           </div>
         </div>

@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import { ElButton } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 import SideDrawer from '@/components/SideDrawer.vue'
+import OptionPicker from '@/components/OptionPicker.vue'
+import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
 import type { WorkItem } from '@/api/types'
 import { useAppStore } from '@/stores/app'
@@ -11,7 +14,6 @@ export interface WorkSeed {
   body?: string
   workspace_id?: string
   role_id?: string
-  team_id?: string
 }
 
 const props = defineProps<{
@@ -24,6 +26,13 @@ const emit = defineEmits<{
   (e: 'saved', id: string): void
 }>()
 
+const roleOptions = computed(() => data.persistentRoles.map((role) => ({
+  value: role.id,
+  label: role.name || role.id,
+  description: [role.title, role.expertise].filter(Boolean).join(' · '),
+  tag: role.scope === 'temporary' ? '临时' : '',
+})))
+
 const app = useAppStore()
 const data = useDataStore()
 const saving = ref(false)
@@ -33,7 +42,6 @@ const form = reactive({
   status: 'inbox',
   workspace_id: '',
   role_id: '',
-  team_id: '',
   priority: false,
 })
 
@@ -57,7 +65,6 @@ watch(() => [props.open, props.item?.id], () => {
   form.status = item?.status || 'inbox'
   form.workspace_id = item?.workspace_id || seed.workspace_id || ''
   form.role_id = item?.role_id || seed.role_id || ''
-  form.team_id = item?.team_id || seed.team_id || ''
   form.priority = Number(item?.priority || 0) > 0
 }, { immediate: true })
 
@@ -75,7 +82,6 @@ async function save(): Promise<void> {
       body: form.body.trim(),
       workspace_id: form.workspace_id || null,
       role_id: form.role_id || null,
-      team_id: form.team_id || null,
       priority: form.priority ? 1 : 0,
     }
     if (!isNew.value) body.status = form.status
@@ -112,24 +118,23 @@ async function save(): Promise<void> {
       </div>
       <div class="field">
         <label>工作区</label>
-        <select v-model="form.workspace_id" class="input">
-          <option value="">默认工作区</option>
-          <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
-        </select>
+        <WorkspacePicker
+          v-model="form.workspace_id"
+          :workspaces="data.workspaces"
+          empty-label="默认工作区"
+          placeholder="默认工作区"
+        />
       </div>
       <div class="field">
         <label>角色</label>
-        <select v-model="form.role_id" class="input">
-          <option value="">默认角色</option>
-          <option v-for="role in data.roles" :key="role.id" :value="role.id">{{ role.name }}</option>
-        </select>
-      </div>
-      <div class="field">
-        <label>群组（可选）</label>
-        <select v-model="form.team_id" class="input">
-          <option value="">不绑定群组</option>
-          <option v-for="team in data.teams" :key="team.id" :value="team.id">{{ team.name }}</option>
-        </select>
+        <OptionPicker
+          v-model="form.role_id"
+          :items="roleOptions"
+          title="选择角色"
+          placeholder="默认角色"
+          empty-label="默认角色"
+          empty-hint="使用工单策略里的默认角色"
+        />
       </div>
       <div class="field">
         <label>优先级</label>

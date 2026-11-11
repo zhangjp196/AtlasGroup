@@ -76,6 +76,29 @@ def test_call_team_batch_dispatches_all_assignments(app_env):
     assert len(mentions) == 2
 
 
+def test_call_team_respects_participant_limit(app_env):
+    """单轮参与上限：不会因为模型一次列了全员就把所有人派上。"""
+    ws = _init(app_env)
+    team = ts.create_team(
+        ws, "限流群", max_speakers=2, leader={"name": "主持"},
+        members=[{"name": "后端", "expertise": "API"},
+                 {"name": "前端", "expertise": "UI"},
+                 {"name": "测试", "expertise": "QA"}],
+    )
+    conv = conversation.create_conversation(ws, "local", team_id=team["id"])
+    members = team["members"]
+    assignments = [
+        {"member_id": m["id"], "goal": f"{m['name']}任务"} for m in members
+    ]
+    out = json.loads(asyncio.run(conversation._exec_call_team(
+        conv, "local", zero_store.get_role(team["leader"]["id"]),
+        {"assignments": assignments}, 0)))
+    assert out["status"] == "dispatched"
+    assert out["count"] == 2
+    assert len(out["skipped"]) == 1
+    assert any("本轮参与上限为 2 人" in str(e) for e in out["errors"])
+
+
 def test_team_task_pause_resume_stop(app_env):
     from services.agent_zero.services import team_task_service
 

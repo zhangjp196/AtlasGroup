@@ -15,22 +15,22 @@ const departments: Department[] = [
 ]
 
 describe('conversation derivation', () => {
-  it('uses team name for group chats', () => {
+  it('uses team name for multi-role chats', () => {
     const conv: Conversation = { id: 'c1', team_id: 't1' }
     expect(conversationTitle(conv, teams, roles)).toBe('产品群')
-    expect(conversationMeta(conv, teams, roles).kind).toBe('群聊')
+    expect(conversationMeta(conv, teams, roles).kind).toBe('多角色')
   })
 
-  it('uses role name for single chats', () => {
+  it('uses role name for single-role chats', () => {
     const conv: Conversation = { id: 'c2', role_id: 'r1' }
     expect(conversationTitle(conv, teams, roles)).toBe('后端')
-    expect(conversationMeta(conv, teams, roles).kind).toBe('单聊')
+    expect(conversationMeta(conv, teams, roles).kind).toBe('单角色')
   })
 
   it('prefers the conversation title over the generic default role', () => {
     const conv: Conversation = { id: 'c3', role_id: 'default', title: '重构登录' }
     expect(conversationTitle(conv, teams, roles)).toBe('重构登录')
-    expect(conversationMeta(conv, teams, roles).sub).toBe('通用助手')
+    expect(conversationMeta(conv, teams, roles).sub).toBe('未指定角色')
   })
 
   it('keeps the global agent identity even if a legacy team is bound', () => {

@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { ElButton, ElInput } from 'element-plus'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import CreateDialog from '@/components/CreateDialog.vue'
+import ListPager from '@/components/ListPager.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import WorkspaceSettingsDrawer from '@/components/WorkspaceSettingsDrawer.vue'
+import { clampPage, DEFAULT_PAGE_SIZE, pageCount, pageSlice } from '@/lib/paging'
 import { api } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
@@ -55,19 +58,27 @@ async function onMenu(action: string): Promise<void> {
   }
 }
 
-const workspaces = computed(() => data.activeWorkspaces)
+const query = ref('')
+const page = ref(1)
+const PAGE_SIZE = DEFAULT_PAGE_SIZE
+
+const workspaces = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  return data.activeWorkspaces.filter((ws) => {
+    if (!q) return true
+    return `${ws.name || ''} ${ws.root_path || ''} ${ws.kind || ''} ${ws.id || ''}`
+      .toLowerCase()
+      .includes(q)
+  })
+})
+const pagedWorkspaces = computed(() => pageSlice(workspaces.value, page.value, PAGE_SIZE))
+const pages = computed(() => pageCount(workspaces.value.length, PAGE_SIZE))
+watch(query, () => { page.value = 1 })
+watch(pages, (total) => { page.value = clampPage(page.value, total) })
 const roleCountByWs = computed(() => {
   const map = new Map<string, number>()
   for (const role of data.persistentRoles) {
     const id = String(role.workspace_id || '')
-    if (id) map.set(id, (map.get(id) || 0) + 1)
-  }
-  return map
-})
-const teamCountByWs = computed(() => {
-  const map = new Map<string, number>()
-  for (const team of data.teams) {
-    const id = String(team.workspace_id || '')
     if (id) map.set(id, (map.get(id) || 0) + 1)
   }
   return map
@@ -99,9 +110,13 @@ function onDeleted(): void {
   </PageHeader>
 
   <div class="canvas-body">
+    <div class="list-toolbar">
+      <el-input v-model="query" placeholder="搜索名称 / 路径 / id" clearable />
+      <button v-if="query.trim()" class="mini-link" type="button" @click="query = ''">清除搜索</button>
+    </div>
     <div class="tile-grid">
       <article
-        v-for="ws in workspaces"
+        v-for="ws in pagedWorkspaces"
         :key="ws.id"
         class="tile-card ws-tile"
         @click="openWorkspace(ws.id)"
@@ -118,15 +133,18 @@ function onDeleted(): void {
         </div>
         <div class="tile-chips">
           <span class="chip">{{ roleCountByWs.get(ws.id) || 0 }} 个角色</span>
-          <span class="chip">{{ teamCountByWs.get(ws.id) || 0 }} 个群组</span>
         </div>
         <div class="tile-foot">
-          <span>角色与群组绑定到此工作区</span>
+          <span>角色绑定到此工作区</span>
           <span>{{ ws.archived ? '已归档' : '打开详情' }}</span>
         </div>
       </article>
     </div>
-    <div v-if="!workspaces.length" class="empty">还没有工作区<br />点右上角「＋ 添加工作区」选择一个文件夹</div>
+    <div v-if="!workspaces.length" class="empty">
+      <template v-if="query.trim()">没有匹配「{{ query }}」的工作区<br /><button class="mini-link" type="button" @click="query = ''">清除搜索</button></template>
+      <template v-else>还没有工作区<br />点右上角「＋ 添加工作区」选择一个文件夹</template>
+    </div>
+    <ListPager :page="page" :pages="pages" :total="workspaces.length" :page-size="PAGE_SIZE" @update:page="page = $event" />
   </div>
 
   <CreateDialog :open="createOpen" kind="ws" @close="createOpen = false" @created="onCreated" />

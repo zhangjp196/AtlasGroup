@@ -3,7 +3,7 @@
 用户方向：角色与群组、对话与任务分开。
 - 派发任务：成员在前台回复一句「收到」，任务在后台跑；
 - 任务过程不写进对话转录；
-- 任务结束 → 对话里一条完成触发器（用户点「继续对话」再整合）；
+- 任务结束 → 对话里一条完成触发器，默认自动交回主持角色继续推进；
 - 单角色会话也支持后台任务（`background_task` 工具）。
 """
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, Dict, List
+
+import pytest
 
 from services.agent_zero.services import team_service, team_task_service
 from services.agent_zero.stores import zero_store
@@ -98,12 +100,18 @@ def test_task_completion_writes_one_trigger(app_env, monkeypatch):
     assert len(triggers) == 1
     assert triggers[0]["task_id"] == task["id"]
     assert triggers[0]["task_status"] == "done"
+    assert triggers[0]["task_continued"] is True
 
-    # 触发器本身不自动唤醒主持；继续对话才创建主会话 run。
-    assert run_service.running_run(conv["id"], include_member=False) is None
-    out = team_task_service.continue_task(task["id"])
-    run = run_service.get_run(out["run"]["id"])
-    assert run and not run.get("target_role_id")
+    # 默认自动继续：任务完成即把结果交回主会话，创建一条主持 run。
+    runs = run_service.list_runs(conv["id"], limit=20)
+    leaders = [r for r in runs
+               if r.get("id") != run_id and not r.get("target_role_id")]
+    assert leaders, runs
+    assert "成员结果" in str(leaders[0].get("content") or "")
+    # 已自动交回 → 不再允许手动重复触发。
+    assert team_task_service.get_task(task["id"])["can_continue"] is False
+    with pytest.raises(ValueError):
+        team_task_service.continue_task(task["id"])
 
 
 def test_task_creates_and_finishes_work_item(app_env, monkeypatch):
@@ -168,3 +176,41 @@ def test_single_role_run_exposes_background_task_tool(monkeypatch):
     names = captured[0]
     assert "background_task" in names
     assert "call_team" not in names
+
+
+def test_task_failure_also_auto_continues(app_env, monkeypatch):
+    """任务失败同样自动交回：主持角色看到错误后自己修、再继续。"""
+    ws = _env(app_env)
+    team, conv = _team_conv(ws)
+    leader, member = team["leader"], team["members"][0]
+    _quiet(monkeypatch)
+
+    task = team_task_service.create_task(
+        conv, team, leader,
+        [{"role_id": member["id"], "role_name": member["name"],
+          "goal": "补索引", "role": member}], "local")
+    run_id = str(task["members"][0]["run_id"])
+    run_service.finish_run(run_id, run_service.STATUS_FAILED, "boom")
+    team_task_service.on_run_finished(run_id)
+
+    triggers = [m for m in conversation.list_messages(conv["id"])
+                if m.get("kind") == "task_done"]
+    assert triggers and triggers[0]["task_continued"] is True
+    assert triggers[0]["task_status"] == "failed"
+
+    runs = run_service.list_runs(conv["id"], limit=20)
+    leaders = [r for r in runs
+               if r.get("id") != run_id and not r.get("target_role_id")]
+    assert leaders, runs
+    content = str(leaders[0].get("content") or "")
+    assert "失败" in content and "诊断" in content
+    assert team_task_service.get_task(task["id"])["can_continue"] is False
+
+    # 失败但已被角色接手：工单不该再挂在「需要你」等用户点。
+    from services.agent_zero.services import work_service
+
+    items = work_service.list_items(conversation_id=conv["id"])["items"]
+    item = next(x for x in items
+                if x.get("source_ref") == f"team_task:{task['id']}")
+    assert item["status"] == "done"
+    assert "已自动交回角色处理" in (item.get("result_summary") or "")

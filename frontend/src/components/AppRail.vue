@@ -9,15 +9,15 @@ const data = useDataStore()
 const route = useRoute()
 const router = useRouter()
 
-const props = defineProps<{ pendingCount?: number; globalAgentOpen?: boolean }>()
-const emit = defineEmits<{ (e: 'global-agent'): void }>()
+const props = defineProps<{ pendingCount?: number; globalAgentOpen?: boolean; globalChatOpen?: boolean }>()
+const emit = defineEmits<{ (e: 'global-agent'): void; (e: 'global-chat'): void }>()
 
 const sections = [
   { key: 'work', label: '工单', path: '/work' },
   { key: 'conv', label: '会话', path: '/conv' },
+  { key: 'schedule', label: '定时任务', path: '/schedule' },
   { key: 'ws', label: '工作区', path: '/ws' },
   { key: 'role', label: '组织与角色', path: '/role' },
-  { key: 'group', label: '群组', path: '/group' },
 ]
 
 const attention = computed(() => Number(data.workStats?.attention || 0))
@@ -47,6 +47,7 @@ function toggle(): void {
     >
       <svg v-if="section.key === 'work'" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="4" /><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6" /></svg>
       <svg v-else-if="section.key === 'conv'" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8Z" /></svg>
+      <svg v-else-if="section.key === 'schedule'" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8" /><path d="M12 9v4l3 2M9 2h6" /></svg>
       <svg v-else-if="section.key === 'ws'" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z" /></svg>
       <svg v-else-if="section.key === 'role'" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.2" /><path d="M5 20c0-3.4 3.1-5.6 7-5.6s7 2.2 7 5.6" /></svg>
       <svg v-else viewBox="0 0 24 24"><circle cx="9" cy="8" r="2.6" /><path d="M3.6 19c0-2.6 2.4-4.4 5.4-4.4s5.4 1.8 5.4 4.4" /><circle cx="17" cy="9" r="2.2" /><path d="M15.8 14.8c2.4.3 4.2 2 4.2 4.2" /></svg>
@@ -58,12 +59,17 @@ function toggle(): void {
     <button
       class="rail-btn global-agent-btn"
       :class="{ active: props.globalAgentOpen }"
-      :title="`全局Agent · 待处理 ${Number(props.pendingCount || 0)}`"
-      aria-label="全局Agent"
+      :title="`全局管理 · 待处理 ${Number(props.pendingCount || 0)}`"
+      aria-label="全局管理"
       @click="emit('global-agent')"
     >
       <svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="11" rx="4" /><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6" /></svg>
       <span v-if="Number(props.pendingCount || 0) > 0" class="rail-badge">{{ Number(props.pendingCount) > 99 ? '99+' : props.pendingCount }}</span>
+    </button>
+
+    <button class="rail-btn" :class="{ active: props.globalChatOpen }"
+      title="全局对话" aria-label="全局对话" @click="emit('global-chat')">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c-4 4-4 14 0 18M12 3c4 4 4 14 0 18" /></svg>
     </button>
 
     <button class="rail-btn theme-toggle" :title="`主题：${app.theme}`" aria-label="切换主题" @click="toggle">

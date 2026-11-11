@@ -510,10 +510,13 @@ def update_team(team_id: str, name: Optional[str] = None,
              "leader": leader_id, "members": zero_store._json(member_ids)},
         )
         if new_ws_id and new_ws_id != ws_id:
-            # 群组换了工作区：绑定它的群聊会话跟着迁移。
+            # 群组换了工作区：绑定它的「跟随」群聊会话跟着迁移；
+            # 手动指定工作区的会话保留自己的选择。
             db.execute(
                 text(f"UPDATE {_q('conversations')} SET workspace_id = :ws, "
-                     f"updated_at = datetime('now','localtime') WHERE team_id = :id"),
+                     f"workspace_custom = 0, "
+                     f"updated_at = datetime('now','localtime') WHERE team_id = :id "
+                     f"AND COALESCE(workspace_custom, 0) = 0"),
                 {"ws": new_ws_id, "id": team_id},
             )
             # 群成员角色也跟随群组工作区（单聊该角色时使用同一目录）。
@@ -630,8 +633,11 @@ def team_for_conv(conv: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 _MODE_HINTS = {
     "orchestrate": (
-        "执行方式：收到任务后先拆成可并行的子任务，**尽量覆盖所有相关成员**；"
-        "用一次 `delegate(target=team, assignments=[{member_id, goal}, ...])` 批量并行派发，"
+        "执行方式：收到任务后先判断**谁真的需要参与**，只挑 1–2 个与任务直接相关、"
+        "专长匹配的成员；不要为了「覆盖」把全体成员都派上，与任务无关的成员不 @、"
+        "不 delegate。确有必要一次派多人时，仍然只选最相关的少数几个（受本群"
+        "「单轮参与上限」约束），并按重要性排序。"
+        "用一次 `delegate(target=team, assignments=[{member_id, goal}, ...])` 批量派发，"
         "不要用多次单发、也不要逐个等待。派发时你直接 @ 成员，由成员自己回复；"
         "不要以用户身份转发消息，也不要说「我帮你转达」。"
         "**分流规则**：只是征求成员意见 / 让成员说一句看法 → 直接 `@成员`，"
@@ -645,7 +651,8 @@ _MODE_HINTS = {
     ),
     "roundtable": (
         "执行方式：这是圆桌群聊——你与成员会各自应答；用户用 `@成员名` 点名时由该成员回复。"
-        "你回复里 @ 成员 = 请它接一句；要让它动手做事（工具 / 长任务）时，"
+        "你回复里 @ 成员 = 请它接一句；只 @ 与当前话题直接相关的 1–2 个成员，"
+        "不要每轮把全员都 @ 上。要让它动手做事（工具 / 长任务）时，"
         "明确写「后台任务」或改用 `delegate` 派发，不要在正文里让它干等。"
         "只说你自己的判断，不要替成员转发或编造他们的结论。"
     ),
@@ -722,9 +729,12 @@ def roster_text(team: Dict[str, Any],
     if not team.get("members"):
         lines.append("- （暂无成员）")
     else:
+        participants = normalize_speakers(team.get("max_speakers"))
         lines.append(
-            "派发任务：先拆成可并行的子任务，用 `delegate(target=team, assignments=[...])` "
-            "一次覆盖尽量多的相关成员；各成员会并行执行，结果回到群聊后由你整合。"
+            f"派发任务：先判断谁真的需要参与，**默认只挑 1–2 个专长匹配的成员**；"
+            f"本轮最多 {participants} 名成员参与，不要每轮把全员都派上。"
+            "确需多人时用 `delegate(target=team, assignments=[...])` 一次派发最相关的少数几个"
+            "（按重要性排序），各成员会并行执行，结果回到群聊后由你整合。"
             "你直接 @ 成员派活，不要以用户身份转发，也不要说「我帮你转达」。"
             "分清两种：只征求一句意见 → 直接 `@成员`（成员在会话里回复）；"
             "需要成员动手做事（工具 / 长任务 / 产出结果）→ 用 `delegate` 登记为后台任务，"

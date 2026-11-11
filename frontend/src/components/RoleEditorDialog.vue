@@ -1,10 +1,16 @@
 <script setup lang="ts">
+import { ElButton } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 import AvatarField from '@/components/AvatarField.vue'
+import ListPager from '@/components/ListPager.vue'
+import ModelCascader from '@/components/ModelCascader.vue'
+import OptionPicker from '@/components/OptionPicker.vue'
 import SideDrawer from '@/components/SideDrawer.vue'
+import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
 import type { Role, ToolItem } from '@/api/types'
 import { departmentPath } from '@/lib/derive'
+import { DEFAULT_PAGE_SIZE, pageSlice } from '@/lib/paging'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -40,11 +46,24 @@ const form = reactive({
 const isNew = computed(() => !props.role)
 const title = computed(() => props.role ? `编辑「${props.role.name}」` : '新建角色')
 
+const departmentOptions = computed(() => data.departments.map((dept) => ({
+  value: dept.id,
+  label: departmentPath(dept.id, data.departments),
+  description: dept.parent_id ? '子部门' : '一级部门',
+})))
+
 const filteredTools = computed(() => {
   const q = toolSearch.value.trim().toLowerCase()
   if (!q) return tools.value
   return tools.value.filter((tool) => `${tool.code || ''} ${tool.name || ''} ${tool.description || ''}`.toLowerCase().includes(q))
 })
+
+// 工具可能几十个：按每页 12 个分页，搜索后回到第一页。
+const toolPage = ref(1)
+const pagedTools = computed(() => pageSlice(filteredTools.value, toolPage.value, DEFAULT_PAGE_SIZE))
+const toolPages = computed(() => Math.max(1, Math.ceil(filteredTools.value.length / DEFAULT_PAGE_SIZE)))
+watch([toolSearch, filteredTools], () => { toolPage.value = 1 })
+watch(toolPages, (total) => { toolPage.value = Math.min(toolPage.value, total) })
 
 watch(() => [props.open, props.role?.id], () => {
   if (!props.open) return
@@ -70,11 +89,6 @@ async function loadTools(): Promise<void> {
   } catch {
     tools.value = []
   }
-}
-
-function workspaceLabel(id?: string): string {
-  const wsId = String(id || '')
-  return data.workspaces.find((ws) => ws.id === wsId)?.name || wsId
 }
 
 function toggleTool(code?: string): void {
@@ -147,24 +161,24 @@ async function save(): Promise<void> {
     </div>
     <div class="field">
       <label>绑定工作区 <span class="role-line">决定这个角色的文件和终端上下文</span></label>
-      <select v-model="form.workspace_id" class="input">
-        <option value="">不绑定（使用默认工作区）</option>
-        <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
-        <option
-          v-if="form.workspace_id && !data.activeWorkspaces.some((ws) => ws.id === form.workspace_id)"
-          :value="form.workspace_id"
-        >{{ workspaceLabel(form.workspace_id) }}（已归档）</option>
-      </select>
+      <WorkspacePicker
+        v-model="form.workspace_id"
+        :workspaces="data.workspaces"
+        empty-label="不绑定（使用默认工作区）"
+        placeholder="不绑定（使用默认工作区）"
+      />
       <small class="role-line">会话使用这个角色时，会自动在该工作区里运行。</small>
     </div>
     <div class="field">
       <label>所属部门 <span class="role-line">可留空 = 未安排</span></label>
-      <select v-model="form.department_id" class="input">
-        <option value="">未安排</option>
-        <option v-for="dept in data.departments" :key="dept.id" :value="dept.id">
-          {{ departmentPath(dept.id, data.departments) }}
-        </option>
-      </select>
+      <OptionPicker
+        v-model="form.department_id"
+        :items="departmentOptions"
+        title="选择部门"
+        placeholder="未安排"
+        empty-label="未安排"
+        empty-hint="留空表示暂不归属部门"
+      />
       <small class="role-line">部门支持多级；在「组织与角色」里可以新建子部门。</small>
     </div>
     <div class="field">
@@ -186,13 +200,19 @@ async function save(): Promise<void> {
         @input="setRawTools"
       />
       <div v-if="filteredTools.length" class="tool-picker">
-        <label v-for="tool in filteredTools" :key="tool.code" class="tool-choice" :title="tool.description || ''">
+        <label v-for="tool in pagedTools" :key="tool.code" class="tool-choice" :title="tool.description || ''">
           <input type="checkbox" :checked="form.tools.includes(String(tool.code))" @change="toggleTool(tool.code)" />
           <span>{{ tool.name || tool.code }}</span>
           <span class="tool-choice-code">{{ tool.code }}</span>
         </label>
       </div>
       <div v-else class="tool-picker"><span class="role-line">没有匹配的工具</span></div>
+      <ListPager
+        :page="toolPage"
+        :total="filteredTools.length"
+        :page-size="DEFAULT_PAGE_SIZE"
+        @update:page="toolPage = $event"
+      />
       <div class="tool-picker-actions">
         <button class="mini-link" type="button" @click="selectAll">全选</button>
         <button class="mini-link" type="button" @click="clearTools">清空</button>
@@ -201,12 +221,14 @@ async function save(): Promise<void> {
     </div>
     <div class="field">
       <label>模型档案</label>
-      <select v-model="form.model_code" class="input">
-        <option value="">未指定（使用默认）</option>
-        <option v-for="model in data.models" :key="model.code" :value="model.code">{{ model.name || model.code }} · {{ model.code }}</option>
-        <option v-if="form.model_code && !data.models.some((m) => m.code === form.model_code)" :value="form.model_code">{{ form.model_code }}</option>
-      </select>
-      <small class="role-line">不指定时使用默认模型；指定后优先使用该角色的模型。</small>
+      <ModelCascader
+        v-model="form.model_code"
+        :models="data.models"
+        :subscriptions="data.subscriptions"
+        default-label="未指定（跟随系统）"
+        placeholder="未指定（跟随系统）"
+      />
+      <small class="role-line">不指定时跟随系统模型；指定后优先使用该角色的模型。</small>
     </div>
 
     <template #footer>

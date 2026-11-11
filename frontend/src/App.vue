@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { ElConfigProvider } from 'element-plus'
 import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import AppRail from '@/components/AppRail.vue'
 import NoticeStack from '@/components/NoticeStack.vue'
+import OnlineRoles from '@/components/OnlineRoles.vue'
 import StartupSplash from '@/components/StartupSplash.vue'
 import TaskWindow from '@/components/TaskWindow.vue'
 import { api } from '@/api/client'
@@ -11,6 +13,7 @@ import type { Conversation } from '@/api/types'
 import { playSound } from '@/lib/sound'
 import { useAppStore } from '@/stores/app'
 import { useAttentionStore } from '@/stores/attention'
+import { useChatWindowsStore } from '@/stores/chatWindows'
 import { useDataStore } from '@/stores/data'
 import { useNoticeStore } from '@/stores/notice'
 import { useWindowsStore } from '@/stores/windows'
@@ -18,6 +21,7 @@ import { useWindowsStore } from '@/stores/windows'
 const app = useAppStore()
 const data = useDataStore()
 const attention = useAttentionStore()
+const chatWindows = useChatWindowsStore()
 const notice = useNoticeStore()
 const windows = useWindowsStore()
 const route = useRoute()
@@ -25,8 +29,38 @@ const router = useRouter()
 
 const ChatPanel = defineAsyncComponent(() => import('@/components/chat/ChatPanel.vue'))
 const globalAgentId = ref('')
+const globalChatId = ref('')
+const ensuringGlobalChat = ref(false)
 const globalAgentTab = ref<'chat' | 'inbox'>('chat')
 const ensuringGlobalAgent = ref(false)
+
+// 右侧会话 / 角色栏：默认 480px，可拖拽、可收起；状态跨刷新保留。
+const DOCK_KEY = 'atlasx.dock.v1'
+const dockCollapsed = ref(false)
+const dockWidth = ref(480)
+try {
+  const saved = JSON.parse(localStorage.getItem(DOCK_KEY) || '{}')
+  if (typeof saved.collapsed === 'boolean') dockCollapsed.value = saved.collapsed
+  if (Number.isFinite(saved.width)) dockWidth.value = Math.min(720, Math.max(320, Number(saved.width)))
+} catch { /* ignore */ }
+const dockStyleWidth = computed(() => (dockCollapsed.value ? '64px' : `${dockWidth.value}px`))
+
+function saveDockState(): void {
+  try {
+    localStorage.setItem(DOCK_KEY, JSON.stringify({ collapsed: dockCollapsed.value, width: dockWidth.value }))
+  } catch { /* ignore */ }
+}
+
+function toggleDock(): void {
+  dockCollapsed.value = !dockCollapsed.value
+  saveDockState()
+}
+
+function resizeDock(width: number): void {
+  dockCollapsed.value = false
+  dockWidth.value = Math.min(720, Math.max(320, Math.round(width)))
+  saveDockState()
+}
 // 启动动画：默认固定展示 5s（可点击跳过），后续界面在它背后并行加载。
 // `?boot=<ms>` 仅用于截图 / 联调时延长动画，不传就是 5s。
 const bootDuration = (() => {
@@ -39,6 +73,8 @@ const bootDuration = (() => {
   }
 })()
 const booting = ref(true)
+// 首屏数据（工作区 / 会话 / 角色 / 团队 / 模型 / 工单）就绪后提前关掉启动动画。
+const bootReady = ref(false)
 // 需要人处理的入口：待授权 + 待回答（未读 / 运行中只展示，不顶在角标上）。
 const pendingCount = computed(() => Number(attention.counts.authorizations || 0))
 const lastCounts = { approvals: 0, questions: 0 }
@@ -48,6 +84,45 @@ const chatId = computed(() => {
   if (route.meta.section !== 'conv') return ''
   return String(route.params.id || '')
 })
+
+watch(chatId, (id) => {
+  if (!id) return
+  chatWindows.openConversation(id)
+  void router.replace('/conv')
+}, { immediate: true })
+
+// 当前正在看的会话不显示未读、也不弹提示：窗口开着就自动记为已读。
+function openConversationIds(): Set<string> {
+  const ids = new Set<string>()
+  for (const item of chatWindows.windows) {
+    if (item.conversationId) ids.add(item.conversationId)
+  }
+  if (globalAgentId.value) ids.add(globalAgentId.value)
+  if (globalChatId.value) ids.add(globalChatId.value)
+  return ids
+}
+
+const markingRead = new Set<string>()
+async function markOpenRead(id: string): Promise<void> {
+  if (!id || markingRead.has(id)) return
+  markingRead.add(id)
+  try {
+    await api(`/conversations/${encodeURIComponent(id)}/read`, { method: 'POST' })
+    await attention.load()
+  } catch {
+    /* 已读失败不影响当前会话 */
+  } finally {
+    markingRead.delete(id)
+  }
+}
+
+watch(
+  [() => chatWindows.windows.map((item) => item.conversationId).join(','), globalAgentId, globalChatId],
+  () => {
+    for (const id of openConversationIds()) void markOpenRead(id)
+  },
+  { immediate: true },
+)
 
 function openGlobalAgentInbox(): void {
   globalAgentTab.value = 'inbox'
@@ -79,6 +154,18 @@ async function openGlobalAgent(): Promise<void> {
   } finally {
     ensuringGlobalAgent.value = false
   }
+}
+
+async function openGlobalChat(): Promise<void> {
+  if (globalChatId.value || ensuringGlobalChat.value) return
+  ensuringGlobalChat.value = true
+  try {
+    const conv = await api<Conversation>('/app/global-chat', { method: 'POST' })
+    await data.loadAll()
+    globalChatId.value = conv.id
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  } finally { ensuringGlobalChat.value = false }
 }
 
 watch(() => attention.counts, (counts) => {
@@ -146,7 +233,12 @@ watch(() => attention.data, (value) => {
     replaceActivity(lastRunning, running)
     return
   }
+  const openIds = openConversationIds()
+  for (const id of unread.keys()) {
+    if (openIds.has(id)) void markOpenRead(id)
+  }
   for (const [id, info] of unread) {
+    if (openIds.has(id)) continue
     const prev = lastUnread.get(id)?.count || 0
     if (info.count > prev) {
       playSound('message')
@@ -185,29 +277,49 @@ function onNoticeAction(action: string): void {
 
 onMounted(async () => {
   await app.initTheme()
-  await Promise.all([data.loadAll(), data.loadWork()])
+  try {
+    await Promise.all([data.loadAll(), data.loadWork(), data.loadSchedules()])
+  } finally {
+    // 加载成功或失败都放行启动动画：失败时界面自己会提示，不该卡在启动页。
+    bootReady.value = true
+  }
   attention.start()
   window.setInterval(() => {
-    if (!document.hidden) void data.loadWork()
+    if (!document.hidden) {
+      void data.loadWork()
+      void data.loadRoles()
+      void data.loadConversations()
+      void data.loadSchedules()
+    }
   }, 15_000)
 })
 </script>
 
 <template>
-  <StartupSplash v-if="booting" :duration="bootDuration" @done="booting = false" />
+  <StartupSplash v-if="booting" :duration="bootDuration" :ready="bootReady" @done="booting = false" />
 
   <el-config-provider :locale="zhCn">
-  <div class="app flat">
-    <AppRail :pending-count="pendingCount" :global-agent-open="Boolean(globalAgentId)" @global-agent="openGlobalAgent" />
+  <div class="app flat" :style="{ '--dock-width': dockStyleWidth }">
+    <AppRail :pending-count="pendingCount" :global-agent-open="Boolean(globalAgentId)"
+      :global-chat-open="Boolean(globalChatId)" @global-agent="openGlobalAgent" @global-chat="openGlobalChat" />
     <main class="canvas">
       <router-view />
     </main>
+    <OnlineRoles :collapsed="dockCollapsed" @toggle="toggleDock" @resize="resizeDock" />
   </div>
 
   <ChatPanel
-    v-if="chatId"
-    :conversation-id="chatId"
-    @close="router.push('/conv')"
+    v-for="(win, index) in chatWindows.windows"
+    :key="win.key"
+    :conversation-id="win.conversationId"
+    :draft-role-id="win.roleId || ''"
+    :draft-participants="win.participantIds || []"
+    :draft-workspace-id="win.workspaceId || ''"
+    :window-index="index"
+    floating
+    @close="chatWindows.close(win.key)"
+    @focus="chatWindows.focus(win.key)"
+    @promoted="(id) => chatWindows.promote(win.key, id)"
   />
 
   <ChatPanel
@@ -218,6 +330,9 @@ onMounted(async () => {
     global-agent
     @close="globalAgentId = ''; globalAgentTab = 'chat'"
   />
+
+  <ChatPanel v-if="globalChatId" :conversation-id="globalChatId" floating global-conversation
+    @close="globalChatId = ''" />
 
   <TaskWindow
     v-for="(win, index) in windows.tasks"
@@ -233,3 +348,9 @@ onMounted(async () => {
   <NoticeStack @action="onNoticeAction" />
   </el-config-provider>
 </template>
+
+<style scoped>
+.app.flat { grid-template-columns: 64px minmax(0, 1fr) var(--dock-width, 480px); }
+@media (max-width: 1200px) { .app.flat { grid-template-columns: 64px minmax(0, 1fr) clamp(320px, 30vw, 440px); } .app.flat { --dock-width: clamp(320px, 30vw, 440px); } }
+@media (max-width: 800px) { .app.flat { grid-template-columns: 52px minmax(0, 1fr); } .side-dock { display: none; } }
+</style>

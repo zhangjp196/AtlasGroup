@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import WorkSettingsDrawer from '@/components/WorkSettingsDrawer.vue'
+import TokenMeter from '@/components/TokenMeter.vue'
 import { api } from '@/api/client'
 import type { Conversation, Team, TeamTask, WorkItem } from '@/api/types'
+import { compactNumber } from '@/lib/format'
+import { hasUsage, usageSummary } from '@/lib/usage'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 import { useWindowsStore } from '@/stores/windows'
@@ -25,6 +27,11 @@ const router = useRouter()
 const items = ref<WorkItem[]>([])
 const tasks = ref<TeamTask[]>([])
 const workDetail = ref<WorkItem | null>(null)
+// 工单详情抽屉只在点开时用得到，但它静态引入会带进 Markdown/编辑器一大串依赖；
+// 改成异步 + v-if，首屏包小一截，第一次打开时再拉这个 chunk。
+const WorkSettingsDrawer = defineAsyncComponent(
+  () => import('@/components/WorkSettingsDrawer.vue'),
+)
 const loading = ref(false)
 const conv = ref<Conversation | null>(null)
 const teamInfo = ref<Team | null>(null)
@@ -73,6 +80,14 @@ const activeTasks = computed(() => tasks.value.filter((task) => {
   const status = String(task.status || '')
   return ['running', 'paused', 'queued'].includes(status) || Boolean(task.can_continue)
 }))
+// 浮窗里的 token 合计：任务 = 成员 run 之和；工单 = 该工单的会话 / 任务用量。
+const taskTokens = computed(() => activeTasks.value.reduce(
+  (sum, task) => sum + usageSummary(task.usage).total, 0,
+))
+const workTokens = computed(() => items.value.reduce(
+  (sum, item) => sum + usageSummary(item.usage).total, 0,
+))
+
 
 const STATUS_LABEL: Record<string, string> = {
   inbox: '待分派', working: '进行中', needs_attention: '需要你',
@@ -102,6 +117,11 @@ async function refresh(): Promise<void> {
     }
     items.value = work.items || []
     tasks.value = taskData.items || []
+    // 详情抽屉可能开着：让它的 usage 跟着 5s 轮询一起刷新。
+    if (workDetail.value) {
+      const fresh = items.value.find((entry) => entry.id === workDetail.value?.id)
+      if (fresh) workDetail.value = fresh
+    }
   } finally {
     loading.value = false
   }
@@ -208,18 +228,29 @@ onBeforeUnmount(() => {
 
     <div class="task-window-body">
       <template v-if="activeTasks.length">
-        <div class="tw-head">后台任务 <span>{{ activeTasks.length }}</span></div>
+        <div class="tw-head">
+          后台任务
+          <span>{{ activeTasks.length }}<template v-if="taskTokens"> · {{ compactNumber(taskTokens) }} tokens</template></span>
+        </div>
         <div v-for="task in activeTasks" :key="task.id" class="tw-row" :class="task.status">
           <span class="tw-dot" />
           <span class="tw-main">
             <b>{{ task.title || task.id }}</b>
-            <small>{{ label(task.status) }} · {{ task.done_members || 0 }}/{{ task.total_members || 0 }} 完成</small>
+            <small class="tw-meta">
+              <span>{{ label(task.status) }}</span>
+              <span class="tw-sep">·</span>
+              <span>{{ task.done_members || 0 }}/{{ task.total_members || 0 }} 完成</span>
+              <TokenMeter v-if="hasUsage(task.usage)" :usage="task.usage" variant="inline" />
+            </small>
           </span>
           <button v-if="task.can_continue" class="tw-action" type="button" @click.stop="continueTask(task.id)">继续对话</button>
         </div>
       </template>
 
-      <div class="tw-head">工单 <span>{{ items.length }}</span></div>
+      <div class="tw-head">
+        工单
+        <span>{{ items.length }}<template v-if="workTokens"> · {{ compactNumber(workTokens) }} tokens</template></span>
+      </div>
       <button
         v-for="item in items"
         :key="item.id"
@@ -231,7 +262,12 @@ onBeforeUnmount(() => {
         <span class="tw-dot" />
         <span class="tw-main">
           <b>{{ item.title }}</b>
-          <small>{{ label(item.status) }} · {{ item.role_name || item.team_name || '会话' }}</small>
+          <small class="tw-meta">
+            <span>{{ label(item.status) }}</span>
+            <span class="tw-sep">·</span>
+            <span>{{ item.role_name || item.team_name || '会话' }}</span>
+            <TokenMeter v-if="hasUsage(item.usage)" :usage="item.usage" variant="inline" />
+          </small>
         </span>
         <span class="tw-go">›</span>
       </button>
@@ -259,6 +295,7 @@ onBeforeUnmount(() => {
     </div>
 
     <WorkSettingsDrawer
+      v-if="workDetail"
       :open="Boolean(workDetail)"
       :item="workDetail"
       @close="workDetail = null"
@@ -309,7 +346,7 @@ onBeforeUnmount(() => {
 }
 .task-window-actions button:hover { color: var(--text); border-color: var(--line-strong); }
 .task-window-body { flex: 1; min-height: 0; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
-.tw-head { display: flex; align-items: center; justify-content: space-between; margin: 4px 2px 2px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.tw-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 2px 2px; font-size: 10px; letter-spacing: .02em; color: var(--faint); }
 .tw-head span { color: var(--dim); font-variant-numeric: tabular-nums; }
 .tw-row {
   display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;

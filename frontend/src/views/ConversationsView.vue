@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { ElButton } from 'element-plus'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import CreateDialog from '@/components/CreateDialog.vue'
+import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import ConversationSettingsDrawer from '@/components/chat/ConversationSettingsDrawer.vue'
+import ListPager from '@/components/ListPager.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import TokenMeter from '@/components/TokenMeter.vue'
 import { api } from '@/api/client'
 import type { Conversation } from '@/api/types'
-import { conversationMeta, conversationParts, conversationTitle, GLOBAL_AGENT_ZONE } from '@/lib/derive'
-import { shortTime } from '@/lib/format'
+import { conversationMeta, conversationParts, conversationTitle, GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE } from '@/lib/derive'
+import { compactNumber, shortTime } from '@/lib/format'
+import { clampPage, DEFAULT_PAGE_SIZE, pageCount, pageSlice } from '@/lib/paging'
+import { usageSummary } from '@/lib/usage'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -33,7 +39,7 @@ const menuItems = computed<ContextMenuItem[]>(() => {
   return [
     { label: '打开会话', action: 'open' },
     { label: '重命名', action: 'rename' },
-    { label: '会话管理（角色 / 群组）', action: 'manage' },
+    { label: '会话管理（角色 / 参与角色）', action: 'manage' },
     { label: '', action: '', separator: true },
     { label: '复制 / 分支', action: 'fork', hint: '保留当前上下文' },
     { label: '标记已读', action: 'read', disabled: !conv?.unread },
@@ -123,7 +129,9 @@ function onManagedDeleted(): void {
 }
 
 const conversations = computed(() => {
-  const list = data.conversations.filter((conv) => String(conv.zone || '') !== GLOBAL_AGENT_ZONE)
+  const list = data.conversations.filter((conv) => ![GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE].includes(String(conv.zone || '')))
+    // 只有真正产生过消息的会话才进入列表：草稿会话尚未创建后端记录。
+    .filter((conv) => Number(conv.message_count || 0) > 0 || Boolean(conv.last_message))
   return [...list].sort((a, b) => {
     const aLive = a.active || a.unread ? 1 : 0
     const bLive = b.active || b.unread ? 1 : 0
@@ -164,6 +172,21 @@ const filteredConversations = computed(() => {
     return true
   })
 })
+
+// 会话多时按页展示：每页 12 个，超过 12 个才出现分页器。
+const page = ref(1)
+const PAGE_SIZE = DEFAULT_PAGE_SIZE
+const pagedConversations = computed(
+  () => pageSlice(filteredConversations.value, page.value, PAGE_SIZE),
+)
+const pages = computed(() => pageCount(filteredConversations.value.length, PAGE_SIZE))
+watch([filterWorkspace, filterKind, unreadOnly, runningOnly, keyword], () => { page.value = 1 })
+watch(pages, (total) => { page.value = clampPage(page.value, total) })
+
+// 筛选结果的 token 合计：一眼看出这批会话的消耗规模。
+const filteredTokens = computed(() => filteredConversations.value.reduce(
+  (sum, conv) => sum + usageSummary(conv.usage).total, 0,
+))
 
 const filtersActive = computed(() => Boolean(
   filterWorkspace.value || filterKind.value !== 'all' || unreadOnly.value || runningOnly.value || keyword.value.trim(),
@@ -208,7 +231,7 @@ function avatarOf(conv: (typeof data.conversations)[number]): string {
 
 function chipsOf(conv: (typeof data.conversations)[number]): string[] {
   const { team, role, isGroup } = conversationParts(conv, data.teams, data.roles)
-  const chips = [isGroup ? '群聊' : '单聊']
+  const chips = [isGroup ? '多角色' : '单角色']
   const lead = isGroup ? team?.leader : role
   if (lead?.title) chips.push(lead.title)
   if (lead?.department) chips.push(lead.department)
@@ -237,26 +260,31 @@ function onCreated(_kind: string, id: string): void {
   <div class="canvas-body">
     <div class="conv-filters">
       <input v-model="keyword" class="input conv-search" placeholder="搜索会话 / 角色 / 工作区…" />
-      <select v-model="filterWorkspace" class="input conv-ws-filter" title="按工作区筛选">
-        <option value="">全部工作区</option>
-        <option v-for="ws in workspaceOptions" :key="ws.id" :value="ws.id">
-          {{ ws.name }}{{ ws.archived ? '（已归档）' : '' }}
-        </option>
-      </select>
+      <WorkspacePicker
+        v-model="filterWorkspace"
+        :workspaces="workspaceOptions"
+        class="conv-ws-filter"
+        empty-label="全部工作区"
+        placeholder="全部工作区"
+        title="按工作区筛选"
+        allow-archived
+      />
       <div class="seg" role="group" aria-label="会话类型">
         <button class="seg-btn" :class="{ on: filterKind === 'all' }" type="button" @click="filterKind = 'all'">全部</button>
-        <button class="seg-btn" :class="{ on: filterKind === 'single' }" type="button" @click="filterKind = 'single'">单聊</button>
-        <button class="seg-btn" :class="{ on: filterKind === 'group' }" type="button" @click="filterKind = 'group'">群聊</button>
+        <button class="seg-btn" :class="{ on: filterKind === 'single' }" type="button" @click="filterKind = 'single'">单角色</button>
+        <button class="seg-btn" :class="{ on: filterKind === 'group' }" type="button" @click="filterKind = 'group'">多角色</button>
       </div>
       <button class="work-filter" :class="{ on: unreadOnly }" type="button" @click="unreadOnly = !unreadOnly">未读</button>
       <button class="work-filter" :class="{ on: runningOnly }" type="button" @click="runningOnly = !runningOnly">运行中</button>
       <button v-if="filtersActive" class="mini-link" type="button" @click="clearFilters">清除筛选</button>
-      <span class="conv-filter-count">{{ filteredConversations.length }} 个</span>
+      <span class="conv-filter-count">
+        {{ filteredConversations.length }} 个<template v-if="filteredTokens"> · <em>{{ compactNumber(filteredTokens) }}</em> tokens</template>
+      </span>
     </div>
 
     <div class="tile-grid">
       <article
-        v-for="conv in filteredConversations"
+        v-for="conv in pagedConversations"
         :key="conv.id"
         class="tile-card conv-tile"
         :class="{ unread: conv.unread }"
@@ -264,7 +292,7 @@ function onCreated(_kind: string, id: string): void {
         @contextmenu.prevent.stop="openMenu($event, conv)"
       >
         <div class="tile-head">
-          <Avatar :name="titleOf(conv)" :avatar="avatarOf(conv)" :round="!conv.team_id" />
+          <Avatar :name="titleOf(conv)" :avatar="avatarOf(conv)" round />
           <div class="tile-title">
             <b>{{ titleOf(conv) }}</b>
             <span>{{ conversationMeta(conv, data.teams, data.roles).kind }} · {{ conversationMeta(conv, data.teams, data.roles).sub }}</span>
@@ -278,6 +306,7 @@ function onCreated(_kind: string, id: string): void {
           </span>
         </div>
         <p class="tile-preview">{{ conv.last_message || '还没有消息' }}</p>
+        <TokenMeter :usage="conv.usage" variant="tile" />
         <div class="tile-chips">
           <span class="chip ws-chip" :title="`工作区：${workspaceOf(conv)}`">{{ workspaceOf(conv) }}</span>
           <span v-if="openWorkByConv.get(conv.id)" class="chip work-chip">{{ openWorkByConv.get(conv.id) }} 工单</span>
@@ -291,6 +320,7 @@ function onCreated(_kind: string, id: string): void {
         </div>
       </article>
     </div>
+    <ListPager :page="page" :pages="pages" :total="filteredConversations.length" :page-size="PAGE_SIZE" @update:page="page = $event" />
     <div v-if="!conversations.length" class="empty">还没有会话<br />点右上角「新建会话」开始</div>
     <div v-else-if="!filteredConversations.length" class="empty">
       没有符合筛选条件的会话

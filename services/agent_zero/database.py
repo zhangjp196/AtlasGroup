@@ -278,7 +278,7 @@ def init_database() -> None:
     from services.agent_zero.models.zero import (  # noqa: F401
         Workspace, Department, Role, Conversation, ConversationRun, ConversationRunEvent,
         TeamTask, GdagNode, GdagEdge, AuditLog, AppSetting, AgentTeam,
-        TodoItem, Goal, WorkItem,
+        TodoItem, Goal, WorkItem, ScheduledTask,
         ENSURE_INDEXES,
     )
 

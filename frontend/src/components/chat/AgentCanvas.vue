@@ -9,12 +9,14 @@ import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import '@vue-flow/minimap/dist/style.css'
 import { api } from '@/api/client'
-import type { AgentActivity, AgentGraph, AgentNode, TeamTask, TeamTaskMember } from '@/api/types'
-import { durationText, firstLine } from '@/lib/format'
+import type { AgentActivity, AgentGraph, AgentNode, TeamTask, TeamTaskMember, TokenUsage } from '@/api/types'
+import { compactNumber, durationText, firstLine } from '@/lib/format'
+import { usageSummary } from '@/lib/usage'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 import { useRunStream } from '@/composables/useRunStream'
 import Avatar from '@/components/Avatar.vue'
+import TokenMeter from '@/components/TokenMeter.vue'
 import ProcessList from './ProcessList.vue'
 
 const props = defineProps<{ conversationId: string; open: boolean }>()
@@ -90,6 +92,12 @@ const graphNodeByRun = computed(() => {
   }
   return out
 })
+
+// 任务 / 成员 token：画布顶部的任务卡片和右侧成员列表都要能直接看到消耗。
+function tokensOf(usage?: TokenUsage | null): string {
+  const total = usageSummary(usage).total
+  return total ? `${compactNumber(total)} tokens` : ''
+}
 
 const visibleTaskMembers = computed<TeamTaskMember[]>(() =>
   (activeTask.value?.members || []).filter((member) => ACTIVE_STATUSES.has(memberStatus(member))),
@@ -178,7 +186,8 @@ function buildTaskFlow(task: TeamTask): { nodes: any[]; edges: any[] } {
   members.forEach((member, index) => {
     const status = memberStatus(member)
     const graph = graphNodeByRun.value.get(String(member.run_id || ''))
-    const id = `member-${task.id}-${member.role_id || index}`
+    // 同一角色可以同时接多项任务：id 必须带序号，否则重复节点会被 Vue Flow 合并。
+    const id = `member-${task.id}-${index}`
     nodes.push({
       id,
       type: 'agent',
@@ -210,6 +219,46 @@ function buildTaskFlow(task: TeamTask): { nodes: any[]; edges: any[] } {
         stroke: status === 'running' ? 'var(--accent)' : 'var(--line-strong)',
         strokeWidth: 1.5,
       },
+    })
+    // 单个任务内部的子代理：挂在成员节点下面，展示任务内的并行拆分。
+    const subagents = (data.value?.nodes || []).filter(
+      (node) => node.kind === 'subagent' && node.parent_id === `run-${member.run_id || ''}`,
+    )
+    subagents.forEach((sub, subIndex) => {
+      const subId = `sub-${task.id}-${index}-${sub.id || subIndex}`
+      const subStatus = String(sub.status || 'idle')
+      nodes.push({
+        id: subId,
+        type: 'agent',
+        position: { x: 720, y: index * 164 + subIndex * 128 - (subagents.length - 1) * 52 },
+        data: {
+          kind: 'subagent',
+          name: sub.name || '子代理',
+          goal: sub.goal || '',
+          status: subStatus,
+          current: sub.current || '',
+          tools: sub.tools || [],
+          elapsed_ms: sub.elapsed_ms || 0,
+          error: sub.error || '',
+          runId: '',
+          roleId: sub.role_id || member.role_id || '',
+          avatar: sub.avatar || dataStore.roleAvatar(sub.role_id || member.role_id || ''),
+          taskId: task.id,
+        },
+      })
+      edges.push({
+        id: `edge-${id}-${subId}`,
+        source: id,
+        target: subId,
+        type: 'smoothstep',
+        animated: subStatus === 'running' || subStatus === 'queued',
+        label: '子代理',
+        markerEnd: MarkerType.ArrowClosed,
+        style: {
+          stroke: subStatus === 'running' ? 'var(--accent)' : 'var(--line-strong)',
+          strokeWidth: 1.2,
+        },
+      })
     })
   })
   return { nodes, edges }
@@ -294,8 +343,11 @@ function selectTask(taskId: string): void {
 }
 
 function selectMember(member: TeamTaskMember): void {
+  const index = visibleTaskMembers.value.findIndex(
+    (item) => item.role_id === member.role_id && item.run_id === member.run_id,
+  )
   selectedRoleId.value = String(member.role_id || '')
-  selectedId.value = `member-${activeTask.value?.id || ''}-${member.role_id || ''}`
+  selectedId.value = `member-${activeTask.value?.id || ''}-${Math.max(0, index)}`
   const runId = String(member.run_id || '')
   selectedRunId.value = runId
   if (runId) openStream(runId)
@@ -473,7 +525,10 @@ onBeforeUnmount(stop)
               <b>{{ task.title || task.id }}</b>
               <span class="agent-task-status" :class="taskTone(task.status)">{{ statusLabel(task.status) }}</span>
             </div>
-            <small>{{ task.done_members || 0 }}/{{ task.total_members || 0 }} 完成 · {{ task.active_runs || 0 }} 运行中</small>
+            <small>
+              {{ task.done_members || 0 }}/{{ task.total_members || 0 }} 完成 · {{ task.active_runs || 0 }} 运行中
+              <template v-if="tokensOf(task.usage)"> · {{ tokensOf(task.usage) }}</template>
+            </small>
             <div class="agent-task-actions">
               <button v-if="task.can_pause" class="btn small" :disabled="taskBusy === `${task.id}:pause`" @click.stop="taskAction(task, 'pause')">暂停</button>
               <button v-if="task.can_resume" class="btn small" :disabled="taskBusy === `${task.id}:resume`" @click.stop="taskAction(task, 'resume')">继续</button>
@@ -499,7 +554,10 @@ onBeforeUnmount(stop)
               <b>{{ task.title || task.id }}</b>
               <span class="agent-task-status" :class="taskTone(task.status)">{{ statusLabel(task.status) }}</span>
             </div>
-            <small>{{ task.done_members || 0 }}/{{ task.total_members || 0 }} 完成</small>
+            <small>
+              {{ task.done_members || 0 }}/{{ task.total_members || 0 }} 完成
+              <template v-if="tokensOf(task.usage)"> · {{ tokensOf(task.usage) }}</template>
+            </small>
             <div class="agent-task-actions">
               <button class="btn small" :disabled="taskBusy === `${task.id}:continue`" @click.stop="taskAction(task, 'continue')">继续对话</button>
             </div>
@@ -573,6 +631,7 @@ onBeforeUnmount(stop)
           <section v-if="activeTask" class="agent-detail">
             <h4>{{ activeTask.title || activeTask.id }} · {{ statusLabel(activeTask.status) }}</h4>
             <p>{{ activeTask.goal }}</p>
+            <TokenMeter :usage="activeTask.usage" variant="hero" />
             <div class="agent-task-members">
               <button
                 v-for="member in visibleTaskMembers"
@@ -585,6 +644,9 @@ onBeforeUnmount(stop)
                 <span class="agent-task-member-main">
                   <b>{{ member.role_name || member.role_id }}</b>
                   <small>{{ firstLine(member.goal || '', 80) }}</small>
+                </span>
+                <span v-if="tokensOf(member.usage)" class="agent-task-member-usage">
+                  {{ tokensOf(member.usage) }}
                 </span>
                 <span class="agent-status" :class="statusTone(memberStatus(member))">{{ statusLabel(memberStatus(member)) }}</span>
               </button>

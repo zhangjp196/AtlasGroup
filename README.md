@@ -1,10 +1,33 @@
 # AtlasX · 本地智能体
 
+> **3.14.0**：界面细节打磨；会话浮窗支持右 / 下 / 角拖拽拉伸；弹框与抽屉宽度可拖拽；右侧会话 / 角色栏支持拖拽宽度和一键收起；侧栏点击只在浮窗里打开会话，不再跳转页面。
+>
+> **3.13.0**：会话延迟创建（发出第一条消息才落库）；右侧会话 / 在线角色双栏默认会话，宽度加大并补充角色、模型、未读、运行状态；第 3 个会话自动替换最早窗口；移除「通用助手 / 默认模型」作为可选入口；当前打开的会话不再产生未读；浮窗关闭按钮固定最右；会话头像右键更多操作；模型可在会话中主动向用户发起消息（全局 Agent 统一限制频率 / 安静时段）。
+>
+> **3.12.0**：全局 Agent 拆成「管理」和「全局对话」两个入口；在线角色右侧列表（点击聊天 / 右键操作）；会话最多 2 个悬浮窗；角色支持在线 / 离线并由全局 Agent 管理；群组功能移除，所有会话改为「主持角色 + 参与角色（含临时角色）」；模型思考强度可自定义多个；新增**定时任务 + 自由触发**（固定时间 / 间隔 / 每天 / 每周，或由模型结合条件判断何时主动执行）。
+>
+> **3.11.0**：角色子代理支持——角色与群组会话中，一个角色可以同时并行推进多项任务（`background_task` 的 `tasks` 数组 / 同一成员多次委派），单个任务内部还能再派子代理（`plan{op:"delegate", target:"subagent", assignments:[...]}`）；执行画布把任务内子代理挂在成员节点下。
+>
+> **3.10.3**：任务 / 工单收尾全自动——后台任务完成或失败都直接把结果交回角色继续推进，工单自动续跑到目标达成（失败自动诊断重试），不再需要点「继续对话」；修复会话头部未读角标跑到面板右上角的偏移问题。
+>
+> **3.10.2**：模型调用链路图迁入「本机脱敏」tab；用量页保留统计与「本机脱敏」快捷入口。
+>
+> **3.10.1**：本机脱敏（Magpie）拆成独立设置 tab；用量页保留模型调用链路图，并加「本机脱敏」快捷入口。
+>
+> **3.10.0**：新增 Magpie 本机脱敏（密钥 / 个人信息 / 本机路径 → 占位符，回复与工具参数在本机还原）与「用量 → 模型调用链路图」。
+>
+> **3.9.0**：模型档案新增并发上限（默认 2）：主对话 / 摘要 / 压缩 / 团队成员 / 子代理
+> 共享同一模型的槽位池，等待期间可被停止打断；模型卡片与编辑器可直接查看 / 修改。
+>
+> **3.8.1**：移除 Lightpanda 浏览器集成；保留 token 用量统计（会话 / 工单 / 任务 / 聊天头部）与通用的 MCP 常驻进程 / 工具白名单能力。
+>
+> **3.8.0**：新增 token 用量统计（会话 / 工单 / 任务 / 聊天头部：输入、输出、速度、缓存命中）。
+>
 > **3.7.0**：前端彻底切换为 Vue 3 + Element Plus + Vite：旧 V3、`/classic`、`/next`、`web/assets`、`web/v3` 全部移除，唯一入口是 `/`；页面按工单表格、会话收件箱、工作区资源管理器、角色组织树、群组画廊、设置纵向导航区分；新增全局Agent 悬浮窗（全局消息 / 审批 / 提问 / 已读 / 权限 / 停止运行）。
 >
 本地单用户的智能体服务：FastAPI 后端 + **Vue 3 / Element Plus / Vite 前端** + **sqlite 单文件**。
 没有登录、RBAC、多租户；前端构建只在开发 / 发布时需要 Node，运行时不依赖 Node。
-**界面**：左轨 + 全宽画布；工单表格、会话收件箱、工作区资源管理器、角色组织树、群组画廊、设置纵向导航；聊天从右侧抽屉展开。
+**界面**：左轨 + 全宽画布；工单表格、会话收件箱、定时任务、工作区资源管理器、角色组织树、设置纵向导航；聊天使用悬浮窗（最多 2 个），在线角色在右侧列表。
 
 > **安全边界**：接口无鉴权，只允许监听回环地址。把 `server.host` 改成
 > `0.0.0.0` / `::` 后 `/workspace` 的写文件、删文件、改目录等接口会对同网段
@@ -13,7 +36,7 @@
 - 后端：`services/agent_zero`（入口 `main-agent-zero.py`）
 - 前端：`frontend/`（Vue 3 + Element Plus + Vite + TypeScript，唯一入口 `/`），构建产物在 `web/dist`
 - 数据库：`data/agent_zero/agent_zero.db`（唯一数据源）
-- LLM：经 pydantic-ai v2 直连 OpenAI Chat / Responses 与 Anthropic Messages 兼容端点，支持在 `config.yaml` 或界面「设置 → 模型」中配置多个模型并切换
+- LLM：经 pydantic-ai v2 直连 OpenAI Chat / Responses 与 Anthropic Messages 兼容端点，支持在 `config.yaml` 或界面「设置 → 模型」中配置多个模型并切换；每个模型档案可设**并发上限**（默认 2），主对话 / 摘要 / 压缩 / 团队成员共享槽位
 - 端口：默认 `10210`；被占用时自动顺延，实际地址写入 `data/agent_zero/runtime.json`
 
 ## 界面（Vue 3 + Element Plus）
@@ -29,12 +52,18 @@
 - **设置**：左侧纵向导航 + 右侧内容。
 - **全局Agent**：右下角悬浮窗，展示全局消息、待授权 / 待回答 / 未读 / 运行中，并可直接处理。
 - **聊天**：SSE 流式时间线（思考 / 工具 / 正文）、任务清单、审批、提问、附件。
+- **Magpie 本机脱敏**：请求出站前把密钥 / 邮箱 / 手机号 / 身份证 / IP / 本机路径
+  替换为 `⟦MG_…⟧` 占位符，回复和工具参数在本机还原；用量页有「AtlasX → magpie
+  → 模型」调用链路图与本次运行脱敏计数，可分类开关。
+- **Token 统计**：会话卡片 / 聊天头部 / 会话管理、工单卡片与详情、任务浮窗都显示
+  输入 / 输出 / 速度 / 缓存命中，数据来自每轮回复的 `usage`，无需额外埋点。
 - **技术栈**：Vue 3 + Element Plus + Vite + TypeScript + Pinia + Vue Router。
 
 相关文档：
 
 - [3.7.0 前端框架化评估](doc/2026-11-04-3.7.0-前端框架化评估.md)
 - [执行画布](doc/2026-11-04-执行画布-DAG与子代理进度.md)
+- [角色任务与子代理](doc/2026-11-09-角色任务与子代理.md)
 - [Superagent 工作方式与准入](doc/2026-11-04-Superagent-工作方式与准入.md)
 - [文档索引](doc/README.md)
 
@@ -140,6 +169,7 @@ open dist/AtlasX.app
 输入框左侧的运行相关控件只保留两项：**目标模式图标**（点亮 = 目标模式，再点一次回到普通自主执行）与**权限档位**（`Ask` / `Auto` / `Allow`）。`chat` 纯对话入口与 `agent` 标签已从界面移除，默认即为自主执行。
 
 - **权限档位**：`Ask` 每次危险操作都询问；`Auto` 由规则判定，低/中危自动执行、高危才询问；`Allow` 全部直接执行。档位按会话保存，新会话沿用上一次选择。
+- **授权作用域**：危险工具审批提供 **仅本次 / 本会话 / 永久（本角色）/ 永久（本群组）**。永久授权跨会话生效，群组授权覆盖群内所有成员；角色详情和群设置里可以查看并撤销永久授权，审批入口与「全局 Agent」都能处理。
 - **模型强度（思考级别）**：已合并进模型选择菜单，打开右上角模型下拉后可直接切换当前模型的思考级别（`Default` / `Minimal` / `Low` / `Medium` / `High` 或模型自定义级别），选择后按模型记忆并写入当前会话。
 - **队列模式**：运行中仍可继续输入，消息按 FIFO 排队，当前回复结束后由 worker
   自动执行下一条。队列条上可以对已排队的消息「上移 / 下移」（自由调整执行顺序）、
@@ -153,6 +183,22 @@ open dist/AtlasX.app
   查看目标、调整预算 / 次数、暂停等待用户、恢复或结束目标；输入框上方的目标条显示运行
   次数 / token 用量，可改预算或结束目标。标记 blocked 时会暂停自动续跑，直到用户回复或
   模型调用 `goal_manage(resume)`。
+- **任务 / 工单自动继续**：后台任务结束（完成或失败）后自动把成员结果交回主会话
+  （创建一条主持 run 继续整合、修失败、必要时派新任务），不需要再点「继续对话」；
+  工单派活会同时建立对话级目标，模型报告 `achieved` 才算完成，否则自动续跑，失败也会
+  诊断后重试。用户主动停止的任务不自动重启；有待授权 / 待回答的会话先停下等人。
+- **一个角色并行多项任务**：角色会话里用 `background_task` 的 `tasks` 数组一次派发多条
+  互不依赖的任务，每条各自建一条后台任务 / 成员 run，由 worker 并行执行（受
+  `max_parallel_member_runs` 与模型并发槽位约束）；群组会话里主持也可以把本角色的独立
+  工作放到后台，成员之间 / 同一成员的多条 assignment 同样并行。任务浮窗、执行画布与
+  工单面板会逐条展示。
+- **任务内子代理**：单个后台任务 / 团队成员任务在执行中可以用
+  `plan{op:"delegate", target:"subagent", assignments:[...]}` 并行派生多个子代理，把任务
+  内部的工作再拆开；任务成员只派子代理，不再嵌套派发团队任务或新后台任务。
+- **角色直接讨论**：任何角色（包括后台任务成员）都可以调用 `role_discussion`，让
+  2-3 个角色按顺序多轮直接讨论，不经过主持转述。后发言者能看到前面所有发言，适合
+  头脑风暴、方案对比、交互验证和交叉审查；讨论过程以子轨迹展示，完整记录回到发起
+  角色。角色用 id 或名字指定，默认 2 轮、最多 3 轮。
 - **新建会话**：会话页右上角「新建会话」，先选「单聊 / 群聊」；群聊可选已有群，或填群名现场新建并绑定。
 - **群聊 / 团队**：会话绑定团队时按 `team.mode` 执行——`orchestrate`（默认，主持编排、
   成员在委派卡片里干活）/ `roundtable`（圆桌，多头像各自应答，`max_speakers` 限制每条
@@ -328,9 +374,11 @@ llm:
   模型档案不再保存 / 使用自己的 Key（老版本留下的模型级 Key 在解析时也被忽略，
   下次保存时清掉），所以改订阅 Key 会对该订阅下所有模型立即生效。
   **没有“默认模型”概念**，内置配置也作为普通订阅展示。
-- 右栏顶部的「获取模型」会调用当前选中订阅的 OpenAI `GET /models`：可把返回的模型 ID
-  直接加入订阅，或「全部添加为档案」；获取结果和模型列表都支持输入筛选。
+- 右栏顶部的「获取模型」会调用当前选中订阅的 `GET /models`：结果面板支持按模型 ID /
+  名称搜索、按协议筛选、隐藏已添加；勾选后可「添加选中」，也可以「全选当前筛选」
+  一次加入一批模型（默认不勾选，避免误加几十个）。模型列表本身也支持输入筛选。
 - 输入框右下角只显示**模型名**；模型选择采用二级菜单：先选订阅，再选该订阅下的模型。
+  角色创建 / 编辑里的「模型档案」复用同一套二级选择；会话输入框与角色编辑都不会再出现一大坨扁平模型列表。
 - 默认订阅/模型也可以直接删除；删除后不会回落到 `config.yaml` 的默认模型，
   需要时重新添加一个订阅即可。
 - 修改写入 sqlite 的 `app_settings`，**即时生效、无需重启**。清空该条记录即可回退到 `config.yaml`。
@@ -406,7 +454,11 @@ llm:
   下一步、阻塞项与证据）；`plan{op:goal, action:status|update|note|blocked|resume|close}`
   查看与调整目标。
 - `plan{op:delegate, target:subagent|team}` 把子任务交给子代理或团队成员；
-  `plan{op:team_admin}` 动态定义团队。
+  `target=subagent` 配 `assignments` 可一次并行派生多个子代理，`target=team` 配
+  `assignments` 可一次派给多个成员；`plan{op:team_admin}` 动态定义团队。
+- `background_task`（对话层注入，不进工具包）：把本角色的一段或多段长工作放到后台。
+  `goal` 单任务，`tasks:[{goal,title?,context?}]` 并行多任务（单次最多 8 条）；调用后
+  本轮只回一句确认就收尾，完成后结果自动交回对话。
 - 界面「设置 → 工具」按卡片列出每个包与动作（op / 名称 / 具体工具 / 风险点），
   独立工具单独成组；纯聊天工作区只把 `workspace`（中间存储）置灰并说明原因，
   条件可用的动作（`delegate` 的 team 目标）带「团队」标记与提示。
@@ -449,6 +501,30 @@ llm:
 额度来自 OpenCode Go 的 `GET https://opencode.ai/zen/go/v1/usage`；该接口未公开承诺
 稳定，若返回变化，面板会显示「额度不可用」而不是静默错误。
 
+### Command Code
+
+「设置 → 模型 → 左栏订阅 → 添加平台」内置 **Command Code** 预设，走它的官方
+Provider API（与 CLI 共用同一个 API Key）：
+
+| 预设 | OpenAI Base URL | Anthropic Base URL | 模型列表 |
+| --- | --- | --- | --- |
+| Command Code | `https://api.commandcode.ai/provider/v1` | `https://api.commandcode.ai/provider` | `https://api.commandcode.ai/provider/v1/models` |
+
+- Key 在 Command Code Studio 生成；Provider API 需要 **Provider 及以上套餐**，
+  调用按 API 价格从套餐额度扣减
+- 同一订阅下可混挂 Claude 与 GPT / 开源模型：模型列表会返回
+  `supported_endpoints`，「获取模型」据此自动选协议——只有 `/messages` 的
+  Claude 走 Anthropic Messages，同时支持 `/chat/completions` 与 `/responses`
+  的 GPT 默认走 OpenAI Chat（兼容面更广），只有 `/responses` 的走 Responses
+- 模型列表里的 `context_length` 会写入新模型档案的上下文窗口，「获取模型」时
+  自动带出，压缩阈值不再按默认值误判
+- 订阅卡片会直接查询套餐额度：剩余 credits、5 小时 / 每周用量窗口、本期花费与
+  请求数；有 Key 就能查，不要求先添加模型。额度来自 CLI 使用的内部
+  `/alpha/billing/*` 接口，字段可能随上游调整，失败时会在卡片里显示具体原因
+- Anthropic 端点复用「Anthropic Messages 协议」一节的归一化与双鉴权头：
+  Base URL 填 `.../provider`、`.../provider/v1` 或 `.../provider/v1/messages`
+  都能归一到 SDK 需要的根地址
+
 ### Anthropic Messages 协议
 
 - 模型卡片的「API 协议」可选 **Anthropic Messages（/v1/messages）**；订阅编辑弹窗里可单独填写
@@ -465,8 +541,9 @@ llm:
 
 ### 订阅平台预设
 
-「设置 → 模型 → 左栏订阅 → 添加平台」内置 34 个平台预设，按组筛选：
+「设置 → 模型 → 左栏订阅 → 添加平台」内置 35 个平台预设，按组筛选：
 
+- **Command Code**：Command Code Provider API。
 - **OpenCode**：OpenCode Go、OpenCode Zen。
 - **聚合平台**：OpenRouter、SiliconFlow、ModelScope、QCode。
 - **本地网关**：New API / One API、10Router、Ollama、LM Studio。
@@ -679,6 +756,9 @@ argument-hint: "[path]"
 - 子代理的工作区快照、项目约定、记忆仍会自动注入；
 - 子代理的中间过程只作为事件展示，**不会写回父对话**，只有最终结论回灌；
 - 需要子代理知道的信息，用 `context` 参数传；不要指望它「记得」父对话。
+- 并行子代理：`assignments` 一次派多个时用 `asyncio.gather` 并发执行，各自写
+  `subagent_event`（`call_id#序号`），结果汇总成一份 `outputs` + `agents` 展示载荷；
+  执行画布在后台任务视图里把它们挂在对应成员节点下。
 
 ## API
 
@@ -710,11 +790,12 @@ argument-hint: "[path]"
 | DELETE | `/app/hooks?event=&index=&workspace_id=` | 删除工作区钩子 |
 | POST | `/app/hooks/template` | 工作区没有 hooks.json 时创建空模板 |
 | GET | `/app/runtime` | 运行队列 / 并发槽位 |
-| GET/POST | `/teams?workspace_id=` | 团队（群聊）列表 / 创建（`mode` / `max_speakers` / `leader` / `members`；含惰性归一的默认团队） |
+| GET/POST | `/teams?workspace_id=` | 旧群组接口（界面已移除；会话参与角色内部仍复用私有团队，不建议直接调用） |
 | GET/PATCH/DELETE | `/teams/{id}` | 团队详情 / 修改 / 删除（删除会解绑会话） |
 | POST | `/teams/{id}/bind`、`/teams/{id}/unbind` | 绑定 / 解绑会话（body：`conversation_id`） |
 | GET | `/conversations/{id}/team` | 当前会话绑定的团队 |
 | GET/POST | `/conversations` | 会话列表 / 新建（可带 `permission_mode`、`run_mode`、`team_id`） |
+| PUT | `/conversations/{id}/participants` | 设置会话参与角色（`role_ids`、可选 `leader_id`；临时角色仅限本会话） |
 | POST | `/conversations/{id}/read` | 已读上报（清未读红点；打开会话 / 本轮收尾时调用） |
 | GET/DELETE | `/conversations/{id}` | 会话详情 / 删除 |
 | GET | `/conversations/{id}/messages` | 历史消息 |
@@ -734,6 +815,9 @@ argument-hint: "[path]"
 | POST | `/conversations/{id}/queue/{run_id}/inject` | 立即插入（作为干预注入正在执行的运行） |
 | DELETE | `/conversations/{id}/queue/{run_id}` | 取消排队消息 |
 | GET/PUT/DELETE | `/conversations/{id}/goal` | 目标：查询 / 创建或更新（`objective`、`token_budget`、`max_runs`）/ 结束 |
+| GET/POST | `/schedules` | 定时 / 自由触发任务：列表 / 新建（`trigger_mode`、`schedule_kind`、`schedule`、`condition`、`role_id`、`workspace_id`） |
+| GET/PATCH/DELETE | `/schedules/{id}` | 任务详情 / 修改 / 删除 |
+| POST | `/schedules/{id}/run`、`/pause`、`/evaluate` | 立即运行 / 暂停或恢复 / 手动评估一次自由触发条件 |
 | GET/POST | `/conversations/{id}/todos` | 任务清单：列表 / 添加 |
 | PATCH/DELETE | `/conversations/{id}/todos/{todo_id}` | 更新 / 删除任务 |
 | GET | `/conversations/{id}/runs` | 会话运行记录 |
@@ -785,7 +869,15 @@ PATCH /api/agent-zero/workspaces/ws-xxxx   {"archived": true}
 ```
 
 每个工作区保存自己的 `root_path`；对话通过 `workspace_id` 绑定到工作区，文件工具与
-`/workspace/*` 接口都只在该工作区的根目录内读写。默认工作区 `default` 没有 `root_path`，
+`/workspace/*` 接口都只在该工作区的根目录内读写。会话的工作区默认跟随所选角色，
+切换主持角色会自动更新；也可以在会话管理或聊天头部的「工作区」里为**单条会话**手动
+指定工作区（`workspace_custom=1`）。手动指定后，同一角色的不同会话可以各用各的工作区，
+切换主持角色不会覆盖；选择「跟随角色」即可恢复自动同步。
+
+所有工作区选择统一使用**分页筛选弹框**：新建会话 / 角色 / 工单、会话设置、聊天头部、
+角色详情、工单策略和会话列表筛选都走同一个选择器，支持按名称 / 路径 / id 搜索、在
+「使用中 / 全部」之间切换、每页 8 个分页，双击条目直接选定；已归档工作区默认不可新绑定，
+当前已有的归档绑定仍会显示。角色 / 部门选择也使用同一套分页筛选弹框。默认工作区 `default` 没有 `root_path`，
 是**纯聊天工作区**：没有用户文件夹，但 shell 与文件工具**照常可用**，它们落在**托管目录**
 `data/agent_zero/workspace/<workspace_id>/`（`workspace_service.exec_root`）里——可以跑命令、
 做计算、抓网页、写临时产物，只是不会碰到用户的项目文件；`workspace`（中间存储）在该工作区
@@ -848,8 +940,15 @@ bash devops/dev.sh start
 - 构建：`cd frontend && npm run build`，输出 `web/dist`，后端在 `/` 托管。
 - 质量门禁：`npm run typecheck`、`npm run test:unit`；CI 默认只构建，不产 dmg。
 
-- 页面形态：工单表格工作台；会话收件箱；工作区资源管理器；角色组织树 + 角色卡；群组画廊；设置左侧导航。
-- 聊天：右侧抽屉，SSE 流式时间线（思考 / 工具 / 正文）、todo、审批、提问、附件上传与预览。
+- 页面形态：工单表格工作台；会话收件箱；定时 / 主动任务；工作区资源管理器；角色组织树 + 角色卡；设置左侧导航。
+- 聊天：悬浮窗（最多 2 个，不含全局 Agent），SSE 流式时间线（思考 / 工具 / 正文）、todo、审批、提问、附件上传与预览；右侧在线角色栏点击即聊天。
+- 列表页：角色 / 工作区 / 工单 / 会话 / 定时任务都有关键词搜索或筛选（角色按部门树 +
+  持久/临时筛选，工单按状态筛选，会话按工作区 / 单角色多角色 / 未读 / 运行中筛选）；
+  列表很长时不会一屏铺开，也不会因为找不到筛选而只能翻滚动条。
+- 流式身份：服务端每个发言角色都先发 `start`（`role_id` / `role_name`），且排在提示词
+  准备之前；前端在发送瞬间就按会话绑定预置发言者（主持角色 / 被 @ 的成员 / 角色），
+  准备期间显示「正在准备这一轮…」，不会再先闪一个「助手」再换名字。群聊一轮里多个
+  角色按 `start` 分段渲染（各自头像 / 名字），重连时的历史事件按 120 条一帧回放。
 - 设置：模型 / 订阅 / 外观 / 工作区 / 工具 / 运行时 / MCP / 技能 / 命令 / hooks。
 - 全局Agent：右下角悬浮窗，展示待授权 / 待回答 / 未读 / 运行中，并可直接处理。
 - 主题：8 套配色、暗亮自动切换；Element Plus 变量映射到现有 token。

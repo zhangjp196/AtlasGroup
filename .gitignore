@@ -41,3 +41,7 @@ data/agent_zero/*.corrupt-*
 frontend/node_modules/
 frontend/.vite/
 web/dist/
+
+# 本地代码索引 / 编辑器配置
+.codegraph/
+.cursor/

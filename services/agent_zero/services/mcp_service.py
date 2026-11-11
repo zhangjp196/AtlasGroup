@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import logging
-import os
 import re
 import shlex
 import shutil
@@ -55,6 +55,11 @@ def get_server(server_id: str) -> Optional[Dict[str, Any]]:
     return next((s for s in list_servers() if s.get("id") == server_id), None)
 
 
+def cached_tools(server_id: str) -> List[Dict[str, Any]]:
+    """最近一次列出的工具（不启动进程；用于状态页展示）。"""
+    return list((_tool_cache.get(server_id) or {}).get("tools") or [])
+
+
 def _save(servers: List[Dict[str, Any]]) -> None:
     settings_store.put("mcp", {"servers": servers})
 
@@ -78,6 +83,12 @@ def _normalize(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "headers": {str(k): str(v) for k, v in (cfg.get("headers") or {}).items() if str(k)} if isinstance(cfg.get("headers"), dict) else {},
         "note": str(cfg.get("note") or "").strip()[:500],
         "installed": bool(cfg.get("installed")),
+        # persistent：进程常驻。有页面 / 会话状态的服务必须常驻，
+        # 否则每次工具调用都重启，上一步的页面状态会丢。
+        "persistent": bool(cfg.get("persistent")),
+        # tool_allowlist：只把列出的工具注入模型；空 = 不限制。
+        "tool_allowlist": [str(t).strip()[:120] for t in (cfg.get("tool_allowlist") or [])
+                           if str(t).strip()][:200],
         "created_at": str(cfg.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S")),
     }
     # 允许把整条启动命令直接粘进 command（例如 "/opt/homebrew/bin/node /x/server.js"）。
@@ -116,13 +127,18 @@ def update_server(server_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
             continue
         merged = dict(s)
         for key in ("name", "type", "command", "args", "env", "url", "headers",
-                    "package", "install_command", "enabled", "note", "installed"):
+                    "package", "install_command", "enabled", "note", "installed",
+                    "persistent", "tool_allowlist"):
             if key in patch:
                 merged[key] = patch[key]
-        servers[i] = _normalize(merged)
+        normalized = _normalize(merged)
+        servers[i] = normalized
         _save(servers)
-        _clients.pop(server_id, None)
-        _tool_cache.pop(server_id, None)
+        # 只有启动配置 / 开关真正变了才重启进程：改个备注不该丢掉常驻进程里的页面状态。
+        launch_keys = ("type", "command", "args", "env", "url", "persistent",
+                       "enabled")
+        if any(s.get(key) != normalized.get(key) for key in launch_keys):
+            _discard_client(server_id)
         return servers[i]
     raise ValueError(f"MCP 服务不存在: {server_id}")
 
@@ -133,8 +149,7 @@ def delete_server(server_id: str) -> bool:
     if len(kept) == len(servers):
         return False
     _save(kept)
-    _clients.pop(server_id, None)
-    _tool_cache.pop(server_id, None)
+    _discard_client(server_id)
     return True
 
 
@@ -276,6 +291,72 @@ def mark_installed(server_id: str, installed: bool) -> Dict[str, Any]:
 
 _clients: Dict[str, Any] = {}
 _tool_cache: Dict[str, Dict[str, Any]] = {}
+# server_id -> 最近一次使用时间（persistent 进程的空闲回收依据）
+_last_used: Dict[str, float] = {}
+# 同步线程里被弃用、但当时没有事件循环可 await 的进程；交给 shutdown 统一停。
+_orphan_clients: List[Any] = []
+PERSISTENT_IDLE_S = 900.0
+
+
+def _discard_client(server_id: str) -> None:
+    """丢弃 client 并（在有事件循环时）异步停掉子进程。
+
+    同步路由跑在线程池里没有事件循环：这时进程句柄仍被 asyncio 持有，
+    只能等进程退出；因此会真正用到常驻进程的路由（MCP 更新 / 删除）
+    都改成 async，保证 stop() 能被调度。
+    """
+    client = _clients.pop(server_id, None)
+    _tool_cache.pop(server_id, None)
+    _last_used.pop(server_id, None)
+    if client is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # 线程池里没有 loop：先记下来，应用退出 / 下次 stop_client 时再停。
+        _orphan_clients.append((server_id, client))
+        return
+    loop.create_task(client.stop())
+
+
+async def stop_client(server_id: str) -> None:
+    """立即停止某个 MCP 服务的常驻进程（切换配置 / 停用时调用）。"""
+    client = _clients.pop(server_id, None)
+    _tool_cache.pop(server_id, None)
+    _last_used.pop(server_id, None)
+    orphans = [item for item in _orphan_clients if item[0] == server_id]
+    _orphan_clients[:] = [item for item in _orphan_clients if item[0] != server_id]
+    if client is not None:
+        await client.stop()
+    for _, orphan in orphans:
+        try:
+            await orphan.stop()
+        except Exception:
+            logger.debug("停止遗留 MCP 进程失败", exc_info=True)
+
+
+async def reap_idle(max_idle_s: float = PERSISTENT_IDLE_S,
+                    exclude: str = "") -> List[str]:
+    """回收空闲太久的常驻 MCP 进程（不常使用，不能一直占内存）。"""
+    now = time.time()
+    victims = [sid for sid, ts in list(_last_used.items())
+               if sid != exclude and now - ts >= max_idle_s]
+    for sid in victims:
+        await stop_client(sid)
+    return victims
+
+
+async def shutdown_all() -> None:
+    """应用退出时停掉所有常驻 MCP 进程（含线程里弃用的遗留进程）。"""
+    for sid in list(_clients.keys()):
+        await stop_client(sid)
+    orphans = list(_orphan_clients)
+    _orphan_clients.clear()
+    for _, orphan in orphans:
+        try:
+            await orphan.stop()
+        except Exception:
+            logger.debug("停止遗留 MCP 进程失败", exc_info=True)
 
 
 class McpError(Exception):
@@ -333,7 +414,12 @@ class StdioClient:
         if not argv:
             raise McpError("缺少启动命令")
         env = dict(self.server.get("env") or {})
-        proc_env = {"PATH": __import__("os").environ.get("PATH", "")}
+        # 只透传运行必需的基础变量：常驻服务要 HOME/TMPDIR 放配置与临时文件，
+        # 代理与语言环境也常被上游用到；其余宿主变量不泄漏给子进程。
+        base_keys = ("PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
+                     "TZ", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+                     "http_proxy", "https_proxy", "no_proxy")
+        proc_env = {key: os.environ[key] for key in base_keys if key in os.environ}
         proc_env.update(env)
         try:
             self.proc = await asyncio.create_subprocess_exec(
@@ -505,6 +591,8 @@ def _client(server: Dict[str, Any]):
         return cached
     client = StdioClient(server) if server.get("type") == "stdio" else HttpClient(server)
     _clients[server["id"]] = client
+    # 进程创建即记一次时间：只列过工具、从没调用过的常驻进程也会被空闲回收。
+    _last_used[server["id"]] = time.time()
     return client
 
 
@@ -515,11 +603,14 @@ async def server_tools(server_id: str, refresh: bool = False) -> List[Dict[str, 
     cached = _tool_cache.get(server_id)
     if cached and not refresh and time.time() - cached["ts"] < TOOL_CACHE_TTL_S:
         return cached["tools"]
+    await reap_idle(exclude=server_id)
+    _last_used[server_id] = time.time()
     client = _client(server)
     try:
         tools = await client.list_tools()
     finally:
-        if isinstance(client, StdioClient):
+        # 常驻服务不能在这里停：进程里存着页面 / 会话状态。
+        if isinstance(client, StdioClient) and not server.get("persistent"):
             await client.stop()
             _clients.pop(server_id, None)
     _tool_cache[server_id] = {"ts": time.time(), "tools": tools}
@@ -537,6 +628,9 @@ async def enabled_tool_specs() -> List[Dict[str, Any]]:
         except Exception as e:
             logger.warning("MCP 工具列表失败 %s: %s", server.get("name"), e)
             continue
+        allowed = set(server.get("tool_allowlist") or [])
+        if allowed:
+            tools = [t for t in tools if str(t.get("name") or "") in allowed]
         for tool in tools:
             name = str(tool.get("name") or "").strip()
             if not name:
@@ -556,6 +650,8 @@ async def call_tool(server_id: str, tool: str, args: Dict[str, Any]) -> Dict[str
     server = get_server(server_id)
     if not server or not server.get("enabled"):
         return {"error": f"MCP 服务不可用: {server_id}"}
+    await reap_idle(exclude=server_id)
+    _last_used[server_id] = time.time()
     client = _client(server)
     try:
         result = await client.call(tool, args or {})
@@ -564,9 +660,10 @@ async def call_tool(server_id: str, tool: str, args: Dict[str, Any]) -> Dict[str
             _clients.pop(server_id, None)
         return {"error": f"MCP 调用失败: {e}"}
     finally:
-        if isinstance(client, StdioClient):
+        if isinstance(client, StdioClient) and not server.get("persistent"):
             await client.stop()
             _clients.pop(server_id, None)
+    _last_used[server_id] = time.time()
     if isinstance(result, dict):
         content = result.get("content")
         if isinstance(content, list):

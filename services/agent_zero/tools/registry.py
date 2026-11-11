@@ -339,13 +339,15 @@ TOOL_DEFS: List[ToolDef] = [
         "delegate", (),
         name="委派子任务",
         description=(
-            "把一个明确的子任务交给子代理或团队成员执行，并拿回结论。\n"
+            "把一个或多个明确的子任务交给子代理 / 团队成员执行，并拿回结论。\n"
             "- target=subagent（默认）：派生自身子代理（父角色的临时收窄副本）；\n"
             "- target=team：委派给本对话绑定的 Agent 团队成员（需先用 team_manage 建队并绑定），"
             "成员以其角色人格在受限子循环里执行；会创建一个群组后台任务，"
             "可在执行画布查看实时过程、暂停 / 继续 / 结束。\n"
-            "- 团队任务优先拆成多个可并行的子任务，用 assignments 一次派发给多个成员；"
-            "各成员会同时后台执行，结果回到群聊。\n"
+            "- **并行**：target=subagent 时用 assignments 一次派生多个互不依赖的子代理，"
+            "它们会同时执行并一起返回；target=team 时用 assignments 一次派发给多个成员。\n"
+            "- **任务内子代理**：后台任务 / 团队成员执行单个任务时同样可以派子代理，"
+            "用于在任务内部并行拆分；任务成员只派子代理，不要再嵌套派发团队任务。\n"
             "子代理拥有独立上下文，可以继续派生子代理（不设层数上限，注意别重复劳动）。"
         ),
         parameters=_obj({
@@ -364,13 +366,16 @@ TOOL_DEFS: List[ToolDef] = [
                       "description": "可选：收窄本次委派的可用工具（须为父代理 / 成员已有工具的子集）"},
             "assignments": {
                 "type": "array",
-                "description": "target=team 时批量并行派发：每个成员一个子任务。"
-                               "尽量覆盖所有相关角色；不要用多次单发代替。",
+                "description": "批量并行派发：target=team 时每个成员一个子任务；"
+                               "target=subagent 时每个条目派生一个子代理。"
+                               "尽量一次派完，不要用多次单发代替。",
                 "items": _obj({
-                    "member_id": {"type": "string", "description": "成员 id"},
-                    "member_name": {"type": "string", "description": "成员名称（替代 id）"},
-                    "goal": {"type": "string", "description": "该成员要完成的子任务"},
-                    "context": {"type": "string", "description": "只给该成员的上下文（可选）"},
+                    "member_id": {"type": "string", "description": "target=team 时的成员 id"},
+                    "member_name": {"type": "string", "description": "target=team 时的成员名称（替代 id）"},
+                    "goal": {"type": "string", "description": "该成员 / 子代理要完成的子任务"},
+                    "context": {"type": "string", "description": "只给该成员 / 子代理的上下文（可选）"},
+                    "name": {"type": "string", "description": "target=subagent 时的子代理名称（可选）"},
+                    "instructions": {"type": "string", "description": "target=subagent 时的补充指令（可选）"},
                 }, ["goal"]),
             },
             "member_id": {"type": "string",
@@ -487,20 +492,24 @@ TOOL_DEFS: List[ToolDef] = [
             "action=status 返回当前待授权 / 未读 / 运行 / 会话授权的快照；"
             "approve 需要 approval_id + decision；answer 需要 question_id；"
             "set_permission 需要 conversation_id + mode；stop_run 需要 run_id 或 "
-            "conversation_id。所有写操作会回传 app_update 事件，界面自动刷新。"
+            "conversation_id。所有写操作会回传 app_update 事件，界面自动刷新。\n"
+            "proactive_status / set_proactive / cancel_proactive 用于查看、调整和取消"
+            "会话内主动消息（模型主动向用户发起），避免打扰过度。"
         ),
         parameters=_obj({
             "action": {
                 "type": "string",
                 "enum": ["status", "approvals", "questions", "approve", "answer",
                          "mark_read", "set_permission", "set_default_permission",
-                         "stop_run"],
+                         "stop_run", "proactive_status", "set_proactive",
+                         "cancel_proactive"],
                 "description": "操作",
             },
             "approval_id": {"type": "string", "description": "工具审批 id"},
             "decision": {
                 "type": "string",
-                "enum": ["approve_once", "approve_session", "approve_always", "deny"],
+                "enum": ["approve_once", "approve_session", "approve_role",
+                         "approve_team", "approve_always", "deny"],
                 "description": "approve 的决策",
             },
             "question_id": {"type": "string", "description": "待回答问题 id"},
@@ -514,6 +523,12 @@ TOOL_DEFS: List[ToolDef] = [
             "run_id": {"type": "string", "description": "要停止的 run id"},
             "all": {"type": "boolean",
                     "description": "mark_read 时是否处理全部未读"},
+            "enabled": {"type": "boolean", "description": "set_proactive：是否允许模型主动发起消息"},
+            "max_per_day": {"type": "integer", "description": "每个会话每天最多主动消息数"},
+            "min_gap_minutes": {"type": "integer", "description": "同一会话两条主动消息的最小间隔（分钟）"},
+            "quiet_start": {"type": "string", "description": "安静时段开始（HH:MM，空=不限制）"},
+            "quiet_end": {"type": "string", "description": "安静时段结束（HH:MM）"},
+            "task_id": {"type": "string", "description": "cancel_proactive 的任务 id"},
         }, ["action"]),
         risk="low",
         gated=False,
@@ -548,10 +563,51 @@ TOOL_DEFS: List[ToolDef] = [
             "tools": {"type": "array", "items": {"type": "string"},
                       "description": "可选：该角色可用的工具子集（不填=默认全集）"},
             "model_code": {"type": "string", "description": "可选：角色使用的模型档案 code"},
+            "status": {"type": "string", "enum": ["online", "offline"],
+                       "description": "update 时设置角色在线或离线"},
             "scope": {"type": "string", "enum": ["temporary", "persistent"],
                       "description": "create 时的生命周期（默认 temporary）"},
             "add_to_team": {"type": "boolean",
                             "description": "create 时是否加入当前会话绑定的群聊（默认 true）"},
+        }, ["action"]),
+        gated=False,
+    ),
+    ToolDef(
+        "schedule_manage", ("schedule_admin",),
+        name="定时 / 主动任务",
+        description=(
+            "管理定时任务与自由触发任务。\n"
+            "trigger_mode=scheduled：按 schedule 固定执行（once / interval / daily / weekly）；"
+            "trigger_mode=smart：到评估时间后由模型结合 condition 判断是否主动执行（自由触发），"
+            "适合「观察某件事，时机合适就推进」；trigger_mode=manual：只手动运行。\n"
+            "schedule 示例：{at:'2026-11-12 09:00'} / {every_minutes:60} / "
+            "{time:'09:00'} / {weekday:0,time:'09:00'}（weekday 0=周一）。\n"
+            "任务会落到一条普通会话里执行，可指定 role_id / workspace_id；"
+            "run_mode=autonomous 时按自主执行推进。"
+        ),
+        parameters=_obj({
+            "action": {"type": "string",
+                       "enum": ["list", "create", "update", "delete", "run", "pause", "resume"],
+                       "description": "操作"},
+            "task_id": {"type": "string", "description": "任务 id（update / delete / run / pause / resume 必填）"},
+            "title": {"type": "string", "description": "任务标题"},
+            "prompt": {"type": "string", "description": "每次触发时发给角色的任务内容"},
+            "trigger_mode": {"type": "string",
+                             "enum": ["scheduled", "smart", "manual"],
+                             "description": "触发方式"},
+            "schedule_kind": {"type": "string",
+                              "enum": ["once", "interval", "daily", "weekly", "smart"],
+                              "description": "时间规则；smart 表示按评估间隔自由触发"},
+            "schedule": {"type": "object",
+                         "description": "时间参数：at / every_minutes / time / weekday"},
+            "condition": {"type": "string",
+                          "description": "smart 模式的触发条件，例如「如果今天的日志里有新报错就排查」"},
+            "role_id": {"type": "string", "description": "执行任务的角色 id"},
+            "workspace_id": {"type": "string", "description": "执行任务的工作区 id"},
+            "run_mode": {"type": "string", "enum": ["chat", "autonomous"],
+                         "description": "会话模式：普通对话或自主执行"},
+            "auto_execute": {"type": "boolean", "description": "自主执行时是否跳过确认"},
+            "max_runs": {"type": "integer", "description": "最多运行次数（0=不限）"},
         }, ["action"]),
         gated=False,
     ),

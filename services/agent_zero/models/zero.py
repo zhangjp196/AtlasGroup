@@ -13,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -165,8 +166,13 @@ class Conversation(Base):
     workspace_id: Mapped[str] = mapped_column(
         Text, ForeignKey("workspaces.id"), nullable=False
     )
-    # 会话级工作区绑定（可空 = 纯聊天）：工作区只是文件上下文，不再决定会话归属
+    # 会话级工作区绑定（历史字段，可空 = 纯聊天）：只做旧数据兼容
     bound_workspace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 工作区是否为会话手动指定：0 = 跟随角色 / 群组绑定，1 = 本会话固定使用
+    # workspace_id（切换角色 / 群组不覆盖，同一角色的不同会话可以用不同工作区）。
+    workspace_custom: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("0")
+    )
     role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 空间分区（历史字段）：普通对话为空，群组/角色空间按 zone 分区展示。
     zone: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -352,6 +358,15 @@ class GdagNode(Base):
             "'artifact','experience','tool_call')",
             name="ck_gdag_nodes_type",
         ),
+        # 会话内按时间取消息（跨轮历史 / 转录 / 检查点）是热路径：带上 created_at
+        # 才能「按索引倒序扫 + 提前 LIMIT」。这里声明成模型索引，保证 create_all
+        # 建出来的库（测试 / 脚本）也有它；已有库由 ENSURE_INDEXES 补建。
+        Index(
+            "idx_gdag_conv_stage_created",
+            text("json_extract(props, '$.conversation_id')"),
+            text("json_extract(props, '$.stage')"),
+            text("created_at"),
+        ),
     )
 
 
@@ -425,6 +440,9 @@ class ToolApproval(Base):
         Text, nullable=False, default="pending", server_default=text("'pending'")
     )
     scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 发起调用的角色 / 群组：审批 UI 据此提供「永久授权给角色 / 群组」。
+    role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object] = mapped_column(
         DateTime, server_default=text("datetime('now','localtime')"), nullable=False
     )
@@ -450,6 +468,29 @@ class PermissionGrant(Base):
     tool: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[object] = mapped_column(
         DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+
+
+class PermissionScopeGrant(Base):
+    """角色 / 群组的永久工具授权（跨会话生效）。"""
+
+    __tablename__ = "permission_scope_grants"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)  # role / team
+    role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[str] = mapped_column(
+        Text, nullable=False, default="local", server_default=text("'local'")
+    )
+    created_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("scope IN ('role','team')",
+                        name="ck_permission_scope_grants_scope"),
     )
 
 
@@ -611,6 +652,82 @@ class WorkItem(Base):
     )
 
 
+class ScheduledTask(Base):
+    """定时 / 自由触发任务：按时间或由模型判断是否主动推进一件工作。
+
+    与 `work_items` 的区别：工单是「要推进的工作」，定时任务是「什么时候 /
+    要不要主动开始工作」。`trigger_mode`：
+
+    - `scheduled`：按 schedule 固定触发（间隔 / 每天 / 每周 / 一次）；
+    - `smart`：到评估时间后由模型结合 condition 判断是否触发（自由触发）；
+    - `manual`：只允许手动运行。
+
+    首次运行会建一条独立会话（`last_conversation_id`），后续运行默认复用它，
+    这样任务历史可回看，也仍是一个普通会话（可以多角色参与）。
+    """
+
+    __tablename__ = "scheduled_tasks"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    workspace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, default="scheduled", server_default=text("'scheduled'")
+    )
+    schedule_kind: Mapped[str] = mapped_column(
+        Text, nullable=False, default="daily", server_default=text("'daily'")
+    )
+    schedule: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    condition: Mapped[str] = mapped_column(Text, nullable=False, default="",
+                                           server_default=text("''"))
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="active", server_default=text("'active'")
+    )
+    run_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, default="chat", server_default=text("'chat'")
+    )
+    auto_execute: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("0")
+    )
+    max_runs: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    run_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    last_run_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+    last_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_conversation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_run_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+    meta: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+    updated_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "trigger_mode IN ('scheduled','smart','manual')",
+            name="ck_scheduled_tasks_trigger",
+        ),
+        CheckConstraint(
+            "schedule_kind IN ('once','interval','daily','weekly','smart')",
+            name="ck_scheduled_tasks_kind",
+        ),
+        CheckConstraint(
+            "status IN ('active','paused','done')",
+            name="ck_scheduled_tasks_status",
+        ),
+    )
+
+
 ENSURE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_gdag_camp ON gdag_nodes(camp)",
     "CREATE INDEX IF NOT EXISTS idx_gdag_type ON gdag_nodes(type, created_at)",
@@ -621,6 +738,14 @@ ENSURE_INDEXES = (
     "((json_extract(props, '$.conversation_id')))",
     "CREATE INDEX IF NOT EXISTS idx_gdag_conv_stage ON gdag_nodes"
     "((json_extract(props, '$.conversation_id')), (json_extract(props, '$.stage')))",
+    # 会话内按时间取消息（跨轮历史 / 转录 / 检查点）是热路径：带上 created_at
+    # 才能「按索引倒序扫 + 提前 LIMIT」，不必把整个会话的行取出来再排序。
+    "CREATE INDEX IF NOT EXISTS idx_gdag_conv_stage_created ON gdag_nodes"
+    "((json_extract(props, '$.conversation_id')), (json_extract(props, '$.stage')),"
+    " created_at)",
+    # 任务 / 工单按 run 归集 token：浮窗 5s 轮询，必须有索引避免全表扫。
+    "CREATE INDEX IF NOT EXISTS idx_gdag_run ON gdag_nodes"
+    "((json_extract(props, '$.run_id')))",
     "CREATE INDEX IF NOT EXISTS idx_gdag_edges_to ON gdag_edges(to_id)",
     "CREATE INDEX IF NOT EXISTS idx_conv_runs_conv ON conversation_runs(conversation_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_conv_runs_status ON conversation_runs(status)",
@@ -634,6 +759,8 @@ ENSURE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, ts)",
     "CREATE INDEX IF NOT EXISTS idx_approvals_conv ON tool_approvals(conversation_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_grants_conv ON permission_grants(conversation_id, tool)",
+    "CREATE INDEX IF NOT EXISTS idx_scope_grants_role ON permission_scope_grants(role_id, tool)",
+    "CREATE INDEX IF NOT EXISTS idx_scope_grants_team ON permission_scope_grants(team_id, tool)",
     "CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name)",
     "CREATE INDEX IF NOT EXISTS idx_skills_role ON skills(role_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_teams_ws ON agent_teams(workspace_id, created_at)",
@@ -644,4 +771,6 @@ ENSURE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_work_items_status ON work_items(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_work_items_conv ON work_items(conversation_id)",
     "CREATE INDEX IF NOT EXISTS idx_work_items_run ON work_items(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due ON scheduled_tasks(status, next_run_at)",
+    "CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_conv ON scheduled_tasks(last_conversation_id)",
 )

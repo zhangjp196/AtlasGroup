@@ -21,16 +21,18 @@ defineProps<{ entries: ProcessEntry[]; live?: boolean }>()
 
       <div v-else-if="entry.kind === 'tool'" class="proc-tool">
         <div class="tool-line">
-          <span class="tool-ico">▤</span>
-          <span class="tool-name">{{ entry.name || 'tool' }}</span>
-          <span v-if="entry.duration_ms" class="tool-ms">{{ durationText(entry.duration_ms) }}</span>
-          <span v-if="entry.status === 'running' || entry.status === 'preparing'" class="sp" />
-          <span v-else :class="entry.ok === false ? 'fail' : 'ok'">{{ entry.ok === false ? '!' : '' }}</span>
+          <div class="tool-head">
+            <span class="tool-ico">▤</span>
+            <span class="tool-name">{{ entry.name || 'tool' }}</span>
+            <span v-if="entry.duration_ms" class="tool-ms">{{ durationText(entry.duration_ms) }}</span>
+            <span v-if="entry.status === 'running' || entry.status === 'preparing'" class="sp" />
+            <span v-else :class="entry.ok === false ? 'fail' : 'ok'">{{ entry.ok === false ? '!' : '' }}</span>
+          </div>
+          <details v-if="entry.display?.diff || entry.args" class="tool-args">
+            <summary>{{ entry.display?.diff ? '改动' : '参数' }}</summary>
+            <pre>{{ entry.display?.diff || JSON.stringify(entry.args, null, 2) }}</pre>
+          </details>
         </div>
-        <details v-if="entry.display?.diff || entry.args" class="tool-args">
-          <summary>{{ entry.display?.diff ? '改动' : '参数' }}</summary>
-          <pre>{{ entry.display?.diff || JSON.stringify(entry.args, null, 2) }}</pre>
-        </details>
       </div>
 
       <div v-else-if="entry.kind === 'text'" class="proc-text">

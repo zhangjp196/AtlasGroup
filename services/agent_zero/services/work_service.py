@@ -189,8 +189,66 @@ def _update_status(item_id: str, **fields: Any) -> None:
         db.commit()
 
 
+def pending_reason(conversation_id: str) -> Optional[str]:
+    """该会话当前需要人处理的原因（待授权 / 待回答）；无则 None。"""
+    cid = str(conversation_id or "").strip()
+    if not cid:
+        return None
+    return _pending_map().get(cid)
+
+
+def _auto_goal(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """派活时自动创建的对话级目标（自动续跑用）；不是自动工单则 None。"""
+    meta = item.get("meta") or {}
+    if not meta.get("auto_goal"):
+        return None
+    conv_id = str(item.get("conversation_id") or "")
+    if not conv_id:
+        return None
+    try:
+        from services.agent_zero.task_layer import goal_service
+
+        goal = goal_service.get_goal(conv_id)
+    except Exception:
+        logger.debug("读取工单目标失败 conversation=%s", conv_id, exc_info=True)
+        return None
+    if not goal:
+        return None
+    goal_id = str(meta.get("goal_id") or "")
+    if goal_id and str(goal.get("id") or "") != goal_id:
+        return None
+    return goal
+
+
+def _goal_blocked(goal: Dict[str, Any]) -> bool:
+    try:
+        from services.agent_zero.task_layer import goal_service
+
+        return goal_service.is_blocked(goal)
+    except Exception:
+        return False
+
+
+def _goal_blocked_reason(goal: Dict[str, Any]) -> str:
+    note = str((goal or {}).get("note") or "").strip()
+    try:
+        from services.agent_zero.task_layer import goal_service
+
+        prefix = goal_service.BLOCKED_PREFIX
+        if note.startswith(prefix):
+            note = note[len(prefix):].strip()
+    except Exception:
+        pass
+    return note or "等待你的决定"
+
+
 def _sync_item(item: Dict[str, Any], pending: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """把 run 的真实状态收敛到工单；只有需要人时停在 needs_attention。"""
+    """把 run 的真实状态收敛到工单；只有需要人时停在 needs_attention。
+
+    自动工单（派活时建了对话级目标）以**目标**为准：目标仍 active 就还算是
+    进行中（系统会自动续跑 / 重试），achieved 才算完成，exhausted / closed /
+    blocked 停下来等人——不能因为某一轮 run 结束就把工单标成完成。
+    """
     if item.get("status") in ("closed",):
         return item
     # 后台任务自动建的工单由任务生命周期维护（一次任务可能有多个成员 run），
@@ -206,6 +264,17 @@ def _sync_item(item: Dict[str, Any], pending: Optional[Dict[str, str]] = None) -
 
     if status in ("done", "closed") and not reason:
         return item
+
+    goal = _auto_goal(item)
+    goal_status = str((goal or {}).get("status") or "")
+    blocked = bool(goal) and goal_status == "active" and _goal_blocked(goal)
+
+    # 重新打开后还没派活：上一轮的 run 已经结束，别把刚打开的工单又按旧 run
+    # 收敛成「已完成」，等用户重新派活即可。
+    if status == "inbox" and (not run or run.get("status") not in ("queued", "running")):
+        if not reason:
+            return item
+
     if reason:
         target, attention = "needs_attention", reason
     elif not run_id:
@@ -219,12 +288,21 @@ def _sync_item(item: Dict[str, Any], pending: Optional[Dict[str, str]] = None) -
         target, attention = "needs_attention", "运行记录已丢失，重新派活即可"
     elif run.get("status") in ("queued", "running"):
         target, attention = "working", None
-    elif run.get("status") == "done":
-        target, attention = "done", None
     elif run.get("status") == "stopped":
         target, attention = "needs_attention", "运行已停止，确认后继续"
-    else:
+    elif goal and blocked:
+        target, attention = "needs_attention", _goal_blocked_reason(goal)
+    elif goal and goal_status == "exhausted":
+        target, attention = "needs_attention", "自动续跑次数已用尽，确认后继续"
+    elif goal and goal_status == "closed":
+        target, attention = "needs_attention", "目标已手动结束，确认是否完成"
+    elif goal and goal_status == "active":
+        # 目标没完成（这一轮成功或失败都算）：系统会自动续跑 / 重试，保持进行中。
+        target, attention = "working", None
+    elif run.get("status") != "done":
         target, attention = "needs_attention", f"运行失败：{run.get('error') or '未知错误'}"
+    else:
+        target, attention = "done", None
 
     fields: Dict[str, Any] = {}
     if target != status:
@@ -323,17 +401,69 @@ def stats() -> Dict[str, int]:
     return out
 
 
+def _attach_usage(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """给工单补 token 用量（输入 / 输出 / 速度 / 缓存）。
+
+    - 后台任务自动建的工单（meta.managed_by=team_task）：按 meta.task_id 汇总
+      该任务成员 run 的用量，不把同一会话里其它任务的 token 算进来；
+    - 手动 / 来源工单：按它独占的会话汇总（每次派活都会新建一个会话）。
+    """
+    from services.agent_zero.services import usage_service
+
+    conv_ids: List[str] = []
+    task_ids: List[str] = []
+    for item in items:
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        task_id = str(meta.get("task_id") or "").strip()
+        if str(meta.get("managed_by") or "") == "team_task" and task_id:
+            task_ids.append(task_id)
+        else:
+            conv_id = str(item.get("conversation_id") or "").strip()
+            if conv_id:
+                conv_ids.append(conv_id)
+    conv_usage = usage_service.usage_by_conversation(conv_ids, stage="exploration")
+    task_usage = usage_service.usage_by_task(task_ids)
+    for item in items:
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        task_id = str(meta.get("task_id") or "").strip()
+        if str(meta.get("managed_by") or "") == "team_task" and task_id:
+            usage = task_usage.get(task_id)
+        else:
+            usage = conv_usage.get(str(item.get("conversation_id") or "").strip())
+        item["usage"] = usage or usage_service.empty_usage()
+    return items
+
+
+def _usage_totals(items: List[Dict[str, Any]]) -> Dict[str, int]:
+    totals = {"tokens": 0, "prompt_tokens": 0, "completion_tokens": 0,
+              "cached_tokens": 0, "llm_ms": 0, "rounds": 0, "turns": 0}
+    for item in items:
+        usage = item.get("usage") or {}
+        totals["tokens"] += int(usage.get("total_tokens") or 0)
+        totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+        totals["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+        totals["cached_tokens"] += int(usage.get("cached_tokens") or 0)
+        totals["llm_ms"] += int(usage.get("llm_ms") or 0)
+        totals["rounds"] += int(usage.get("rounds") or 0)
+        totals["turns"] += int(usage.get("turns") or 0)
+    return totals
+
+
 def list_items(status: Optional[str] = None, limit: int = 100,
                conversation_id: Optional[str] = None) -> Dict[str, Any]:
     pending = _pending_map()
-    items = [_sync_item(item, pending)
-             for item in _list_rows(status, limit, conversation_id)]
-    return {"items": items, "stats": stats(), "policy": get_policy()}
+    items = _attach_usage([_sync_item(item, pending)
+                           for item in _list_rows(status, limit, conversation_id)])
+    summary = stats()
+    summary.update(_usage_totals(items))
+    return {"items": items, "stats": summary, "policy": get_policy()}
 
 
 def get_item(item_id: str) -> Optional[Dict[str, Any]]:
     row = _get_row(item_id)
-    return _sync_item(row, _pending_map()) if row else None
+    if not row:
+        return None
+    return _attach_usage([_sync_item(row, _pending_map())])[0]
 
 
 # ── CRUD ─────────────────────────────────────────────────────────────────
@@ -386,6 +516,26 @@ def create_from_task(task: Dict[str, Any], conv: Optional[Dict[str, Any]] = None
     except Exception:
         logger.exception("后台任务自动建工单失败 task=%s", task_id)
         return None
+
+
+def mark_auto_handled(task: Dict[str, Any], note: str = "") -> None:
+    """任务失败但已自动交回角色：工单不再挂在「需要你」，记录一句说明。
+
+    自动继续是默认行为，失败也被角色接手了；如果还留一张「需要你」，等于又
+    要求用户点一下，和「全自动」的预期相反。
+    """
+    task_id = str((task or {}).get("id") or "").strip()
+    if not task_id:
+        return
+    item = find_by_ref(f"team_task:{task_id}")
+    if not item:
+        return
+    summary = str(item.get("result_summary") or "").strip()
+    text = (summary + "\n" + note).strip() if note else summary
+    _update_status(
+        item["id"], status="done", attention_reason=None,
+        finished_at=_now(), result_summary=text[:4000] or None,
+    )
 
 
 def finish_task(task: Dict[str, Any], summary: str = "") -> Optional[Dict[str, Any]]:
@@ -508,11 +658,27 @@ def update_item(item_id: str, patch: Dict[str, Any], *, actor: str = "local") ->
     if not fields:
         return item
     _update_status(item_id, **fields)
+    if fields.get("status") in ("done", "closed"):
+        # 人工收尾：停掉自动续跑，不然目标还会继续开新一轮。
+        _close_item_goal(item)
     zero_store.append_audit(actor, "work_item_update", args={"id": item_id, "fields": list(fields)})
     return get_item(item_id) or {}
 
 
+def _close_item_goal(item: Dict[str, Any]) -> None:
+    conv_id = str(item.get("conversation_id") or "")
+    if not conv_id or not (item.get("meta") or {}).get("auto_goal"):
+        return
+    try:
+        from services.agent_zero.task_layer import goal_service
+
+        goal_service.close_goal(conv_id)
+    except Exception:
+        logger.debug("结束工单目标失败 conversation=%s", conv_id, exc_info=True)
+
+
 def delete_item(item_id: str, *, actor: str = "local") -> bool:
+    item = _get_row(item_id)
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         result = db.execute(
@@ -520,6 +686,8 @@ def delete_item(item_id: str, *, actor: str = "local") -> bool:
         )
         db.commit()
     if result.rowcount:
+        if item:
+            _close_item_goal(item)
         zero_store.append_audit(actor, "work_item_delete", args={"id": item_id})
     return bool(result.rowcount)
 
@@ -538,6 +706,19 @@ def _prompt(item: Dict[str, Any]) -> str:
         "请直接推进并完成这个工单。需要人决定的工单，停下来提问；"
         "完成后用几行说明结果、关键改动和验证情况。"
     )
+
+
+def _goal_objective(item: Dict[str, Any]) -> str:
+    title = str(item.get("title") or "").strip()
+    body = str(item.get("body") or "").strip()
+    text = f"完成工单：{title}"
+    if body:
+        text += f"\n\n{body}"
+    return text[:4000]
+
+
+# 工单自动续跑的轮数上限：不暴露成配置，用尽后停在「需要你」，防止跑飞。
+WORK_ITEM_MAX_RUNS = 20
 
 
 async def dispatch_item(item_id: str, *, actor: str = "local") -> Dict[str, Any]:
@@ -569,6 +750,31 @@ async def dispatch_item(item_id: str, *, actor: str = "local") -> Dict[str, Any]
         run_mode="autonomous",
     )
     conv_id = conv["id"]
+    # 自动续跑：给工单建一个对话级目标。模型报告 achieved 才算完成；否则每轮
+    # run 结束后（包括失败）由 goal_service 自动入队下一轮。
+    meta = dict(item.get("meta") or {})
+    try:
+        from services.agent_zero.task_layer import goal_service
+
+        prev_conv = str(item.get("conversation_id") or "")
+        if prev_conv and prev_conv != conv_id:
+            # 重新派活会新建会话：旧会话的目标必须先结束，否则它会继续续跑。
+            goal_service.close_goal(prev_conv)
+        goal = goal_service.set_goal(
+            conv_id,
+            objective=_goal_objective(item),
+            max_runs=WORK_ITEM_MAX_RUNS,
+        )
+        meta.update({"auto_goal": True, "goal_id": str(goal.get("id") or "")})
+        prompt += (
+            "\n\n（这是一张会自动续跑的工单：每轮结束后系统会接着推进。"
+            "真正完成时调用 goal_report(status=\"achieved\") 结束续跑；"
+            "卡住需要人决定时调用 goal_report(status=\"blocked\")。）"
+        )
+    except Exception:
+        meta.pop("auto_goal", None)
+        meta.pop("goal_id", None)
+        logger.warning("工单自动续跑初始化失败 item=%s", item_id, exc_info=True)
     msg = conversation.send_message(conv_id, prompt, LOCAL_USER_ID, queued=True)
     run = run_service.create_run(
         conv_id, LOCAL_USER_ID, role_id=role_id, content=prompt,
@@ -583,6 +789,7 @@ async def dispatch_item(item_id: str, *, actor: str = "local") -> Dict[str, Any]
         item_id,
         status="working", conversation_id=conv_id, run_id=run["id"],
         attention_reason=None, started_at=_now(), finished_at=None,
+        meta=json.dumps(meta, ensure_ascii=False),
     )
     zero_store.append_audit(actor, "work_item_dispatch",
                             args={"id": item_id, "conversation_id": conv_id, "run_id": run["id"]})

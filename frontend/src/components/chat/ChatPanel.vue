@@ -1,16 +1,23 @@
 <script setup lang="ts">
+import { ElPopover } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
+import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import SideDrawer from '@/components/SideDrawer.vue'
 import Modal from '@/components/Modal.vue'
+import TokenMeter from '@/components/TokenMeter.vue'
+import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
 import type { Conversation, SlashCommand, WorkItem } from '@/api/types'
 import { ACTION_COMMANDS } from '@/lib/commands'
 import { conversationMeta, conversationTitle, GLOBAL_AGENT_ZONE } from '@/lib/derive'
+import { compactNumber } from '@/lib/format'
+import { cacheTone, mergeUsage, usageSummary } from '@/lib/usage'
 import { useChat } from '@/composables/useChat'
 import { useAppStore } from '@/stores/app'
 import { useAttentionStore } from '@/stores/attention'
+import { useChatWindowsStore } from '@/stores/chatWindows'
 import { useDataStore } from '@/stores/data'
 import { useWindowsStore } from '@/stores/windows'
 import AgentCanvas from './AgentCanvas.vue'
@@ -21,6 +28,7 @@ import ConversationSettingsDrawer from './ConversationSettingsDrawer.vue'
 import GlobalInbox from './GlobalInbox.vue'
 import LiveMessage from './LiveMessage.vue'
 import MessageItem from './MessageItem.vue'
+import ParticipantsDrawer from './ParticipantsDrawer.vue'
 import TaskCard from './TaskCard.vue'
 
 const router = useRouter()
@@ -28,12 +36,24 @@ const app = useAppStore()
 const data = useDataStore()
 const windows = useWindowsStore()
 const attention = useAttentionStore()
+const chatWindows = useChatWindowsStore()
 const chat = useChat()
 
-const props = defineProps<{ conversationId: string; floating?: boolean; globalAgent?: boolean; initialTab?: 'chat' | 'inbox' }>()
-const emit = defineEmits<{ (e: 'close'): void }>()
+const props = defineProps<{
+  conversationId: string
+  floating?: boolean
+  globalAgent?: boolean
+  globalConversation?: boolean
+  windowIndex?: number
+  initialTab?: 'chat' | 'inbox'
+  draftRoleId?: string
+  draftParticipants?: string[]
+  draftWorkspaceId?: string
+}>()
+const emit = defineEmits<{ (e: 'close'): void; (e: 'focus'): void; (e: 'promoted', conversationId: string): void }>()
 
 const BUILTIN_COMMANDS = ACTION_COMMANDS
+const isDraft = computed(() => !props.conversationId && Boolean(props.draftRoleId))
 
 const draft = ref('')
 const model = ref('')
@@ -49,10 +69,119 @@ const atBottom = ref(true)
 let scrollRaf = 0
 let resizeObserver: ResizeObserver | null = null
 let settleTimers: number[] = []
+// 会话历史按批展开：默认只渲染最近 60 条，点「查看更多」再往前补一批。
+// 长会话一次铺 200 条（约 3900 个 DOM 节点）会把首帧拖到 400ms+。
+const MESSAGE_WINDOW = 60
+const messageWindow = ref(MESSAGE_WINDOW)
+const hiddenMessages = computed(
+  () => Math.max(0, chat.messages.value.length - messageWindow.value),
+)
+const visibleMessages = computed(() => {
+  const all = chat.messages.value
+  return all.length <= messageWindow.value ? all : all.slice(all.length - messageWindow.value)
+})
+watch([() => props.conversationId, () => chat.conversation.value?.id], () => {
+  messageWindow.value = MESSAGE_WINDOW
+})
+
+function showEarlierMessages(): void {
+  const el = scroller.value
+  // 以「当前窗口第一条消息」为锚点：展开后把它顶回原来的位置，
+  // 比记 scrollHeight 差值稳（Markdown / 图片高度是异步撑开的）。
+  const anchorId = String(visibleMessages.value[0]?.id || '')
+  messageWindow.value += MESSAGE_WINDOW
+  nextTick(() => {
+    if (!el || !anchorId) return
+    const node = el.querySelector<HTMLElement>(`[data-mid="${CSS.escape(anchorId)}"]`)
+    if (!node) return
+    const offset = node.getBoundingClientRect().top - el.getBoundingClientRect().top
+    el.scrollTop += offset - 8
+    updateScrollState()
+  })
+}
 const tempOpen = ref(false)
 const tempForm = reactive({ name: '', expertise: '', persona: '' })
 const canvasOpen = ref(false)
 const settingsOpen = ref(false)
+const participantsOpen = ref(false)
+const avatarMenu = reactive({ open: false, x: 0, y: 0 })
+const avatarMenuItems = computed<ContextMenuItem[]>(() => {
+  if (isDraft.value) {
+    return [
+      { label: '发出第一条消息后才会创建会话', action: 'noop', disabled: true },
+      { label: '', action: '', separator: true },
+      { label: '关闭窗口', action: 'close' },
+    ]
+  }
+  return [
+    { label: '会话管理', action: 'settings' },
+    { label: '参与角色', action: 'participants', disabled: Boolean(props.globalAgent) },
+    { label: '重命名会话', action: 'rename' },
+    { label: '复制会话 ID', action: 'copy-id' },
+    { label: '', action: '', separator: true },
+    { label: '清空会话上下文', action: 'clean' },
+    { label: '标记已读', action: 'read' },
+    { label: '', action: '', separator: true },
+    { label: '删除会话', action: 'delete', danger: true, disabled: Boolean(props.globalAgent) },
+    { label: '关闭窗口', action: 'close' },
+  ]
+})
+
+function openAvatarMenu(event: MouseEvent): void {
+  avatarMenu.x = event.clientX
+  avatarMenu.y = event.clientY
+  avatarMenu.open = true
+}
+
+async function onAvatarMenu(action: string): Promise<void> {
+  avatarMenu.open = false
+  if (action === 'settings') {
+    settingsOpen.value = true
+    return
+  }
+  if (action === 'participants') {
+    participantsOpen.value = true
+    return
+  }
+  if (action === 'rename') {
+    const current = conversation.value ? conversationTitle(conversation.value, data.teams, data.roles) : ''
+    const next = window.prompt('会话标题', current) || ''
+    if (next.trim()) await renameConversation(next.trim())
+    return
+  }
+  if (action === 'copy-id') {
+    const id = conversation.value?.id || props.conversationId
+    if (!id) return
+    try {
+      await navigator.clipboard.writeText(id)
+      app.toast('已复制会话 ID')
+    } catch {
+      app.toast('复制失败', 'bad')
+    }
+    return
+  }
+  if (action === 'clean') {
+    cleanOpen.value = true
+    return
+  }
+  if (action === 'read') {
+    const id = conversation.value?.id
+    if (!id) return
+    try {
+      await api(`/conversations/${encodeURIComponent(id)}/read`, { method: 'POST' })
+      await data.loadAll()
+      app.toast('已标记为已读')
+    } catch (error) {
+      app.toast(error instanceof Error ? error.message : String(error), 'bad')
+    }
+    return
+  }
+  if (action === 'delete') {
+    await deleteConversation()
+    return
+  }
+  if (action === 'close') emit('close')
+}
 const cleanOpen = ref(false)
 const cleaning = ref(false)
 const backgroundTaskCount = ref(0)
@@ -61,7 +190,8 @@ const conversationWork = ref<WorkItem[]>([])
 const openWorkCount = computed(() => conversationWork.value.filter(
   (item) => ['inbox', 'working', 'needs_attention'].includes(String(item.status || '')),
 ).length)
-// 已结束但还没交回主会话的后台任务：由用户点「继续对话」触发，不自动烧 token。
+// 已结束但还没交回主会话的后台任务：默认由后端自动交回；自动交回失败时
+// 这里给出「继续对话」手动兜底。
 const continueTask = ref<{ id: string; title: string } | null>(null)
 let taskTimer = 0
 const globalTab = ref<'chat' | 'inbox'>(props.initialTab || 'chat')
@@ -72,7 +202,8 @@ const GA_POS_KEY = 'atlasx.ga.pos.v2'
 const dragX = ref(0)
 const dragY = ref(0)
 const dragging = ref(false)
-if (props.floating) {
+const initialLeft = Math.max(12, window.innerWidth - 460 - (props.windowIndex || 0) * 450)
+if (props.floating && props.globalAgent) {
   try {
     const saved = JSON.parse(localStorage.getItem(GA_POS_KEY) || '{}')
     if (Number.isFinite(saved.x)) dragX.value = Number(saved.x)
@@ -82,8 +213,55 @@ if (props.floating) {
   }
 }
 const dragStyle = computed(() => (props.floating
-  ? { transform: `translate(${dragX.value}px, ${dragY.value}px)` }
+  ? { transform: `translate(${dragX.value}px, ${dragY.value}px)`, ...(props.globalAgent ? { zIndex: 104 } : props.globalConversation ? { left: 'min(480px, 35vw)', zIndex: 104 } : { left: `${initialLeft}px`, zIndex: 102 + (props.windowIndex || 0) }) }
   : undefined))
+
+// 浮窗尺寸：右 / 下 / 右下角三处可拖拽拉伸；尺寸全局记忆。
+const CHAT_SIZE_KEY = 'atlasx.chat.size.v3'
+const size = ref({ w: 440, h: 640 })
+const resizing = ref(false)
+if (props.floating) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CHAT_SIZE_KEY) || '{}')
+    if (Number.isFinite(saved.w) && Number.isFinite(saved.h)) {
+      size.value = { w: Number(saved.w), h: Number(saved.h) }
+    }
+  } catch { /* ignore */ }
+}
+const resizeStyle = computed(() => (props.floating
+  ? { width: `${size.value.w}px`, height: `${size.value.h}px` }
+  : undefined))
+
+let resizeStart: { x: number; y: number; w: number; h: number } | null = null
+function startResize(event: PointerEvent, direction: 'right' | 'bottom' | 'corner'): void {
+  if (!props.floating) return
+  event.stopPropagation()
+  event.preventDefault()
+  resizeStart = { x: event.clientX, y: event.clientY, w: size.value.w, h: size.value.h }
+  resizing.value = true
+  const onMove = (move: PointerEvent): void => {
+    if (!resizeStart) return
+    const dx = move.clientX - resizeStart.x
+    const dy = move.clientY - resizeStart.y
+    const maxW = Math.max(360, window.innerWidth - 48)
+    const maxH = Math.max(300, window.innerHeight - 40)
+    size.value = {
+      w: direction === 'bottom' ? resizeStart.w : Math.min(maxW, Math.max(360, resizeStart.w + dx)),
+      h: direction === 'right' ? resizeStart.h : Math.min(maxH, Math.max(300, resizeStart.h + dy)),
+    }
+  }
+  const onUp = (): void => {
+    resizeStart = null
+    resizing.value = false
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onUp)
+    if (props.floating) {
+      try { localStorage.setItem(CHAT_SIZE_KEY, JSON.stringify(size.value)) } catch { /* ignore */ }
+    }
+  }
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onUp)
+}
 let dragStart: { x: number; y: number; baseX: number; baseY: number } | null = null
 
 function startDrag(event: PointerEvent): void {
@@ -106,7 +284,7 @@ function endDrag(): void {
   dragging.value = false
   dragStart = null
   window.removeEventListener('pointermove', onDrag)
-  if (props.floating) {
+  if (props.floating && props.globalAgent) {
     try {
       localStorage.setItem(GA_POS_KEY, JSON.stringify({ x: dragX.value, y: dragY.value }))
     } catch {
@@ -119,6 +297,9 @@ onMounted(() => {
   if (chat.messages.value.length || chat.entries.value.length) settleBottom()
   taskTimer = window.setInterval(() => {
     if (!props.globalAgent) void loadBackgroundTasks()
+    // 后台任务完成或工单自动续跑会新建一条 run：没有 SSE 连接时主动接上，
+    // 否则要等用户手动刷新才能看到角色继续输出的内容。
+    if (!chat.streaming.value) void chat.resumeRunning()
   }, 4000)
   if (!msgsEl.value || typeof ResizeObserver === 'undefined') return
   resizeObserver = new ResizeObserver(() => {
@@ -138,9 +319,38 @@ onBeforeUnmount(() => {
 })
 
 const convId = computed(() => props.conversationId)
+
+// 会话用量 = 已落库的轮次 + 运行中这一轮的实时快照（SSE usage 事件）。
+const sessionUsage = computed(() => mergeUsage(
+  conversation.value?.usage_total || conversation.value?.usage,
+  chat.liveUsage.value,
+))
+const sessionUsageView = computed(() => usageSummary(sessionUsage.value))
+const sessionTone = computed(() => cacheTone(
+  sessionUsageView.value.cacheRate, sessionUsageView.value.input > 0))
+const usagePopover = ref(false)
+const sessionUsageTitle = computed(() => {
+  const view = sessionUsageView.value
+  return [
+    `输入 ${view.input.toLocaleString('en-US')} tokens`,
+    `输出 ${view.output.toLocaleString('en-US')} tokens`,
+    `生成速度 ${view.speed || '—'} t/s`,
+    `缓存命中 ${view.cacheRate}%（${view.cached.toLocaleString('en-US')}）`,
+    '点击查看会话用量',
+  ].join('\n')
+})
 const conversation = computed(() => chat.conversation.value as Conversation | null)
 const title = computed(() => (conversation.value ? conversationTitle(conversation.value, data.teams, data.roles) : '会话'))
 const meta = computed(() => (conversation.value ? conversationMeta(conversation.value, data.teams, data.roles) : { kind: '', sub: '' }))
+// 头部只留一行：去掉与标题重复的角色名，避免「陈思 · 角色：陈思 · CTO · 董事会」折成三行。
+const headerMeta = computed(() => {
+  let sub = String(meta.value.sub || '')
+  if (sub.startsWith('角色：')) {
+    sub = sub.slice(3)
+    if (title.value && sub.startsWith(`${title.value} · `)) sub = sub.slice(title.value.length + 3)
+  }
+  return [meta.value.kind, sub].filter(Boolean).join(' · ')
+})
 const isGlobalZone = computed(() => String(conversation.value?.zone || '') === GLOBAL_AGENT_ZONE)
 const avatar = computed(() => {
   const conv = conversation.value
@@ -159,7 +369,41 @@ const members = computed(() => {
   return data.teams.find((item) => item.id === conv.team_id)?.members || []
 })
 const queued = computed(() => chat.queue.value.filter((item) => item.id !== chat.runId.value))
-const conversationWorkspace = computed(() => data.workspaces.find((ws) => ws.id === conversation.value?.workspace_id) || null)
+// 「跟随角色」时实际会使用的工作区。
+const followWorkspace = computed(() => {
+  const conv = conversation.value
+  if (!conv) return null
+  const role = data.roles.find((item) => item.id === conv.role_id)
+  return data.workspaces.find((ws) => ws.id === String(role?.workspace_id || '')) || null
+})
+const workspaceSwitching = ref(false)
+
+async function switchConversationWorkspace(wsId: string | null): Promise<void> {
+  const conv = conversation.value
+  if (!conv || workspaceSwitching.value) return
+  const same = wsId
+    ? Boolean(conv.workspace_custom) && String(conv.workspace_id || '') === wsId
+    : !conv.workspace_custom
+  if (same) return
+  workspaceSwitching.value = true
+  try {
+    const body = wsId ? { workspace_id: wsId } : { workspace_follow: true }
+    const updated = await api<Conversation>(
+      `/conversations/${encodeURIComponent(conv.id)}/settings`,
+      { method: 'PATCH', body },
+    )
+    chat.conversation.value = updated
+    await data.loadAll()
+    const name = wsId
+      ? data.workspaces.find((ws) => ws.id === wsId)?.name || wsId
+      : followWorkspace.value?.name || '默认工作区'
+    app.toast(wsId ? `已切换到工作区「${name}」` : `已改为跟随角色（${name}）`, 'ok', 2400)
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad', 5000)
+  } finally {
+    workspaceSwitching.value = false
+  }
+}
 
 async function loadBackgroundTasks(): Promise<void> {
   if (!convId.value) {
@@ -220,8 +464,7 @@ function openTempRole(): void {
 
 async function createTempRole(): Promise<void> {
   const conv = conversation.value
-  const team = data.teams.find((item) => item.id === conv?.team_id)
-  if (!conv || !team || !tempForm.name.trim()) return
+  if (!conv || !tempForm.name.trim()) return
   try {
     const role = await api<{ id: string; name: string }>('/roles', {
       method: 'POST',
@@ -233,8 +476,13 @@ async function createTempRole(): Promise<void> {
         session_id: conv.id,
       },
     })
-    const members = [...(team.members || []), { id: role.id, name: role.name }]
-    await api(`/teams/${encodeURIComponent(team.id)}`, { method: 'PATCH', body: { members } })
+    const team = data.teams.find((item) => item.id === conv.team_id)
+    const roleIds = (team?.members || []).map((member) => String(member.id || '')).filter(Boolean)
+    if (!roleIds.includes(role.id) && role.id !== conv.role_id) roleIds.push(role.id)
+    await api(`/conversations/${encodeURIComponent(conv.id)}/participants`, {
+      method: 'PUT',
+      body: { role_ids: roleIds, leader_id: conv.role_id || undefined },
+    })
     await data.loadAll()
     tempOpen.value = false
     app.toast(`已创建临时角色：${role.name}`, 'ok', 3000)
@@ -244,11 +492,27 @@ async function createTempRole(): Promise<void> {
 }
 
 watch(convId, async (id) => {
+  if (isDraft.value) {
+    chat.beginDraft(props.draftRoleId || '', props.draftWorkspaceId || '')
+    const role = data.roles.find((item) => item.id === props.draftRoleId)
+    model.value = role?.model_code || ''
+    thinking.value = ''
+    perm.value = normalizePerm('once')
+    await loadCommands(props.draftWorkspaceId || '')
+    await nextTick()
+    settleBottom()
+    return
+  }
   if (!id) return
+  // 草稿刚发出第一条消息：窗口 key 已提升为真实会话，这里只补状态，不重新拉历史。
+  if (chat.conversation.value?.id === id) {
+    void loadBackgroundTasks()
+    return
+  }
   await chat.open(id)
   void loadBackgroundTasks()
   const conv = chat.conversation.value
-  model.value = conv?.model_code || data.activeModel || ''
+  model.value = conv?.model_code || ''
   thinking.value = conv?.thinking_level || ''
   let savedPerm = ''
   try {
@@ -427,27 +691,47 @@ async function onSend(): Promise<void> {
       }
     }
   }
+  // 草稿会话：第一条消息发出时才真正创建后端会话。
+  if (isDraft.value) {
+    try {
+      const conv = await api<Conversation>('/conversations', {
+        method: 'POST',
+        body: {
+          role_id: props.draftRoleId || undefined,
+          workspace_id: props.draftWorkspaceId || undefined,
+        },
+      })
+      if (props.draftParticipants?.length) {
+        await api(`/conversations/${encodeURIComponent(conv.id)}/participants`, {
+          method: 'PUT',
+          body: { role_ids: props.draftParticipants, leader_id: props.draftRoleId || undefined },
+        })
+      }
+      chat.conversation.value = conv
+      emit('promoted', conv.id)
+      void data.loadAll()
+    } catch (error) {
+      app.toast(error instanceof Error ? error.message : String(error), 'bad', 5000)
+      return
+    }
+  }
   const ok = await chat.send(text, { perm: perm.value, thinking: thinking.value, model: model.value })
   if (ok) {
     draft.value = ''
+    void data.loadAll()
     scheduleScroll(true)
   }
 }
 
-async function createConversation(): Promise<void> {
-  try {
-    const conv = await api<Conversation>('/conversations', {
-      method: 'POST',
-      body: {
-        role_id: conversation.value?.role_id || undefined,
-        team_id: conversation.value?.team_id || undefined,
-      },
-    })
-    await data.loadAll()
-    router.push(`/conv/${conv.id}`)
-  } catch (error) {
-    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+function createConversation(): void {
+  // 新会话也是延迟创建：先开草稿，发出第一条消息才落到后端。
+  const roleId = conversation.value?.role_id || ''
+  if (!roleId || roleId === 'default') {
+    app.toast('先选择一个角色再新建会话', 'bad')
+    return
   }
+  chatWindows.openDraft(roleId, { workspaceId: conversation.value?.workspace_id || '' })
+  emit('close')
 }
 
 function openGlobalConversation(id: string): void {
@@ -579,32 +863,73 @@ function onConversationDeleted(): void {
   <div
     class="chat-panel"
     :class="floating ? 'ga-win' : 'chat-shell'"
-    :style="dragStyle"
-    :data-dragging="dragging || undefined"
+    :style="[dragStyle, resizeStyle]"
+    :data-dragging="(dragging || resizing) || undefined"
+    @pointerdown="emit('focus')"
   >
     <header class="win-head chat-head" @pointerdown="startDrag">
-      <Avatar :name="title" :avatar="avatar" :round="meta.kind !== '群聊'" />
+      <button class="chat-avatar-btn" type="button" title="右键：更多会话操作" aria-label="会话头像，右键更多操作"
+        @pointerdown.stop @click.stop @contextmenu.prevent.stop="openAvatarMenu">
+        <Avatar :name="title" :avatar="avatar" round />
+      </button>
       <span class="win-title">
         <b>{{ title }}</b>
-        <span>{{ meta.kind }} · {{ meta.sub }}</span>
+        <span :title="headerMeta">{{ headerMeta }}</span>
       </span>
-      <span v-if="!globalAgent" class="chip" title="工作区由角色 / 群组绑定">
-        {{ conversationWorkspace?.name || '默认工作区' }}
-      </span>
+      <WorkspacePicker
+        v-if="!globalAgent && !isDraft"
+        :model-value="conversation?.workspace_custom ? String(conversation?.workspace_id || '') : ''"
+        :workspaces="data.workspaces"
+        variant="chip"
+        title="切换会话工作区"
+        empty-label="跟随角色"
+        :empty-display="followWorkspace?.name || '默认工作区'"
+        :empty-hint="`当前跟随：${followWorkspace?.name || '默认工作区'}`"
+        trigger-hint="点击切换工作区（默认跟随角色）"
+        :disabled="workspaceSwitching"
+        @update:model-value="(value) => switchConversationWorkspace(value || null)"
+      />
       <span v-if="chat.streaming.value" class="run-state">
         <span class="pulse" /><span>运行中</span>
       </span>
+      <el-popover
+        v-if="!globalAgent && !isDraft && sessionUsageView.total"
+        v-model:visible="usagePopover"
+        placement="bottom-end"
+        :width="332"
+        :show-arrow="false"
+        trigger="click"
+        popper-class="usage-popover"
+      >
+        <template #reference>
+          <button class="head-usage" type="button" :title="sessionUsageTitle">
+            <span
+              class="usage-ring"
+              :class="sessionTone"
+              :style="{ '--pct': String(Math.min(100, sessionUsageView.cacheRate)) }"
+            />
+            <span class="usage-total"><b>{{ compactNumber(sessionUsageView.total) }}</b> tokens</span>
+            <span v-if="sessionUsageView.speed" class="usage-speed"><b>{{ sessionUsageView.speed.toFixed(1) }}</b> t/s</span>
+            <span class="usage-cache" :class="sessionTone">缓存 {{ sessionUsageView.cacheRate }}%</span>
+          </button>
+        </template>
+        <div class="usage-popover-body">
+          <TokenMeter :usage="sessionUsage" :context="chat.contextTokens.value" variant="panel" />
+          <button class="btn small usage-open" type="button" @click="usagePopover = false; settingsOpen = true">
+            打开会话管理
+          </button>
+        </div>
+      </el-popover>
       <div class="head-menus">
-        <button class="head-btn" title="会话管理（角色 / 群组）" @click="settingsOpen = true">⚙</button>
-        <button class="head-btn" title="会话任务 / 工单（浮窗）" @click="openWorkDetail">
+        <button v-if="!globalAgent && !isDraft" class="head-btn" title="管理参与角色" aria-label="管理参与角色" @click="participantsOpen = true">♙</button>
+        <button v-if="!isDraft" class="head-btn" title="会话管理（角色 / 参与角色）" @click="settingsOpen = true">⚙</button>
+        <button v-if="!isDraft" class="head-btn" title="会话任务 / 工单（浮窗）" @click="openWorkDetail">
           ▤<span v-if="openWorkCount" class="head-badge">{{ openWorkCount > 99 ? '99+' : openWorkCount }}</span>
         </button>
-        <button class="head-btn task-btn" title="执行画布 / 后台任务" @click="canvasOpen = true">
+        <button v-if="!isDraft" class="head-btn task-btn" title="执行画布 / 后台任务" @click="canvasOpen = true">
           ◎<span v-if="backgroundTaskCount" class="head-badge">{{ backgroundTaskCount > 99 ? '99+' : backgroundTaskCount }}</span>
         </button>
-        <button v-if="conversation?.team_id && !isGlobalZone" class="head-btn" title="临时角色（仅本会话）" @click="openTempRole">＋</button>
-        <button v-if="!globalAgent" class="head-btn danger" title="删除会话" @click="deleteConversation">⌫</button>
-        <button class="head-btn" title="返回会话列表" @click="emit('close')">×</button>
+        <button class="head-btn close-btn" title="关闭窗口" aria-label="关闭窗口" @click="emit('close')">×</button>
       </div>
     </header>
 
@@ -624,19 +949,30 @@ function onConversationDeleted(): void {
       <div ref="msgsEl" class="msgs">
         <div v-if="chat.loading.value" class="chat-empty"><b>正在打开会话…</b></div>
         <div v-else-if="!chat.messages.value.length && !chat.entries.value.length && !chat.streaming.value" class="chat-empty">
-          <Avatar :name="title" :avatar="avatar" :round="meta.kind !== '群聊'" />
+          <Avatar :name="title" :avatar="avatar" round />
           <b>{{ title }}</b>
           <span>发一条消息开始，或者输入 / 命令</span>
         </div>
 
-        <MessageItem v-for="(message, index) in chat.messages.value" :key="message.id || `m-${index}`" :message="message" @continue-task="chat.continueTask" />
+        <button
+          v-if="hiddenMessages"
+          class="earlier-btn"
+          type="button"
+          @click="showEarlierMessages"
+        >
+          查看更多
+          <span>还有 {{ hiddenMessages }} 条历史消息</span>
+        </button>
+
+        <MessageItem v-for="(message, index) in visibleMessages" :key="message.id || `m-${index + hiddenMessages}`" :message="message" :data-mid="message.id || ''" @continue-task="chat.continueTask" />
 
         <LiveMessage
           v-if="chat.streaming.value || chat.entries.value.length"
           :entries="chat.entries.value"
-          :role-name="chat.roleName.value"
-          :role-avatar="chat.roleAvatar.value"
-          :role-sub="chat.roleSub.value"
+          :speakers="chat.speakers.value"
+          :current="chat.speakerId.value"
+          :started="chat.liveStarted.value"
+          :wait-seconds="chat.waitSeconds.value"
           :error="chat.error.value"
         />
 
@@ -670,14 +1006,14 @@ function onConversationDeleted(): void {
     <div v-if="backgroundTaskCount && (!globalAgent || globalTab === 'chat')" class="queue-bar bg-running-bar">
       <div class="queue-head">后台任务 · {{ backgroundTaskCount }} 个运行中</div>
       <div class="queue-item">
-        <span class="queue-text">主会话可继续发送；完成后点「继续对话」再交回，不等后台跑完。</span>
+        <span class="queue-text">主会话可继续发送；任务完成后会自动交回对话继续。</span>
       </div>
     </div>
 
     <div v-if="continueTask && (!globalAgent || globalTab === 'chat')" class="queue-bar bg-done-bar">
       <div class="queue-head">后台任务已完成 · {{ continueTask.title }}</div>
       <div class="queue-item">
-        <span class="queue-text">结果已就绪。点「继续对话」才交回主会话，不自动消耗 token。</span>
+        <span class="queue-text">结果已就绪。自动交回失败时，可点「继续对话」手动交回主会话。</span>
         <button class="wbtn" @click="continueTaskNow">继续对话</button>
       </div>
     </div>
@@ -688,6 +1024,7 @@ function onConversationDeleted(): void {
         <span class="queue-text">{{ item.content || item.title || '' }}</span>
         <button class="wbtn" :disabled="index === 0" title="上移" @click="chat.moveQueued(item.id, 'up')">↑</button>
         <button class="wbtn" :disabled="index === queued.length - 1" title="下移" @click="chat.moveQueued(item.id, 'down')">↓</button>
+        <button class="wbtn" :disabled="!chat.streaming.value" title="插队：停止当前回复并立即执行这条" @click="chat.injectQueued(item.id)">插队</button>
         <button class="wbtn" title="取消" @click="chat.cancelQueued(item.id)">×</button>
       </div>
     </div>
@@ -698,6 +1035,7 @@ function onConversationDeleted(): void {
       :streaming="chat.streaming.value"
       :sending="chat.sending.value"
       :models="data.models"
+      :subscriptions="data.subscriptions"
       :model="model"
       :perm="perm"
       :thinking="thinking"
@@ -723,6 +1061,13 @@ function onConversationDeleted(): void {
       @deleted="onConversationDeleted"
     />
 
+    <ParticipantsDrawer
+      :open="participantsOpen"
+      :conversation="conversation"
+      @close="participantsOpen = false"
+      @saved="(updated) => { chat.conversation.value = updated; participantsOpen = false }"
+    />
+
     <SideDrawer :open="tempOpen" title="临时角色（仅本会话）" width="520px" @close="tempOpen = false">
       <div class="field"><label>名字</label><input v-model="tempForm.name" class="input" placeholder="例如：调研员" /></div>
       <div class="field"><label>专长（一句话）</label><input v-model="tempForm.expertise" class="input" placeholder="只查资料，不改代码" /></div>
@@ -734,6 +1079,15 @@ function onConversationDeleted(): void {
       </template>
     </SideDrawer>
 
+    <ContextMenu
+      :open="avatarMenu.open"
+      :x="avatarMenu.x"
+      :y="avatarMenu.y"
+      :items="avatarMenuItems"
+      @close="avatarMenu.open = false"
+      @select="onAvatarMenu"
+    />
+
     <Modal :open="cleanOpen" title="清空会话" width="440px" @close="cleanOpen = false">
       <div class="clean-confirm">
         <p class="clean-lead">将<strong>彻底删除</strong>本会话的上下文与历史，会话本身保留。</p>
@@ -742,7 +1096,7 @@ function onConversationDeleted(): void {
           <li>运行记录、后台任务、目标与待办</li>
           <li>待处理审批、会话级授权、附件与文件检查点</li>
         </ul>
-        <p class="clean-note">会话标题、所属群组与工作区不变。此操作不可撤销。</p>
+        <p class="clean-note">会话标题、参与角色与工作区不变。此操作不可撤销。</p>
       </div>
       <template #footer>
         <div class="modal-actions">
@@ -753,5 +1107,11 @@ function onConversationDeleted(): void {
         </div>
       </template>
     </Modal>
+
+    <template v-if="floating">
+      <span class="rs rs-right" title="拖拽拉伸宽度" @pointerdown.stop.prevent="startResize($event, 'right')" />
+      <span class="rs rs-bottom" title="拖拽拉伸高度" @pointerdown.stop.prevent="startResize($event, 'bottom')" />
+      <span class="rs rs-corner" title="拖拽拉伸" @pointerdown.stop.prevent="startResize($event, 'corner')" />
+    </template>
   </div>
 </template>

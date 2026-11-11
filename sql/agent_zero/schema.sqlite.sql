@@ -156,6 +156,8 @@ CREATE TABLE tool_approvals (
 	note TEXT, 
 	status TEXT DEFAULT 'pending' NOT NULL, 
 	scope TEXT, 
+	role_id TEXT, 
+	team_id TEXT, 
 	created_at DATETIME DEFAULT (datetime('now','localtime')) NOT NULL, 
 	decided_at DATETIME, 
 	PRIMARY KEY (id), 
@@ -171,6 +173,22 @@ CREATE TABLE permission_grants (
 	PRIMARY KEY (id), 
 	FOREIGN KEY(conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
 );
+
+CREATE TABLE permission_scope_grants (
+	id TEXT NOT NULL, 
+	scope TEXT NOT NULL, 
+	role_id TEXT, 
+	team_id TEXT, 
+	tool TEXT NOT NULL, 
+	created_by TEXT DEFAULT 'local' NOT NULL, 
+	created_at DATETIME DEFAULT (datetime('now','localtime')) NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_permission_scope_grants_scope CHECK (scope IN ('role','team'))
+);
+
+CREATE INDEX idx_scope_grants_role ON permission_scope_grants (role_id, tool);
+
+CREATE INDEX idx_scope_grants_team ON permission_scope_grants (team_id, tool);
 
 CREATE TABLE todo_items (
 	id TEXT NOT NULL, 
@@ -213,3 +231,38 @@ CREATE TABLE conversation_run_events (
 	PRIMARY KEY (run_id, seq), 
 	FOREIGN KEY(run_id) REFERENCES conversation_runs (id) ON DELETE CASCADE
 );
+
+CREATE TABLE scheduled_tasks (
+	id TEXT NOT NULL, 
+	title TEXT NOT NULL, 
+	prompt TEXT NOT NULL, 
+	workspace_id TEXT, 
+	role_id TEXT, 
+	conversation_id TEXT, 
+	trigger_mode TEXT DEFAULT 'scheduled' NOT NULL, 
+	schedule_kind TEXT DEFAULT 'daily' NOT NULL, 
+	schedule JSON NOT NULL, 
+	condition TEXT DEFAULT '' NOT NULL, 
+	status TEXT DEFAULT 'active' NOT NULL, 
+	run_mode TEXT DEFAULT 'chat' NOT NULL, 
+	auto_execute BOOLEAN DEFAULT 0 NOT NULL, 
+	max_runs INTEGER DEFAULT 0 NOT NULL, 
+	run_count INTEGER DEFAULT 0 NOT NULL, 
+	last_run_at DATETIME, 
+	last_status TEXT, 
+	last_run_id TEXT, 
+	last_conversation_id TEXT, 
+	last_result TEXT, 
+	next_run_at DATETIME, 
+	meta JSON NOT NULL, 
+	created_at DATETIME DEFAULT (datetime('now','localtime')) NOT NULL, 
+	updated_at DATETIME DEFAULT (datetime('now','localtime')) NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_scheduled_tasks_trigger CHECK (trigger_mode IN ('scheduled','smart','manual')), 
+	CONSTRAINT ck_scheduled_tasks_kind CHECK (schedule_kind IN ('once','interval','daily','weekly','smart')), 
+	CONSTRAINT ck_scheduled_tasks_status CHECK (status IN ('active','paused','done'))
+);
+
+CREATE INDEX idx_scheduled_tasks_due ON scheduled_tasks (status, next_run_at);
+
+CREATE INDEX idx_scheduled_tasks_conv ON scheduled_tasks (last_conversation_id);

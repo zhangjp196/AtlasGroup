@@ -2,7 +2,8 @@
 import { computed } from 'vue'
 import Avatar from '@/components/Avatar.vue'
 import type { Message } from '@/api/types'
-import { durationText } from '@/lib/format'
+import { compactNumber, durationText } from '@/lib/format'
+import { usageSummary } from '@/lib/usage'
 import { entriesFromMessage, splitEntries } from '@/lib/trace'
 import { useDataStore } from '@/stores/data'
 import Attachments from './Attachments.vue'
@@ -41,6 +42,20 @@ const meta = computed(() => {
   if (props.message.error) out.push('失败')
   return out.join(' · ')
 })
+// 单条回复的 token：比会话 / 任务汇总更细，方便回看哪一轮吃掉了上下文。
+const turnUsage = computed(() => {
+  const view = usageSummary(props.message.usage)
+  return {
+    view,
+    visible: view.input > 0 || view.output > 0,
+    title: [
+      `输入 ${view.input.toLocaleString('en-US')} tokens`,
+      `输出 ${view.output.toLocaleString('en-US')} tokens`,
+      view.speed ? `生成速度 ${view.speed} t/s` : '',
+      view.input ? `缓存命中 ${view.cacheRate}%` : '',
+    ].filter(Boolean).join('\n'),
+  }
+})
 const processMeta = computed(() => {
   const thoughts = parts.value.process.filter((entry) => entry.kind === 'thinking').length
   const tools = parts.value.process.filter((entry) => entry.kind === 'tool').length
@@ -71,8 +86,9 @@ const processMeta = computed(() => {
     </div>
     <p v-if="taskSummary" class="task-done-summary">{{ taskSummary }}</p>
     <div class="task-done-foot">
-      <span>任务在后台完成，结果还没有进入对话。</span>
-      <button class="btn primary" @click="emit('continue-task', message.task_id || '')">继续对话</button>
+      <span v-if="message.task_continued" class="task-done-continued">结果已交回对话，角色接着处理。</span>
+      <span v-else>任务在后台完成，结果还没有进入对话。</span>
+      <button v-if="!message.task_continued" class="btn primary" @click="emit('continue-task', message.task_id || '')">继续对话</button>
     </div>
   </div>
 
@@ -96,6 +112,11 @@ const processMeta = computed(() => {
           {{ [message.role_title, message.role_department].filter(Boolean).join(' · ') }}
         </span>
         <span v-if="meta" class="msg-meta">{{ meta }}</span>
+        <span
+          v-if="turnUsage.visible"
+          class="msg-tokens"
+          :title="turnUsage.title"
+        >↑{{ compactNumber(turnUsage.view.input) }} ↓{{ compactNumber(turnUsage.view.output) }}</span>
       </div>
 
       <details v-if="parts.process.length" class="turn-fold history-fold">

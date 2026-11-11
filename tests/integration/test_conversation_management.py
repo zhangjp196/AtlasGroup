@@ -156,3 +156,94 @@ def test_team_task_controls(client):
     stopped = client.post(
         f"{API}/conversations/{conv['id']}/team-tasks/{task['id']}/stop").json()["data"]
     assert stopped["status"] == "stopped"
+
+
+def _mk_workspace(client, tmp_path, name):
+    folder = tmp_path / name
+    folder.mkdir(parents=True, exist_ok=True)
+    return client.post(f"{API}/workspaces", json={
+        "name": name, "path": str(folder),
+    }).json()["data"]
+
+
+def test_conversation_workspace_can_be_switched_per_conversation(client, tmp_path):
+    """同一角色的不同会话可以各自固定不同工作区，切换角色 / 群组不覆盖。"""
+    ws_a = _mk_workspace(client, tmp_path, "conv-ws-a")
+    ws_b = _mk_workspace(client, tmp_path, "conv-ws-b")
+    role = client.post(f"{API}/roles", json={
+        "name": "工作区角色", "workspace_id": ws_a["id"],
+    }).json()["data"]
+
+    conv1 = client.post(f"{API}/conversations", json={"role_id": role["id"]}).json()["data"]
+    conv2 = client.post(f"{API}/conversations", json={"role_id": role["id"]}).json()["data"]
+    assert conv1["workspace_id"] == ws_a["id"] and not conv1["workspace_custom"]
+    assert conv2["workspace_id"] == ws_a["id"] and not conv2["workspace_custom"]
+
+    # 只改 conv1：同一角色的两条会话从此各用各的工作区。
+    out = client.patch(f"{API}/conversations/{conv1['id']}/settings",
+                       json={"workspace_id": ws_b["id"]}).json()["data"]
+    assert out["workspace_id"] == ws_b["id"]
+    assert out["workspace_custom"] is True
+    assert client.get(f"{API}/conversations/{conv2['id']}").json()["data"]["workspace_id"] == ws_a["id"]
+
+    # 角色改绑工作区：跟随的 conv2 跟着走，手动指定的 conv1 保留。
+    client.patch(f"{API}/roles/{role['id']}", json={"workspace_id": ""})
+    assert client.get(f"{API}/conversations/{conv1['id']}").json()["data"]["workspace_id"] == ws_b["id"]
+    assert client.get(f"{API}/conversations/{conv2['id']}").json()["data"]["workspace_id"] \
+        == "default"
+
+
+def test_conversation_workspace_follow_resets_to_role_binding(client, tmp_path):
+    ws_a = _mk_workspace(client, tmp_path, "follow-ws-a")
+    ws_b = _mk_workspace(client, tmp_path, "follow-ws-b")
+    role = client.post(f"{API}/roles", json={
+        "name": "跟随角色", "workspace_id": ws_a["id"],
+    }).json()["data"]
+    conv = client.post(f"{API}/conversations", json={"role_id": role["id"]}).json()["data"]
+
+    out = client.patch(f"{API}/conversations/{conv['id']}/settings",
+                       json={"workspace_id": ws_b["id"]}).json()["data"]
+    assert out["workspace_id"] == ws_b["id"] and out["workspace_custom"] is True
+
+    out = client.patch(f"{API}/conversations/{conv['id']}/settings",
+                       json={"workspace_follow": True}).json()["data"]
+    assert out["workspace_id"] == ws_a["id"]
+    assert out["workspace_custom"] is False
+
+    # 跟随状态下角色换工作区，会话自动更新。
+    client.patch(f"{API}/roles/{role['id']}", json={"workspace_id": ws_b["id"]})
+    assert client.get(f"{API}/conversations/{conv['id']}").json()["data"]["workspace_id"] == ws_b["id"]
+
+
+def test_conversation_create_can_override_role_workspace(client, tmp_path):
+    ws_a = _mk_workspace(client, tmp_path, "create-ws-a")
+    ws_b = _mk_workspace(client, tmp_path, "create-ws-b")
+    role = client.post(f"{API}/roles", json={
+        "name": "创建时选工作区", "workspace_id": ws_a["id"],
+    }).json()["data"]
+    conv = client.post(f"{API}/conversations", json={
+        "role_id": role["id"], "workspace_id": ws_b["id"],
+    }).json()["data"]
+    assert conv["workspace_id"] == ws_b["id"]
+    assert conv["workspace_custom"] is True
+
+    missing = client.patch(f"{API}/conversations/{conv['id']}/settings",
+                           json={"workspace_id": "ws-not-exist"})
+    assert missing.status_code == 400
+
+
+def test_group_workspace_change_keeps_custom_conversation_workspace(client, tmp_path):
+    ws_a = _mk_workspace(client, tmp_path, "team-ws-a")
+    ws_b = _mk_workspace(client, tmp_path, "team-ws-b")
+    ws_c = _mk_workspace(client, tmp_path, "team-ws-c")
+    team = client.post(f"{API}/teams", json={
+        "name": "工作区群", "workspace_id": ws_a["id"],
+        "leader": {"name": "主持"}, "members": [{"name": "成员"}],
+    }).json()["data"]
+    conv = client.post(f"{API}/conversations", json={"team_id": team["id"]}).json()["data"]
+    assert conv["workspace_id"] == ws_a["id"]
+
+    client.patch(f"{API}/conversations/{conv['id']}/settings",
+                 json={"workspace_id": ws_b["id"]})
+    client.patch(f"{API}/teams/{team['id']}", json={"workspace_id": ws_c["id"]})
+    assert client.get(f"{API}/conversations/{conv['id']}").json()["data"]["workspace_id"] == ws_b["id"]

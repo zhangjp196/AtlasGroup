@@ -24,13 +24,14 @@ from services.agent_zero.version import APP_NAME
 logger = logging.getLogger(__name__)
 
 GLOBAL_AGENT_ZONE = "global-agent"
+GLOBAL_CHAT_ZONE = "global-chat"
 
 
 def workspace_for_conversation(role_id: Optional[str],
                                team_id: Optional[str]) -> Optional[str]:
-    """角色 / 群组绑定的工作区；都没有时返回 None。
+    """角色 / 群组绑定的默认工作区；都没有时返回 None。
 
-    新模型：工作区由角色或群组决定，而不是反过来把工作区绑到会话上。
+    这是新会话的默认值，也是「跟随角色 / 群组」会话在工作区变更后同步的目标。
     群组优先于角色（群聊使用群组的工作区），只接受存在且未归档的工作区。
     """
     from services.agent_zero.services import team_service
@@ -56,11 +57,20 @@ def workspace_for_conversation(role_id: Optional[str],
     return None
 
 
-def sync_conversation_workspace(conv_id: str) -> Optional[Dict[str, Any]]:
+def default_workspace_for_conversation(conv: Dict[str, Any]) -> str:
+    """会话「跟随角色 / 群组」时应该使用的工作区。"""
+    return (workspace_for_conversation(conv.get("role_id"), conv.get("team_id"))
+            or zero_store.DEFAULT_WORKSPACE_ID)
+
+
+def sync_conversation_workspace(conv_id: str,
+                                *,
+                                force: bool = False) -> Optional[Dict[str, Any]]:
     """按当前角色 / 群组重新解析会话工作区并落库。
 
-    角色 / 群组都没有绑定工作区时保留会话已有的工作区，避免把后台任务
-    等工作区显式创建的会话误挪回默认工作区。
+    手动指定工作区的会话（``workspace_custom=1``）默认保留自己的选择；
+    ``force=True`` 用于用户显式选择「跟随角色 / 群组」，此时清除手动标记。
+    角色 / 群组都没有绑定工作区时落到默认工作区。
     """
     from sqlalchemy import text
 
@@ -70,14 +80,16 @@ def sync_conversation_workspace(conv_id: str) -> Optional[Dict[str, Any]]:
     conv = get_conversation(conv_id)
     if not conv:
         return None
-    ws_id = (workspace_for_conversation(conv.get("role_id"), conv.get("team_id"))
-             or zero_store.DEFAULT_WORKSPACE_ID)
-    if str(conv.get("workspace_id") or "") == ws_id:
+    if conv.get("workspace_custom") and not force:
+        return conv
+    ws_id = default_workspace_for_conversation(conv)
+    if not force and str(conv.get("workspace_id") or "") == ws_id:
         return conv
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         db.execute(
             text(f"UPDATE {_q('conversations')} SET workspace_id = :ws, "
+                 f"workspace_custom = 0, "
                  f"updated_at = datetime('now','localtime') WHERE id = :id"),
             {"ws": ws_id, "id": conv_id},
         )
@@ -85,9 +97,57 @@ def sync_conversation_workspace(conv_id: str) -> Optional[Dict[str, Any]]:
     return get_conversation(conv_id)
 
 
+def set_conversation_workspace(conv_id: str,
+                               workspace_id: Optional[str] = None,
+                               *,
+                               follow: bool = False) -> Optional[Dict[str, Any]]:
+    """切换会话工作区。
+
+    - ``follow=True``：清除手动标记，回到角色 / 群组绑定的默认工作区；
+    - 否则使用 ``workspace_id``（空值同样回到默认），并标记为本会话手动指定。
+      同一角色的不同会话因此可以使用各自的工作区，切换角色 / 群组不会覆盖。
+    """
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+    from services.agent_zero.stores.zero_store import _q
+
+    conv = get_conversation(conv_id)
+    if not conv:
+        raise ValueError(f"对话不存在: {conv_id}")
+    if follow:
+        ws_id = default_workspace_for_conversation(conv)
+        custom = 0
+    else:
+        ws_id = str(workspace_id or "").strip()
+        if not ws_id:
+            ws_id = default_workspace_for_conversation(conv)
+            custom = 0
+        else:
+            row = zero_store.get_workspace(ws_id)
+            if not row:
+                raise ValueError(f"工作区不存在: {ws_id}")
+            if row.get("archived"):
+                raise ValueError(f"工作区已归档: {ws_id}")
+            custom = 1
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"UPDATE {_q('conversations')} SET workspace_id = :ws, "
+                 f"workspace_custom = :custom, "
+                 f"updated_at = datetime('now','localtime') WHERE id = :id"),
+            {"ws": ws_id, "custom": custom, "id": conv_id},
+        )
+        db.commit()
+    return get_conversation(conv_id)
+
+
 def sync_conversations_workspace_for_role(role_id: str,
                                           workspace_id: Optional[str]) -> int:
-    """角色换了工作区：同步它名下没有群组绑定的单聊会话。"""
+    """角色换了工作区：同步它名下「跟随角色」的单聊会话。
+
+    手动指定工作区的会话不动，避免把某个会话单独选的工作区改掉。
+    """
     from sqlalchemy import text
 
     from services.agent_zero.database import get_session_local
@@ -101,8 +161,10 @@ def sync_conversations_workspace_for_role(role_id: str,
     with SessionLocal() as db:
         res = db.execute(
             text(f"UPDATE {_q('conversations')} SET workspace_id = :ws, "
+                 f"workspace_custom = 0, "
                  f"updated_at = datetime('now','localtime') "
-                 f"WHERE role_id = :rid AND (team_id IS NULL OR team_id = '')"),
+                 f"WHERE role_id = :rid AND (team_id IS NULL OR team_id = '') "
+                 f"AND COALESCE(workspace_custom, 0) = 0"),
             {"ws": ws_id, "rid": rid},
         )
         db.commit()
@@ -112,8 +174,8 @@ def sync_conversations_workspace_for_role(role_id: str,
 def migrate_bound_workspaces() -> int:
     """旧版「会话绑定工作区」→ 工作区归属迁移（幂等）。
 
-    以前会话用 bound_workspace_id 只给文件上下文；现在工作区由角色 / 群组绑定。
-    迁移把旧的绑定提升为会话所属工作区，避免用户已有会话丢失文件上下文。
+    以前会话用 bound_workspace_id 只给文件上下文；现在工作区由角色 / 群组绑定，
+    用户手动绑定的会话提升为「手动指定工作区」，之后不会被角色 / 群组覆盖。
     """
     from sqlalchemy import text
 
@@ -124,6 +186,7 @@ def migrate_bound_workspaces() -> int:
     with SessionLocal() as db:
         res = db.execute(
             text(f"UPDATE {_q('conversations')} SET workspace_id = bound_workspace_id, "
+                 f"workspace_custom = 1, "
                  f"bound_workspace_id = NULL, updated_at = datetime('now','localtime') "
                  f"WHERE COALESCE(bound_workspace_id, '') <> '' "
                  f"AND EXISTS (SELECT 1 FROM {_q('workspaces')} w "
@@ -141,7 +204,8 @@ def create_conversation(workspace_id: str, user: str,
                         model_code: Optional[str] = None,
                         thinking_level: Optional[str] = None,
                         permission_mode: Optional[str] = None,
-                        run_mode: Optional[str] = None) -> Dict[str, Any]:
+                        run_mode: Optional[str] = None,
+                        workspace_custom: bool = False) -> Dict[str, Any]:
     """发起对话（本地单用户）。可绑定团队。"""
     zone = str(zone or "").strip() or None
     role_id = str(role_id or "").strip() or None
@@ -167,6 +231,7 @@ def create_conversation(workspace_id: str, user: str,
         raise ValueError(f"工作区不存在: {workspace_id}")
     if ws.get("archived"):
         raise ValueError(f"工作区已归档: {workspace_id}")
+    workspace_custom = bool(workspace_custom or bound_workspace_id)
     bound_workspace_id = None
     if role_id:
         # 角色入口 = 独立工作区（P0：记录 role_id，空间锚定到角色）
@@ -201,11 +266,13 @@ def create_conversation(workspace_id: str, user: str,
     with SessionLocal() as db:
         db.execute(
             text(f"INSERT INTO {_q('conversations')} "
-                 f"(id, workspace_id, bound_workspace_id, role_id, zone, created_by, source, "
+                 f"(id, workspace_id, bound_workspace_id, workspace_custom, role_id, zone, "
+                 f"created_by, source, "
                  f"permission_mode, run_mode, team_id, model_code, thinking_level, last_read_at) "
-                 f"VALUES (:id, :wid, :bwid, :rid, :zone, :by, :src, :mode, :run_mode, :team, "
-                 f":model, :think, datetime('now','localtime'))"),
+                 f"VALUES (:id, :wid, :bwid, :wcustom, :rid, :zone, :by, :src, :mode, :run_mode, "
+                 f":team, :model, :think, datetime('now','localtime'))"),
             {"id": conv_id, "wid": workspace_id, "bwid": bound_workspace_id or None,
+             "wcustom": 1 if workspace_custom else 0,
              "rid": role_id,
              "zone": zone, "by": user, "src": source or "chat",
              "mode": mode, "run_mode": run_mode,
@@ -223,13 +290,16 @@ def create_conversation(workspace_id: str, user: str,
             team = None
         append_system_message(conv_id, f"你已加入群聊「{(team or {}).get('name') or team_id}」")
     zero_store.append_audit(user, "conversation_create",
-                            args={"workspace_id": workspace_id, "role_id": role_id,
+                            args={"workspace_id": workspace_id,
+                                  "workspace_custom": bool(workspace_custom),
+                                  "role_id": role_id,
                                   "zone": zone, "conversation_id": conv_id,
                                   "source": source or "chat", "permission_mode": mode,
                                   "run_mode": run_mode, "team_id": team_id,
                                   "model_code": model_code or "",
                                   "thinking_level": thinking_level or ""})
     return {"id": conv_id, "workspace_id": workspace_id,
+            "workspace_custom": bool(workspace_custom),
             "bound_workspace_id": bound_workspace_id or "",
             "role_id": role_id, "zone": zone, "source": source or "chat",
             "permission_mode": mode, "run_mode": run_mode,
@@ -238,6 +308,30 @@ def create_conversation(workspace_id: str, user: str,
 
 
 _GLOBAL_AGENT_ENSURE_LOCK = threading.Lock()
+
+
+def ensure_global_chat_conversation(user: str = "local") -> Dict[str, Any]:
+    """Keep the global collaboration conversation separate from management history."""
+    from sqlalchemy import text
+    from services.agent_zero.database import get_session_local
+    from services.agent_zero.stores.zero_store import _q
+
+    with _GLOBAL_AGENT_ENSURE_LOCK:
+        with get_session_local()() as db:
+            row = db.execute(
+                text(f"SELECT id, archived FROM {_q('conversations')} WHERE zone = :zone "
+                     f"ORDER BY archived ASC, updated_at DESC, created_at DESC LIMIT 1"),
+                {"zone": GLOBAL_CHAT_ZONE},
+            ).mappings().first()
+            if row:
+                if row["archived"]:
+                    db.execute(text(f"UPDATE {_q('conversations')} SET archived = 0 WHERE id = :id"),
+                               {"id": row["id"]})
+                    db.commit()
+                return get_conversation(str(row["id"])) or {}
+        return create_conversation(zero_store.DEFAULT_WORKSPACE_ID, user,
+                                   role_id=zero_store.DEFAULT_ROLE_ID,
+                                   zone=GLOBAL_CHAT_ZONE, source="global-chat")
 
 
 def ensure_global_agent_conversation(user: str = "local") -> Dict[str, Any]:
@@ -358,11 +452,17 @@ def append_mention_message(conv_id: str, role: Dict[str, Any],
 
 
 def append_task_ack_message(conv_id: str, member: Dict[str, Any],
-                            goal: str) -> Optional[Dict[str, Any]]:
+                            goal: str,
+                            run_id: str = "") -> Optional[Dict[str, Any]]:
     """成员接到后台任务后的**前台回复**：「收到，我开始在后台执行…」。
 
     对话与任务分离：这条只是对话层的一句确认；真正的执行在后台 run 里，
     过程不进前台转录，完成后由 `append_task_done_message` 写触发器。
+
+    ``run_id`` 只写进 ``anchor_run_id``：它是转录排序锚点，不是这条确认的产出。
+    ``props.run_id`` 必须留给真正执行那一轮的助手回复——否则
+    ``persist_interrupted_run`` / ``_member_result_text`` 会把这句确认误当成
+    运行结果。
     """
     conv = get_conversation(conv_id)
     goal = str(goal or "").strip()
@@ -385,6 +485,10 @@ def append_task_ack_message(conv_id: str, member: Dict[str, Any],
             "content": (f"收到，我在后台执行这个任务：{goal[:600]}"
                         "\n\n（执行过程不进对话；完成后我会在这里通知你。）"),
             "kind": "task_ack",
+            # 排序锚点：确认消息紧跟「@成员」那条转交消息。@ 消息锚在成员 run 的
+            # 启动时刻，而确认消息落库早于 run 启动；没有这个归属就只能按自己的
+            # created_at 排，会跑到「@成员」**前面**（用户反馈的顺序错乱）。
+            "anchor_run_id": str(run_id or ""),
             "stage": "exploration",
             "by": "assistant",
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -398,8 +502,8 @@ def append_task_done_message(conv_id: str, task: Dict[str, Any],
                              summary: str = "") -> Optional[Dict[str, Any]]:
     """后台任务结束 → 写一条**前台触发器**（幂等：同一任务只写一条）。
 
-    触发器只是「结果已就绪」的入口，不自动唤醒主持、不把任务过程塞进对话；
-    用户点「继续对话」时才把结果汇总成一条主持 run。
+    触发器是「结果已就绪」的入口；``team_task_service.on_run_finished``
+    紧接着自动把结果交回对话，用户不需要再点「继续对话」。
     """
     from sqlalchemy import text
 
@@ -450,6 +554,34 @@ def append_task_done_message(conv_id: str, task: Dict[str, Any],
     return {"id": node_id, "stage": "exploration", "by": "system"}
 
 
+def mark_task_done_continued(conv_id: str, task_id: str) -> None:
+    """标记「任务完成」触发器已交回对话（自动或手动）。
+
+    前端据此把卡片文案从「结果还没有进入对话 / 继续对话」换成「已交回对话」，
+    避免自动继续之后还留着一个点了会 409 的按钮。
+    """
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+    from services.agent_zero.stores.zero_store import _q
+
+    cid = str(conv_id or "").strip()
+    tid = str(task_id or "").strip()
+    if not cid or not tid:
+        return
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"UPDATE {_q('gdag_nodes')} SET props = json_set("
+                 f"props, '$.continued', 1, '$.continued_at', :ts) "
+                 f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
+                 f"AND props->>'kind' = 'task_done' AND props->>'task_id' = :tid"),
+            {"cid": cid, "tid": tid,
+             "ts": time.strftime("%Y-%m-%dT%H:%M:%S")},
+        )
+        db.commit()
+
+
 def update_conversation_preferences(conv_id: str, *,
                                     model_code: Optional[str] = None,
                                     thinking_level: Optional[str] = None) -> Dict[str, Any]:
@@ -493,7 +625,11 @@ def get_conversation(conv_id: str) -> Optional[Dict[str, Any]]:
             text(f"SELECT * FROM {_q('conversations')} WHERE id = :id"),
             {"id": conv_id},
         ).mappings().first()
-    return dict(row) if row else None
+    if not row:
+        return None
+    data = dict(row)
+    data["workspace_custom"] = bool(data.get("workspace_custom"))
+    return data
 
 
 def fork_conversation(conv_id: str, *, message_id: Optional[str] = None,
@@ -537,12 +673,14 @@ def fork_conversation(conv_id: str, *, message_id: Optional[str] = None,
 
     new = create_conversation(
         str(src.get("workspace_id") or ""), user,
-        role_id=src.get("role_id"), zone=src.get("zone"),
+        role_id=src.get("role_id"),
+        zone=None if src.get("zone") == GLOBAL_CHAT_ZONE else src.get("zone"),
         source="fork", team_id=src.get("team_id"),
         model_code=src.get("model_code"),
         thinking_level=src.get("thinking_level"),
         permission_mode=src.get("permission_mode"),
         run_mode=src.get("run_mode"),
+        workspace_custom=bool(src.get("workspace_custom")),
     )
     new_id = str(new["id"])
     store = GdagStore()
@@ -973,7 +1111,13 @@ async def _dispatch_reply_mentions(conv: Dict[str, Any], role: Dict[str, Any],
     targets = _roles_mentioned(body, all_roles)
     if not targets:
         return []
-    targets = targets[:_MENTION_DISPATCH_LIMIT]
+    # 单轮参与上限同样约束「回复里 @ 成员」：不能靠一句话把全员都点起来。
+    try:
+        mention_limit = max(1, min(int(team.get("max_speakers") or 3),
+                                   _MENTION_DISPATCH_LIMIT))
+    except (TypeError, ValueError):
+        mention_limit = _MENTION_DISPATCH_LIMIT
+    targets = targets[:mention_limit]
 
     from services.agent_zero.task_layer import conv_worker, run_service
 
@@ -1450,9 +1594,12 @@ _SEQ_CALLS_TOOLS = frozenset({
     "call_team",
     "delegate",
     "background_task",
+    "proactive_send",
+    "role_discussion",
     "team_manage",
     "department_manage",
     "role_manage",
+    "schedule_manage",
     "app_manage",
     "ask_user",
     # 工具监督本身是「读共享注册表 + 可能长时间 wait」：走串行，避免与
@@ -1487,7 +1634,7 @@ def tool_reg_canonical(name: str) -> str:
 # 这些工具仍受 TOOL_MAX_SECONDS（默认 0 = 不限）约束，但没有前台预算。
 NO_ADOPT_TOOLS = frozenset({"ask_user", "tool_job", "propose_task",
                             "todo_write", "todo", "goal_report", "goal_manage",
-                            "delegate", "background_task"})
+                            "delegate", "background_task", "role_discussion"})
 # 工具轮次不设上限：模型自己不再返回 tool_calls 时才收尾。
 # 曾用 MAX_CHAT_TOOL_ROUNDS=6 截断，导致「分析整个仓库」这类长任务在第 6 轮被砍断——
 # 循环自然走完时最后一轮仍是 tool_calls，没有任何纯文字收尾，
@@ -1553,27 +1700,150 @@ BACKGROUND_TASK_TOOL: Dict[str, Any] = {
     "type": "function", "function": {
         "name": "background_task",
         "description": (
-            "把一段耗时 / 多步的工作放到**后台任务**执行（对话与任务分离）。"
+            "把一段或多段耗时 / 多步的工作放到**后台任务**执行（对话与任务分离）。"
+            "多项互不依赖的任务用 `tasks` 数组一次派发，它们会并行执行；"
             "调用后本轮只回一句确认并收尾：执行过程不会进入对话；"
-            "完成后系统会在这个对话里生成一条任务完成触发器，由用户点「继续对话」"
-            "再把结果带回上下文。适合长任务、批处理、需要大量工具的工作；"
-            "简单问答 / 纯聊天不要用。"
+            "完成后系统会在这个对话里生成任务完成触发器，由角色继续整合。"
+            "适合长任务、批处理、需要大量工具的工作；简单问答 / 纯聊天不要用。"
         ),
         "parameters": {"type": "object", "properties": {
-            "goal": {"type": "string", "description": "后台要完成的目标 / 交付物"},
+            "goal": {"type": "string", "description": "单个后台任务的目标 / 交付物（与 tasks 二选一）"},
             "title": {"type": "string", "description": "任务标题（可选，便于识别）"},
             "context": {"type": "string", "description": "补充上下文（可选）"},
-        }, "required": ["goal"]},
+            "tasks": {
+                "type": "array",
+                "description": "并行派发多项独立任务：每项各自建一条后台任务并同时执行。"
+                               "只用于确实互不依赖的工作；不要一次只派一项后干等。",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {"type": "string",
+                                 "description": "该任务的目标 / 交付物"},
+                        "title": {"type": "string",
+                                  "description": "任务标题（可选）"},
+                        "context": {"type": "string",
+                                    "description": "只给该任务的上下文（可选）"},
+                    },
+                    "required": ["goal"],
+                },
+            },
+        }, "required": []},
     },
 }
 
+# 一次最多并行派发多少条后台任务（防止模型一口气建出几十条把队列打满）。
+MAX_BACKGROUND_TASKS_PER_CALL = 8
+
+ROLE_DISCUSSION_TOOL: Dict[str, Any] = {
+    "type": "function", "function": {
+        "name": "role_discussion",
+        "description": (
+            "让 2-3 个角色（含你自己）进行多轮直接讨论，不经过主持转述。"
+            "适合头脑风暴、方案对比、交互验证、交叉审查。"
+            "角色按顺序发言，后发言者能看到前面所有发言；讨论过程显示为子轨迹，"
+            "最终把完整记录返回给你。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "topic": {"type": "string", "description": "讨论主题 / 要解决的问题"},
+            "roles": {
+                "type": "array",
+                "description": "参与讨论的角色 id 或名字（2-3 个，必须包含至少两个不同角色）",
+                "items": {"type": "string"},
+            },
+            "rounds": {
+                "type": "integer", "minimum": 1, "maximum": 3,
+                "description": "讨论轮数（默认 2）",
+            },
+            "mode": {
+                "type": "string", "enum": ["brainstorm", "verify"],
+                "description": "brainstorm=发散头脑风暴；verify=交互验证 / 交叉审查",
+            },
+            "context": {
+                "type": "string",
+                "description": "给参与角色的补充上下文（可选）",
+            },
+        }, "required": ["topic", "roles"]},
+    },
+}
+MAX_DISCUSSION_ROLES = 3
+MAX_DISCUSSION_ROUNDS = 3
+PROACTIVE_SEND_TOOL: Dict[str, Any] = {
+    "type": "function", "function": {
+        "name": "proactive_send",
+        "description": (
+            "在当前会话里**主动向用户发起一条消息**（不需要用户先提问）。"
+            "适合：后台任务完成后汇报、发现重要变化、长时间任务的中途进展、"
+            "需要提醒用户但用户暂时没在对话里。"
+            "消息会延迟几分钟后由你自己生成并出现在会话中；不要频繁使用，"
+            "全局 Agent 会限制频率和安静时段。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "message": {"type": "string",
+                         "description": "要主动告诉用户的要点（不是逐字稿，模型会据此生成回复）"},
+            "delay_minutes": {"type": "integer", "minimum": 1, "maximum": 1440,
+                               "description": "多少分钟后发起（默认 1 分钟）"},
+            "reason": {"type": "string", "description": "为什么现在要主动发起（可选）"},
+        }, "required": ["message"]},
+    },
+}
+MAX_PROACTIVE_DELAY_MIN = 1440
+
+
+
+
+def _background_task_items(args: Dict[str, Any]) -> List[Dict[str, str]]:
+    """把 `background_task` 参数归一成任务列表（兼容旧的单 goal 调用）。
+
+    `tasks` 里的每一项都是独立后台任务：各自一条 team_task、一个成员 run，
+    由 worker 并行执行。没有 `tasks` 时退化为单任务。
+    """
+    items: List[Dict[str, str]] = []
+
+    def _append(source: Dict[str, Any]) -> None:
+        goal = str((source or {}).get("goal") or "").strip()
+        if not goal:
+            return
+        items.append({
+            "goal": goal[:8000],
+            "title": str((source or {}).get("title") or "").strip()[:120],
+            "context": str((source or {}).get("context") or "").strip()[:8000],
+        })
+
+    raw = (args or {}).get("tasks")
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                _append(item)
+    if not items:
+        _append(args or {})
+    return items[:MAX_BACKGROUND_TASKS_PER_CALL]
+
 
 def _append_background_task_tool(specs: List[Dict[str, Any]]) -> None:
-    """单角色会话：把「后台任务」工具补进本轮工具清单（群聊用 delegate）。"""
+    """把「后台任务」工具补进本轮工具清单（角色会话 / 群组主持都可用）。
+
+    群组里团队委派用 delegate；后台任务用于把**本角色自己**的多项独立工作
+    并行放到后台，两者不冲突。
+    """
     names = {(s.get("function") or {}).get("name") for s in specs}
     if "background_task" in names:
         return
     specs.append(BACKGROUND_TASK_TOOL)
+
+
+def _append_role_discussion_tool(specs: List[Dict[str, Any]]) -> None:
+    """把「角色讨论」工具补进本轮工具清单（含后台任务成员；子代理不注入）。"""
+    names = {(s.get("function") or {}).get("name") for s in specs}
+    if "role_discussion" in names:
+        return
+    specs.append(ROLE_DISCUSSION_TOOL)
+
+def _append_proactive_tool(specs: List[Dict[str, Any]]) -> None:
+    """主动消息只给主会话角色，子代理 / 后台任务成员不注入。"""
+    names = {(s.get("function") or {}).get("name") for s in specs}
+    if "proactive_send" in names:
+        return
+    specs.append(PROACTIVE_SEND_TOOL)
 
 
 def _chat_envelope(role: Dict[str, Any]) -> Dict[str, Any]:
@@ -2056,6 +2326,7 @@ def _role_public(role: Dict[str, Any]) -> Dict[str, Any]:
         "session_id": role.get("session_id") or "",
         "model_code": role.get("model_code") or "",
         "tools": [str(t) for t in (env.get("tools") or [])],
+        "status": str(env.get("status") or "online"),
     }
 
 
@@ -2072,7 +2343,8 @@ def _exec_app_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, An
             "counts": snap["counts"],
             "approvals": [
                 {k: x.get(k) for k in ("id", "conversation_id", "conversation_title",
-                                        "tool", "risk", "note")}
+                                        "tool", "risk", "note", "role_id", "role_name",
+                                        "team_id", "team_name")}
                 for x in snap["approvals"][:20]
             ],
             "questions": [
@@ -2154,6 +2426,32 @@ def _exec_app_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, An
         except ValueError as e:
             return {"error": str(e)}
         return {"ok": True, "policy": policy}
+    if action == "proactive_status":
+        from services.agent_zero.services import schedule_service
+
+        cid = str(a.get("conversation_id") or "").strip() or None
+        return {
+            "policy": schedule_service.get_proactive_policy(),
+            "items": [
+                {k: item.get(k) for k in ("id", "conversation_id", "title",
+                                           "next_run_at", "last_run_at", "status")}
+                for item in schedule_service.proactive_tasks(cid, limit=50)
+            ],
+        }
+    if action == "set_proactive":
+        from services.agent_zero.services import schedule_service
+
+        patch = {key: a.get(key) for key in (
+            "enabled", "max_per_day", "min_gap_minutes", "quiet_start", "quiet_end",
+        ) if key in a}
+        return {"ok": True, "policy": schedule_service.save_proactive_policy(patch)}
+    if action == "cancel_proactive":
+        from services.agent_zero.services import schedule_service
+
+        task_id = str(a.get("task_id") or "").strip()
+        if not task_id:
+            return {"error": "缺少 task_id"}
+        return {"ok": schedule_service.cancel_proactive(task_id), "task_id": task_id}
     if action == "stop_run":
         rid = str(a.get("run_id") or "").strip()
         cid = str(a.get("conversation_id") or "").strip()
@@ -2210,6 +2508,72 @@ def _exec_department_manage(args: Dict[str, Any]) -> Dict[str, Any]:
             out = _dsvc.delete_department(dept_id)
             return {"ok": True, **out}
     except _dsvc.DepartmentError as e:
+        return {"error": str(e)}
+    return {"error": f"非法 action: {action}"}
+
+
+def _exec_proactive_send(conv: Dict[str, Any], role: Dict[str, Any],
+                         args: Dict[str, Any]) -> Dict[str, Any]:
+    """安排一条会话内主动消息；全局 Agent 的策略在这里统一兜底。"""
+    from services.agent_zero.services import schedule_service
+
+    a = args or {}
+    try:
+        task = schedule_service.create_proactive(
+            conv, role,
+            str(a.get("message") or ""),
+            delay_minutes=a.get("delay_minutes") or 1,
+            reason=str(a.get("reason") or ""),
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+    return {
+        "ok": True,
+        "task_id": task.get("id"),
+        "conversation_id": task.get("conversation_id"),
+        "next_run_at": task.get("next_run_at"),
+        "note": "已安排主动消息；到点后会在本会话里由你直接生成回复。",
+    }
+
+
+async def _exec_schedule_manage(args: Dict[str, Any]) -> Dict[str, Any]:
+    """定时 / 自由触发任务工具：list / create / update / delete / run / pause / resume。"""
+    from services.agent_zero.services import schedule_service as _ssvc
+
+    a = args or {}
+    action = str(a.get("action") or "").strip().lower()
+    try:
+        if action == "list":
+            return {"tasks": _ssvc.list_tasks(limit=50)}
+        if action == "create":
+            payload = {
+                key: a.get(key) for key in (
+                    "title", "prompt", "trigger_mode", "schedule_kind", "schedule",
+                    "condition", "role_id", "workspace_id", "conversation_id",
+                    "run_mode", "auto_execute", "max_runs",
+                ) if key in a
+            }
+            return {"ok": True, "task": _ssvc.create_task(payload)}
+        task_id = str(a.get("task_id") or "").strip()
+        if action in ("update", "delete", "run", "pause", "resume") and not task_id:
+            return {"error": "缺少 task_id"}
+        if action == "update":
+            patch = {
+                key: a.get(key) for key in (
+                    "title", "prompt", "trigger_mode", "schedule_kind", "schedule",
+                    "condition", "role_id", "workspace_id", "conversation_id",
+                    "run_mode", "auto_execute", "max_runs", "status",
+                ) if key in a
+            }
+            return {"ok": True, "task": _ssvc.update_task(task_id, patch)}
+        if action == "delete":
+            return {"ok": _ssvc.delete_task(task_id), "task_id": task_id}
+        if action == "run":
+            return {"ok": True, "task": await _ssvc.run_task(task_id, trigger="manual")}
+        if action in ("pause", "resume"):
+            return {"ok": True,
+                    "task": _ssvc.pause_task(task_id, paused=(action == "pause"))}
+    except Exception as e:
         return {"error": str(e)}
     return {"error": f"非法 action: {action}"}
 
@@ -2327,6 +2691,9 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
     if action in ("update", "promote", "delete") and not current:
         return {"error": f"角色不存在: {role_id}"}
     if action == "update":
+        status = a.get("status")
+        if status is not None and status not in ("online", "offline"):
+            return {"error": "状态必须是 online 或 offline"}
         dept_id = current.get("department_id")
         if "department_id" in a:
             dept_id = str(a.get("department_id") or "").strip()
@@ -2356,6 +2723,11 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
             "source": current.get("source") or "llm",
             "session_id": current.get("session_id"),
         }
+        if a.get("tools") is not None:
+            merged["envelope"]["status"] = (current.get("envelope") or {}).get("status", "online")
+        if status is not None:
+            merged["envelope"] = dict(merged["envelope"])
+            merged["envelope"]["status"] = status
         role = zero_store.upsert_role(merged)
         if ws_changed:
             sync_conversations_workspace_for_role(role_id, ws_id or None)
@@ -2449,7 +2821,25 @@ def _exec_team_manage(conv: Dict[str, Any], ws_id: str,
 async def _exec_call_team(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                           args: Dict[str, Any], depth: int,
                           call_id: str = "") -> str:
-    """把子任务委派给**本对话绑定的团队成员**（角色受限子循环执行）。"""
+    """把子任务委派给**本对话绑定的团队成员**（角色受限子循环执行）。
+
+    后台任务的成员 run 只能派生**子代理**，不能再嵌套派发团队任务（否则会
+    无限套娃、并绕过任务归属）。这里按当前 run 的 team_task_id 判断，避免
+    把「是不是任务成员」一路透传到每个调用点。
+    """
+    try:
+        from services.agent_zero.services import ask_service
+        from services.agent_zero.task_layer import run_service as _rs
+
+        _current_run = ask_service.current_run_id()
+        if _current_run and str((_rs.get_run(_current_run) or {})
+                                 .get("team_task_id") or "").strip():
+            return json.dumps({
+                "error": "后台任务成员只能派生子代理（delegate target=subagent），"
+                         "不能再嵌套派发团队任务",
+            }, ensure_ascii=False)
+    except Exception:
+        logger.debug("读取当前 run 的任务归属失败（按允许处理）", exc_info=True)
     from services.agent_zero.services import team_service
 
     team = team_service.team_for_conv(conv)
@@ -2515,6 +2905,22 @@ async def _exec_call_team(conv: Dict[str, Any], user: str, role: Dict[str, Any],
             "error": f"团队「{team.get('name')}」没有可委派的成员：{detail}；可用: {avail}",
         }, ensure_ascii=False)
 
+    # 单轮参与上限：模型有时会为了「覆盖」一次派发全员，既贵又慢。
+    # 超出上限的 assignment 不静默丢弃，而是明确告知模型（它可在下一轮补派）。
+    try:
+        participant_limit = max(1, int(team.get("max_speakers") or 3))
+    except (TypeError, ValueError):
+        participant_limit = 3
+    skipped: List[Dict[str, Any]] = []
+    if len(assignments) > participant_limit:
+        skipped = [{"role_id": a["role_id"], "role_name": a["role_name"]}
+                   for a in assignments[participant_limit:]]
+        assignments = assignments[:participant_limit]
+        errors.append(
+            f"本轮参与上限为 {participant_limit} 人，已优先派发前 {participant_limit} 个成员；"
+            f"未派发：{'、'.join(x['role_name'] for x in skipped)}。"
+            "如确有需要，下一轮再补派，或让用户调高群组的单轮参与上限。")
+
     from services.agent_zero.services import team_task_service
     from services.agent_zero.task_layer import conv_worker
 
@@ -2551,6 +2957,8 @@ async def _exec_call_team(conv: Dict[str, Any], user: str, role: Dict[str, Any],
             "member": first["member"],
             "run_id": first["run_id"],
             "runs": dispatched,
+            "errors": errors,
+            "skipped": skipped,
             "note": "已创建后台任务并 @ 该成员，任务在后台自动执行；完成后结果会回到群聊。"
                     "本轮不要再自己重复执行同一任务：用一两句话说明分工即可收尾，"
                     "等用户在会话里点「继续」再整合结果。",
@@ -2562,6 +2970,7 @@ async def _exec_call_team(conv: Dict[str, Any], user: str, role: Dict[str, Any],
         "runs": dispatched,
         "members": [x["member"] for x in dispatched],
         "errors": errors,
+        "skipped": skipped,
         "note": f"已创建后台任务并并行派发给 {len(dispatched)} 个成员；"
                 "各成员在后台同时执行，可在执行画布查看实时过程 / 暂停 / 继续 / 结束。"
                 "本轮不要再自己重复执行同一任务：用一两句话说明分工即可收尾，"
@@ -2569,23 +2978,48 @@ async def _exec_call_team(conv: Dict[str, Any], user: str, role: Dict[str, Any],
     }, ensure_ascii=False)
 
 
-async def _exec_call_subagent(conv: Dict[str, Any], user: str, role: Dict[str, Any],
-                              args: Dict[str, Any], depth: int,
-                              call_id: str = "") -> str:
-    """派生一个**自身子代理**（父角色的收窄副本，临时、不落库）执行子目标。
+_SUBAGENT_MAX_PARALLEL = 8
 
-    - 继承父角色的模型与工具白名单；`tools` 只取父工具的子集（缺省=父全部）；
-    - `name` / `instructions` 可定制其名与补充指令；
-    - 不限轮次 / 不限嵌套，结论回灌父模型，子轨迹内联展示。
+
+def _subagent_specs(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """把 `delegate(target=subagent)` 参数归一成一组子代理规格。
+
+    - 旧调用：顶层 `goal` / `name` / `instructions` / `context` / `tools`；
+    - 并行调用：`assignments: [{goal, name?, instructions?, context?, tools?}]`。
+    一次最多派生 `_SUBAGENT_MAX_PARALLEL` 个，避免模型一口气建出几十个。
     """
-    if _SUBAGENT_MAX_DEPTH and depth >= _SUBAGENT_MAX_DEPTH:
-        return json.dumps({"error": f"子代理嵌套过深（最多 {_SUBAGENT_MAX_DEPTH} 层）"}, ensure_ascii=False)
-    goal = str((args or {}).get("goal") or "").strip()
-    if not goal:
-        return json.dumps({"error": "缺少 goal"}, ensure_ascii=False)
-    name = str((args or {}).get("name") or "").strip()[:128] or "子代理"
-    instructions = str((args or {}).get("instructions") or "").strip()[:2000]
-    context = str((args or {}).get("context") or "").strip()[:8000]
+    out: List[Dict[str, Any]] = []
+    raw = (args or {}).get("assignments")
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            goal = str(item.get("goal") or "").strip()
+            if not goal:
+                continue
+            out.append({
+                "goal": goal,
+                "name": str(item.get("name") or "").strip()[:128] or "子代理",
+                "instructions": str(item.get("instructions") or "").strip()[:2000],
+                "context": str(item.get("context") or "").strip()[:8000],
+                "tools": item.get("tools"),
+            })
+    if not out:
+        goal = str((args or {}).get("goal") or "").strip()
+        if goal:
+            out.append({
+                "goal": goal,
+                "name": str((args or {}).get("name") or "").strip()[:128] or "子代理",
+                "instructions": str((args or {}).get("instructions")
+                                     or "").strip()[:2000],
+                "context": str((args or {}).get("context") or "").strip()[:8000],
+                "tools": (args or {}).get("tools"),
+            })
+    return out[:_SUBAGENT_MAX_PARALLEL]
+
+
+def _subagent_child(role: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
+    """按父角色收窄出子代理角色（临时、不落库）。"""
     parent_env = role.get("envelope") or {}
 
     def _narrow(parent_list: Any, req: Any) -> List[str]:
@@ -2595,15 +3029,14 @@ async def _exec_call_subagent(conv: Dict[str, Any], user: str, role: Dict[str, A
         allowed = set(parent)
         return [str(x) for x in req if str(x).strip() and str(x) in allowed]
 
-    persona = str(role.get("persona") or "")
-    child: Dict[str, Any] = {
+    return {
         "id": f"{role.get('id')}:sub",
-        "name": name,
-        "persona": persona,
+        "name": str(spec.get("name") or "子代理"),
+        "persona": str(role.get("persona") or ""),
         "expertise": str(role.get("expertise") or ""),
         "avatar": role.get("avatar") or "",
         "envelope": {
-            "tools": _narrow(parent_env.get("tools"), (args or {}).get("tools")),
+            "tools": _narrow(parent_env.get("tools"), spec.get("tools")),
             "models": dict(parent_env.get("models") or {}),
             "network": parent_env.get("network") or "allow",
             "data_scope": parent_env.get("data_scope") or "camp",
@@ -2611,6 +3044,14 @@ async def _exec_call_subagent(conv: Dict[str, Any], user: str, role: Dict[str, A
             "db": {"allowed": [], "read_only": True, "table_whitelist": []},
         },
     }
+
+
+async def _run_one_subagent(conv: Dict[str, Any], user: str,
+                            role: Dict[str, Any], spec: Dict[str, Any],
+                            depth: int, *, call_id: str = "") -> Dict[str, Any]:
+    """跑一个子代理，返回 {output, display}；失败也返回可回灌的错误信息。"""
+    goal = str(spec.get("goal") or "").strip()
+    child = _subagent_child(role, spec)
     child_sink: Dict[str, Any] = {}
     try:
         from services.agent_zero.services import ask_service
@@ -2623,23 +3064,292 @@ async def _exec_call_subagent(conv: Dict[str, Any], user: str, role: Dict[str, A
                 _depth=depth + 1, _max_rounds=_SUBAGENT_MAX_ROUNDS,
                 isolated=True,
                 context_messages=_subagent_messages(
-                    goal, instructions=instructions, context=context),
+                    goal, instructions=str(spec.get("instructions") or ""),
+                    context=str(spec.get("context") or "")),
                 system_addon=prompt_builder.SUBAGENT):
-            _forward_subagent_event(run_id, call_id or f"sub-{id(child_sink)}",
-                                    str(child.get("name") or "子代理"), goal, ev, fstate)
+            _forward_subagent_event(
+                run_id, call_id or f"sub-{id(child_sink)}",
+                str(child.get("name") or "子代理"), goal, ev, fstate)
+    except asyncio.CancelledError:
+        raise
     except Exception as e:  # 子代理失败不阻断父循环
         logger.warning("子代理执行失败: %s", e)
-        return json.dumps({"error": f"子代理执行失败: {e}"}, ensure_ascii=False)
+        return {
+            "output": "",
+            "error": f"子代理执行失败: {e}",
+            "display": {
+                "type": "subagent",
+                "agent": {"id": child["id"], "name": child["name"],
+                          "avatar": child.get("avatar") or ""},
+                "goal": goal,
+                "trace": [],
+                "error": str(e),
+            },
+        }
     text = str(child_sink.get("text") or "").strip()
-    display = {
-        "type": "subagent",
-        "agent": {"id": child["id"], "name": child["name"],
-                  "avatar": child.get("avatar") or ""},
-        "goal": goal,
-        "trace": (child_sink.get("trace") or []),
+    return {
+        "output": text,
+        "display": {
+            "type": "subagent",
+            "agent": {"id": child["id"], "name": child["name"],
+                      "avatar": child.get("avatar") or ""},
+            "goal": goal,
+            "trace": (child_sink.get("trace") or []),
+        },
     }
-    return json.dumps({"output": text or "(子代理未返回正文)", "display": display},
-                      ensure_ascii=False)
+
+
+async def _exec_call_subagent(conv: Dict[str, Any], user: str, role: Dict[str, Any],
+                              args: Dict[str, Any], depth: int,
+                              call_id: str = "") -> str:
+    """派生**自身子代理**（父角色的收窄副本，临时、不落库）执行一个或多个子目标。
+
+    - 继承父角色的模型与工具白名单；`tools` 只取父工具的子集（缺省=父全部）；
+    - `name` / `instructions` 可定制其名与补充指令；
+    - `assignments` 一次派生多个，用 gather 并行执行，各自的事件仍写进父 run；
+    - 不限轮次 / 不限嵌套，结论回灌父模型，子轨迹内联展示。
+    """
+    if _SUBAGENT_MAX_DEPTH and depth >= _SUBAGENT_MAX_DEPTH:
+        return json.dumps({"error": f"子代理嵌套过深（最多 {_SUBAGENT_MAX_DEPTH} 层）"}, ensure_ascii=False)
+    specs = _subagent_specs(args or {})
+    if not specs:
+        return json.dumps({"error": "缺少 goal"}, ensure_ascii=False)
+    base_call = str(call_id or "").strip()
+    if len(specs) == 1:
+        result = await _run_one_subagent(conv, user, role, specs[0], depth,
+                                         call_id=base_call)
+        if result.get("error"):
+            return json.dumps({"error": result["error"],
+                               "display": result.get("display")},
+                              ensure_ascii=False)
+        return json.dumps({
+            "output": result["output"] or "(子代理未返回正文)",
+            "display": result["display"],
+        }, ensure_ascii=False)
+
+    tasks = [
+        _run_one_subagent(
+            conv, user, role, spec, depth,
+            call_id=f"{base_call or 'sub'}#{index}")
+        for index, spec in enumerate(specs)
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    outputs: List[Dict[str, Any]] = []
+    displays: List[Dict[str, Any]] = []
+    blocks: List[str] = []
+    for index, (spec, result) in enumerate(zip(specs, results)):
+        if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            outputs.append({"name": spec.get("name"), "goal": spec.get("goal"),
+                            "output": "", "error": str(result)})
+            blocks.append(f"### {spec.get('name')}\n（失败：{result}）")
+            continue
+        display = result.get("display") or {}
+        displays.append(display)
+        output = str(result.get("output") or "").strip()
+        outputs.append({
+            "name": (display.get("agent") or {}).get("name") or spec.get("name"),
+            "goal": spec.get("goal"),
+            "output": output,
+            "error": str(result.get("error") or ""),
+        })
+        blocks.append(
+            f"### {outputs[-1]['name']}（{spec.get('goal')}）\n"
+            + (output or f"（未返回正文：{result.get('error')}）"))
+    combined_display = {
+        "type": "subagent",
+        "agent": {
+            "id": f"{role.get('id')}:sub-group",
+            "name": f"并行子代理 ×{len(displays)}",
+            "avatar": role.get("avatar") or "",
+        },
+        "goal": "；".join(str(s.get("goal") or "") for s in specs)[:1200],
+        "trace": [],
+        "agents": displays,
+    }
+    return json.dumps({
+        "output": "\n\n".join(blocks),
+        "outputs": outputs,
+        "display": combined_display,
+    }, ensure_ascii=False)
+
+
+def _discussion_role_tokens(args: Dict[str, Any]) -> List[str]:
+    raw = ((args or {}).get("roles") or (args or {}).get("role_ids")
+           or (args or {}).get("participants") or [])
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _resolve_discussion_roles(
+    args: Dict[str, Any], current_role: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], str]:
+    """把角色 id / 名字解析成参与者（2-3 个，去重，保留调用顺序）。"""
+    tokens = _discussion_role_tokens(args or {})
+    if not tokens:
+        return [], "roles 不能为空：请提供 2-3 个角色 id 或名字"
+    from services.agent_zero.stores import zero_store
+
+    pool = zero_store.list_roles(limit=500)
+    by_id = {str(role.get("id") or ""): role for role in pool}
+    current_id = str(current_role.get("id") or "")
+    if current_id and current_id not in by_id:
+        pool.append(current_role)
+        by_id[current_id] = current_role
+    by_name = {
+        str(role.get("name") or "").strip().casefold(): role
+        for role in pool if str(role.get("name") or "").strip()
+    }
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for token in tokens:
+        role = by_id.get(token) or by_name.get(token.casefold())
+        if not role:
+            return [], f"找不到角色：{token}"
+        rid = str(role.get("id") or "")
+        if not rid or rid in seen:
+            continue
+        seen.add(rid)
+        out.append(role)
+    if len(out) < 2:
+        return [], "至少需要 2 个不同角色参与讨论"
+    if len(out) > MAX_DISCUSSION_ROLES:
+        out = out[:MAX_DISCUSSION_ROLES]
+    return out, ""
+
+
+def _discussion_prompt(topic: str, mode: str, participants: List[Dict[str, Any]],
+                       transcript: List[Dict[str, Any]], speaker: Dict[str, Any],
+                       round_no: int, rounds: int, context: str) -> str:
+    mode_label = "交互验证 / 交叉审查" if mode == "verify" else "头脑风暴"
+    lines = [
+        "<role-discussion>",
+        f"主题：{topic}",
+        f"模式：{mode_label}",
+        f"参与者：{'、'.join(str(p.get('name') or p.get('id')) for p in participants)}",
+        f"你的角色：{speaker.get('name') or speaker.get('id')}"
+        f"（{speaker.get('title') or '未填写岗位'}）",
+        f"轮次：第 {round_no} 轮 / 共 {rounds} 轮",
+    ]
+    if context.strip():
+        lines += ["", "补充上下文：", context.strip()[:6000]]
+    if transcript:
+        lines += ["", "此前讨论记录："]
+        for item in transcript:
+            lines.append(f"## 第 {item.get('round')} 轮")
+            for message in item.get("messages") or []:
+                lines.append(f"### {message.get('role_name')}")
+                lines.append(str(message.get("output") or "")[:6000])
+    if mode == "verify":
+        lines += [
+            "",
+            "本轮要求：",
+            "- 检查此前发言中的事实、假设与推理漏洞；不同意就明确说，并给出依据。",
+            "- 补充你验证过的证据（文件 / 命令 / 测试结果）；没有验证就标注未验证。",
+            "- 最后一轮给出可执行结论、分歧点与仍待验证项。",
+        ]
+    else:
+        lines += [
+            "",
+            "本轮要求：",
+            "- 结合此前发言提出新观点，不要复述别人已经说过的内容。",
+            "- 可以对别人的观点补充、反驳或组合；给出具体可执行的建议。",
+            "- 最后一轮收敛成可执行结论与待办。",
+        ]
+    lines.append("</role-discussion>")
+    return "\n".join(lines)
+
+
+async def _exec_role_discussion(conv: Dict[str, Any], user: str,
+                                role: Dict[str, Any], args: Dict[str, Any],
+                                depth: int, *, call_id: str = "") -> str:
+    """2-3 个角色直接多轮讨论（不经过主持转述）。"""
+    if _SUBAGENT_MAX_DEPTH and depth >= _SUBAGENT_MAX_DEPTH:
+        return json.dumps(
+            {"error": f"角色讨论嵌套过深（最多 {_SUBAGENT_MAX_DEPTH} 层）"},
+            ensure_ascii=False)
+    topic = str((args or {}).get("topic") or "").strip()
+    if not topic:
+        return json.dumps({"error": "topic 不能为空"}, ensure_ascii=False)
+    mode = str((args or {}).get("mode") or "brainstorm").strip().lower()
+    if mode not in ("brainstorm", "verify"):
+        mode = "brainstorm"
+    try:
+        rounds = int((args or {}).get("rounds") or 2)
+    except (TypeError, ValueError):
+        rounds = 2
+    rounds = max(1, min(MAX_DISCUSSION_ROUNDS, rounds))
+    context = str((args or {}).get("context") or "").strip()[:8000]
+    participants, error = _resolve_discussion_roles(args or {}, role)
+    if error:
+        return json.dumps({"error": error}, ensure_ascii=False)
+
+    from services.agent_zero.services import ask_service
+    from services.agent_zero.task_layer import prompt_builder
+
+    run_id = ask_service.current_run_id()
+    base_call = str(call_id or "discussion").strip()
+    transcript: List[Dict[str, Any]] = []
+    for round_no in range(1, rounds + 1):
+        messages: List[Dict[str, Any]] = []
+        for speaker in participants:
+            goal = f"{mode}: {topic}"
+            sink: Dict[str, Any] = {}
+            state: Dict[str, Any] = {}
+            prompt = _discussion_prompt(
+                topic, mode, participants, transcript, speaker,
+                round_no, rounds, context)
+            try:
+                async for ev in _stream_role(
+                        conv, user, speaker, sink, autonomous=False,
+                        _depth=depth + 1, _max_rounds=_SUBAGENT_MAX_ROUNDS,
+                        isolated=True,
+                        context_messages=[{"role": "user", "content": prompt}],
+                        system_addon=prompt_builder.ROLE_DISCUSSION):
+                    _forward_subagent_event(
+                        run_id, f"{base_call}#r{round_no}#{speaker.get('id')}",
+                        str(speaker.get("name") or "角色"), goal, ev, state)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("角色讨论参与者 %s 失败: %s", speaker.get("name"), e)
+                messages.append({
+                    "role_id": str(speaker.get("id") or ""),
+                    "role_name": str(speaker.get("name") or speaker.get("id") or ""),
+                    "output": f"（失败：{e}）",
+                    "error": str(e),
+                })
+                continue
+            text = str(sink.get("text") or "").strip()
+            if not text:
+                err = str(sink.get("error") or "").strip()
+                text = f"（未返回正文：{err}）" if err else "（未返回正文）"
+            messages.append({
+                "role_id": str(speaker.get("id") or ""),
+                "role_name": str(speaker.get("name") or speaker.get("id") or ""),
+                "output": text[:8000],
+            })
+        transcript.append({"round": round_no, "messages": messages})
+
+    final_round = transcript[-1]["messages"] if transcript else []
+    summary = "\n\n".join(
+        f"### {item.get('role_name')}\n{item.get('output')}" for item in final_round)
+    return json.dumps({
+        "status": "done",
+        "topic": topic,
+        "mode": mode,
+        "rounds": rounds,
+        "participants": [
+            {"id": str(p.get("id") or ""), "name": str(p.get("name") or "")}
+            for p in participants
+        ],
+        "transcript": transcript,
+        "output": summary,
+    }, ensure_ascii=False)
 
 
 def _workspace_has_dir(workspace_id: str) -> bool:
@@ -2903,12 +3613,13 @@ def _latest_user_prompt(conv_id: str, fallback: str = "") -> str:
         with SessionLocal() as db:
             row = db.execute(
                 text(f"SELECT props FROM {_q('gdag_nodes')} "
-                     f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
-                     f"AND props->>'stage' = 'exploration' "
-                     f"AND COALESCE(props->>'by', '') <> 'assistant' "
-                     f"AND COALESCE(props->>'kind', '') <> 'checkpoint' "
-                     f"AND COALESCE(props->>'kind', '') <> :clear_kind "
-                     f"AND COALESCE(CAST(props->>'queued' AS INTEGER), 0) <> 1 "
+                     f"WHERE type = 'fact' "
+                     f"AND json_extract(props, '$.conversation_id') = :cid "
+                     f"AND json_extract(props, '$.stage') = 'exploration' "
+                     f"AND COALESCE(json_extract(props, '$.by'), '') <> 'assistant' "
+                     f"AND COALESCE(json_extract(props, '$.kind'), '') <> 'checkpoint' "
+                     f"AND COALESCE(json_extract(props, '$.kind'), '') <> :clear_kind "
+                     f"AND COALESCE(CAST(json_extract(props, '$.queued') AS INTEGER), 0) <> 1 "
                      f"ORDER BY created_at DESC, rowid DESC LIMIT 1"),
                 {"cid": conv_id, "clear_kind": CLEAR_KIND},
             ).first()
@@ -2953,13 +3664,14 @@ def _history_messages(conv_id: str, limit: int = CHAT_HISTORY,
     with SessionLocal() as db:
         rows = db.execute(
             text(f"SELECT id, props FROM {_q('gdag_nodes')} "
-                 f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
-                 f"AND props->>'stage' = 'exploration' "
-                 f"AND COALESCE(props->>'kind', '') <> 'checkpoint' "
-                 f"AND COALESCE(props->>'kind', '') <> :clear_kind "
+                 f"WHERE type = 'fact' "
+                 f"AND json_extract(props, '$.conversation_id') = :cid "
+                 f"AND json_extract(props, '$.stage') = 'exploration' "
+                 f"AND COALESCE(json_extract(props, '$.kind'), '') <> 'checkpoint' "
+                 f"AND COALESCE(json_extract(props, '$.kind'), '') <> :clear_kind "
                  f"AND rowid > :clear_rowid "
-                 f"AND COALESCE(props->>'by', '') <> 'system' "
-                 f"AND COALESCE(CAST(props->>'queued' AS INTEGER), 0) <> 1 "
+                 f"AND COALESCE(json_extract(props, '$.by'), '') <> 'system' "
+                 f"AND COALESCE(CAST(json_extract(props, '$.queued') AS INTEGER), 0) <> 1 "
                  f"ORDER BY created_at DESC LIMIT :n"),
             {"cid": conv_id, "n": max(1, int(limit)),
              "clear_kind": CLEAR_KIND, "clear_rowid": clear_rowid},
@@ -3058,8 +3770,10 @@ def latest_checkpoint(conv_id: str, *, after_rowid: int = 0) -> Optional[Dict[st
     with SessionLocal() as db:
         row = db.execute(
             text(f"SELECT id, props, created_at FROM {_q('gdag_nodes')} "
-                 f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
-                 f"AND props->>'kind' = :kind "
+                 f"INDEXED BY idx_gdag_conv "
+                 f"WHERE type = 'fact' "
+                 f"AND json_extract(props, '$.conversation_id') = :cid "
+                 f"AND json_extract(props, '$.kind') = :kind "
                  f"AND rowid > :after "
                  f"ORDER BY created_at DESC, rowid DESC LIMIT 1"),
             {"cid": conv_id, "kind": CHECKPOINT_KIND,
@@ -3147,8 +3861,11 @@ def clear_marker_rowid(conv_id: str) -> int:
     with SessionLocal() as db:
         row = db.execute(
             text(f"SELECT rowid FROM {_q('gdag_nodes')} "
-                 f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
-                 f"AND props->>'kind' = :kind ORDER BY rowid DESC LIMIT 1"),
+                 f"INDEXED BY idx_gdag_conv "
+                 f"WHERE type = 'fact' "
+                 f"AND json_extract(props, '$.conversation_id') = :cid "
+                 f"AND json_extract(props, '$.kind') = :kind "
+                 f"ORDER BY rowid DESC LIMIT 1"),
             {"cid": conv_id, "kind": CLEAR_KIND},
         ).first()
     return int(row[0]) if row else 0
@@ -3394,13 +4111,14 @@ def _recent_exploration_rows(conv_id: str, limit: int = 30) -> List[Dict[str, An
     with SessionLocal() as db:
         rows = db.execute(
             text(f"SELECT id, props FROM {_q('gdag_nodes')} "
-                 f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
-                 f"AND props->>'stage' = 'exploration' "
-                 f"AND COALESCE(props->>'kind', '') <> 'task_proposal' "
-                 f"AND COALESCE(props->>'kind', '') <> 'checkpoint' "
-                 f"AND COALESCE(props->>'kind', '') <> :clear_kind "
+                 f"WHERE type = 'fact' "
+                 f"AND json_extract(props, '$.conversation_id') = :cid "
+                 f"AND json_extract(props, '$.stage') = 'exploration' "
+                 f"AND COALESCE(json_extract(props, '$.kind'), '') <> 'task_proposal' "
+                 f"AND COALESCE(json_extract(props, '$.kind'), '') <> 'checkpoint' "
+                 f"AND COALESCE(json_extract(props, '$.kind'), '') <> :clear_kind "
                  f"AND rowid > :clear_rowid "
-                 f"AND COALESCE(CAST(props->>'queued' AS INTEGER), 0) <> 1 "
+                 f"AND COALESCE(CAST(json_extract(props, '$.queued') AS INTEGER), 0) <> 1 "
                  f"ORDER BY created_at DESC, id DESC LIMIT :n"),
             {"cid": conv_id, "n": max(1, min(int(limit), 100)),
              "clear_kind": CLEAR_KIND, "clear_rowid": clear_marker_rowid(conv_id)},
@@ -4152,11 +4870,16 @@ async def _await_tool_approval(appr_id: str, run_id: Optional[str], name: str,
         "role_id": rid, "role_name": rname}}
 
 
-GLOBAL_AGENT_ADDON = """你是 AtlasX 的**全局 Agent（工单助手）**，只负责需要审批的权限。
+GLOBAL_AGENT_ADDON = """你是 AtlasX 的**全局 Agent（工单助手 / 管理入口）**，只负责需要审批的权限与跨会话管理。
 
 你的职责：
 - 查看跨会话待审批的工具授权；
-- 根据用户指示允许一次 / 本会话允许 / 始终允许 / 拒绝；
+- 根据用户指示允许一次 / 本会话允许 / 角色永久 / 群组永久 / 拒绝；
+- 管理角色在线 / 离线状态、组织部门与角色库；
+- 管理定时任务与自由触发任务（schedule_manage）：可以创建按时间执行的任务，
+  也可以创建由模型判断时机的主动任务；
+- 管理模型主动消息（app_manage 的 proactive_status / set_proactive /
+  cancel_proactive）：默认每个会话每天最多 6 条、间隔 10 分钟，可随时关闭；
 - 回答要短，先结论后动作；执行后说明结果；
 - 不要展示普通会话、未读消息或运行中的任务，除非用户明确追问；
 - 你不是代码执行代理，不要为了处理审批去读写用户项目文件。
@@ -4265,7 +4988,7 @@ async def _prepare_role_run(
         # 工单助手 只拿「管理 App」需要的工具，不继承默认角色的 shell / 文件能力。
         specs = []
         global_tools = ["app_manage", "ask_user", "department_manage",
-                        "role_manage", "team_manage"]
+                        "role_manage", "schedule_manage", "team_manage"]
         for code in global_tools:
             tool = tool_reg.get_tool(code)
             if tool is not None:
@@ -4360,18 +5083,35 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
     """
     from services.agent_zero.runtime.zero import llm as llm_mod
 
+    # **先报身份，再做准备**：发言角色在这里就已经确定，而
+    # `_prepare_role_run` 要读团队 / 目标 / 历史、拼系统提示（代码图谱、记忆、
+    # 技能、项目约定）、拉 MCP 工具清单——大工作区里这一段可能要好几秒。
+    # 以前 start 事件放在准备之后，前端只能先用兜底的「助手」占位，等准备完
+    # 才换成真实角色，看起来就是「先显示助手，再变成指定 / 通用角色」。
+    # 现在身份立刻下发，准备耗时只影响正文，不再影响「谁在说话」。
+    rid, rname = role.get("id"), role.get("name")
+    yield {"start": True, "role_id": rid, "role_name": rname}
+
+    _t_prepare = time.perf_counter()
     setup = await _prepare_role_run(
         conv, role, user, autonomous=autonomous, auto_execute=auto_execute,
         isolated=isolated, context_messages=context_messages,
         system_addon=system_addon, extra_context=extra_context)
+    _prepare_ms = int((time.perf_counter() - _t_prepare) * 1000)
+    # 5s 的准备时间足够让用户以为「卡住了」：慢的时候留一条可检索的日志
+    # （模块默认 INFO，正常速度只写 DEBUG，不刷屏）。
+    _log_prepare = logger.info if _prepare_ms >= 2000 else logger.debug
+    _log_prepare("角色准备耗时 %dms role=%s conv=%s", _prepare_ms, rid,
+                 (conv or {}).get("id"))
     models = setup["models"]
     display_model = setup["display_model"]
     ws_id = setup["ws_id"]
     team = setup["team"]
     goal = setup["goal"]
     specs = setup["specs"]
-    # 单角色会话：没有团队可委派，但同样支持「对话 + 后台任务」分离。
-    # 子代理（isolated）与后台任务的成员 run 不再嵌套派发任务，避免无限套娃。
+    # 单角色会话与群组会话都支持「对话 + 后台任务」分离：一个角色可以同时
+    # 并行派发多项任务。子代理（isolated）与后台任务的成员 run 不再嵌套派发任务，
+    # 避免无限套娃；任务成员仍可派生**子代理**（delegate target=subagent）。
     _is_task_member = False
     if run_id:
         try:
@@ -4381,9 +5121,18 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                 (_rsvc0.get_run(run_id) or {}).get("team_task_id"))
         except Exception:
             _is_task_member = False
-    if not team and not isolated and not _is_task_member:
-        _drop_team_tool(specs)
-        _append_background_task_tool(specs)
+    if not isolated:
+        if not _is_task_member:
+            if not team:
+                _drop_team_tool(specs)
+            _append_background_task_tool(specs)
+            _append_proactive_tool(specs)
+        _append_role_discussion_tool(specs)
+    if _is_task_member and not isolated:
+        from services.agent_zero.task_layer import prompt_builder as _pb
+
+        setup["messages"][0]["content"] = (str(setup["messages"][0]["content"])
+                                           + "\n\n" + _pb.TASK_MEMBER)
     config = setup["config"]
     task_ctx = setup["task_ctx"]
     node = setup["node"]
@@ -4399,9 +5148,6 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
     _ctx_add = _ctx.add
     _ctx_anchor = _ctx.anchor
     _ctx_tokens = _ctx.tokens
-
-    rid, rname = role.get("id"), role.get("name")
-    yield {"start": True, "role_id": rid, "role_name": rname}
 
     # 入口压缩：ceiling 判定 → 推「开始」→ 摘要（期间每 20s 心跳）→ 推「结束」。
     try:
@@ -4774,8 +5520,11 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
             # 批准之后才开始，所以这一轮退回串行路径。
             from services.agent_zero.task_layer import permissions
 
-            _decisions = [permissions.decide(conv["id"], _resolved[i][0],
-                                             _resolved[i][1], auto_execute)
+            _decisions = [permissions.decide(
+                              conv["id"], _resolved[i][0], _resolved[i][1],
+                              auto_execute,
+                              role_id=str(role.get("id") or ""),
+                              team_id=str(conv.get("team_id") or ""))
                           for i, c in enumerate(calls)]
             # 钩子要求确认：覆盖规则判定（但钩子已拒绝的调用下面不会再执行）
             for _hi, _hp in enumerate(_hook_pre):
@@ -5012,7 +5761,8 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                     _member = str(args.get("member_name") or args.get("member_id")
                                   or "团队成员").strip()[:64]
                     _sub_task = asyncio.ensure_future(
-                        _exec_call_team(conv, user, role, args, _depth, call_id=call_id))
+                        _exec_call_team(conv, user, role, args, _depth,
+                                        call_id=call_id))
                     _bind_activity(_tact, _act_id, _sub_task)
                     async for _ping in _ping_until_done(
                             _sub_task, run_id, label=name, rid=rid, rname=rname,
@@ -5038,8 +5788,8 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                         "status": "running", "round": _round,
                         "role_id": rid, "role_name": rname,
                     }}
-                    _goal = str((args or {}).get("goal") or "").strip()
-                    if not _goal:
+                    _items = _background_task_items(args or {})
+                    if not _items:
                         result = json.dumps({"error": "goal 不能为空"},
                                             ensure_ascii=False)
                     else:
@@ -5047,32 +5797,69 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                             from services.agent_zero.services import (
                                 team_task_service as _tts)
 
-                            _task = _tts.create_task(
-                                conv, {}, role,
-                                [{
-                                    "role_id": str(role.get("id") or ""),
-                                    "role_name": str(role.get("name") or ""),
-                                    "goal": _goal,
-                                    "context": str((args or {}).get("context")
-                                                   or "").strip(),
-                                    "role": role,
-                                }],
-                                user,
-                                title=str((args or {}).get("title")
-                                          or "").strip() or None,
-                                mention=False)
+                            _created: List[Dict[str, Any]] = []
+                            for _item in _items:
+                                _task = _tts.create_task(
+                                    conv, team or {}, role,
+                                    [{
+                                        "role_id": str(role.get("id") or ""),
+                                        "role_name": str(role.get("name") or ""),
+                                        "goal": _item["goal"],
+                                        "context": _item["context"],
+                                        "role": role,
+                                    }],
+                                    user,
+                                    title=_item["title"] or None,
+                                    mention=False)
+                                _created.append({
+                                    "task_id": str(_task.get("id") or ""),
+                                    "title": str(_task.get("title")
+                                                 or _item["title"] or ""),
+                                    "goal": _item["goal"],
+                                    "run_id": str(((_task.get("members") or [{}])[0])
+                                                  .get("run_id") or ""),
+                                })
                             _team_delegated = True
+                            _parallel = len(_created) > 1
                             result = json.dumps({
                                 "status": "dispatched",
-                                "task_id": str(_task.get("id") or ""),
-                                "note": "已创建后台任务；本轮用一两句话说明即可收尾，"
-                                        "不要自己重复执行。完成后会有触发器回到对话。",
+                                "task_id": _created[0]["task_id"],
+                                "tasks": _created,
+                                "count": len(_created),
+                                "note": (
+                                    f"已并行创建 {len(_created)} 条后台任务；本轮用一两句话"
+                                    "说明分工即可收尾，不要自己重复执行。"
+                                    if _parallel else
+                                    "已创建后台任务；本轮用一两句话说明即可收尾，"
+                                    "不要自己重复执行。完成后会有触发器回到对话。"),
                             }, ensure_ascii=False)
                         except Exception as _te:
                             logger.exception("创建后台任务失败")
                             result = json.dumps(
                                 {"error": f"创建后台任务失败: {_te}"},
                                 ensure_ascii=False)
+                elif name == "role_discussion":
+                    # 2-3 个角色直接多轮讨论（不经过主持）；每个角色的流事件
+                    # 以子代理轨迹回放，最终记录回灌给调用者。
+                    _open_text = None
+                    trace_timeline.append(_stamp({
+                        "kind": "tool", "phase": "start", "round": _round,
+                        "id": call_id, "name": name, "args": shown_args}))
+                    _seq += 1
+                    yield {"tool_call": {
+                        "id": call_id, "name": name, "args": shown_args,
+                        "status": "running", "round": _round,
+                        "role_id": rid, "role_name": rname,
+                    }}
+                    _disc_task = asyncio.ensure_future(
+                        _exec_role_discussion(conv, user, role, args, _depth,
+                                              call_id=call_id))
+                    _bind_activity(_tact, _act_id, _disc_task)
+                    async for _ping in _ping_until_done(
+                            _disc_task, run_id, label=name, rid=rid, rname=rname,
+                            waiting="discussion"):
+                        yield _ping
+                    result = await _await_subagent_result(_disc_task, name, run_id)
                 elif name in ("department_manage", "department_admin", "org_manage"):
                     _open_text = None
                     _org_out = _exec_department_manage(args)
@@ -5085,6 +5872,18 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                     result = json.dumps(_role_out, ensure_ascii=False)
                     if not _role_out.get("error"):
                         yield {"role_update": _role_out}
+                elif name == "proactive_send":
+                    _open_text = None
+                    _pro_out = _exec_proactive_send(conv, role, args)
+                    result = json.dumps(_pro_out, ensure_ascii=False)
+                    if not _pro_out.get("error"):
+                        yield {"schedule_update": _pro_out}
+                elif name in ("schedule_manage", "schedule_admin"):
+                    _open_text = None
+                    _sch_out = await _exec_schedule_manage(args)
+                    result = json.dumps(_sch_out, ensure_ascii=False)
+                    if not _sch_out.get("error"):
+                        yield {"schedule_update": _sch_out}
                 elif name == "app_manage":
                     _open_text = None
                     _app_out = _exec_app_manage(conv, args)
@@ -5099,7 +5898,9 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                         _note = "".join(parts).strip()[-900:]
                         _appr = permissions.create_approval(
                             conv["id"], run_id, name, shown_args,
-                            _decisions[_ci]["risk"], _decisions[_ci]["reasons"], _note)
+                            _decisions[_ci]["risk"], _decisions[_ci]["reasons"], _note,
+                            role_id=str(role.get("id") or ""),
+                            team_id=str(conv.get("team_id") or ""))
                         trace_timeline.append(_stamp({
                             "kind": "approval", "round": _round, "id": _appr["id"],
                             "name": name, "risk": _appr["risk"],
@@ -5108,7 +5909,9 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                         _seq += 1
                         yield {"tool_approval": {
                             **_appr, "round": _round,
-                            "role_id": rid, "role_name": rname}}
+                            "role_id": rid, "role_name": rname,
+                            "team_id": str(conv.get("team_id") or ""),
+                            "team_name": str((team or {}).get("name") or "")}}
                         _tm_holder: Dict[str, Any] = {}
                         async for _ev in _await_tool_approval(
                                 _appr["id"], run_id, name, rid, rname, _tm_holder):
@@ -5191,7 +5994,9 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                         _appr = permissions.create_approval(
                             conv["id"], run_id, name, shown_args,
                             _decisions[_ci]["risk"], _decisions[_ci]["reasons"], _note,
-                            preview=_preview)
+                            preview=_preview,
+                            role_id=str(role.get("id") or ""),
+                            team_id=str(conv.get("team_id") or ""))
                         trace_timeline.append(_stamp({
                             "kind": "approval", "round": _round, "id": _appr["id"],
                             "name": name, "risk": _appr["risk"],
@@ -5200,7 +6005,9 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                         _seq += 1
                         yield {"tool_approval": {
                             **_appr, "round": _round,
-                            "role_id": rid, "role_name": rname}}
+                            "role_id": rid, "role_name": rname,
+                            "team_id": str(conv.get("team_id") or ""),
+                            "team_name": str((team or {}).get("name") or "")}}
                         # 等待用户决定期间也要心跳：主协程若整段阻塞，
                         # SSE 长时间静默会被中间层/前端掐断（表现为卡顿）。
                         async for _ev in _await_tool_approval(
@@ -5789,6 +6596,81 @@ def archive_stale_conversations(days: int = ARCHIVE_AFTER_DAYS) -> int:
         return res.rowcount or 0
 
 
+def _page_message_stats(db: Any, items: list) -> None:
+    """给一页会话就地补上 unread / unread_count / message_count / last_message。
+
+    列表页一次最多 50 条，逐条跑「消息数 + 最后一条 + 未读」会变成 150 次查询
+    （模板里最贵的接口之一）。这里改成按页两次聚合：
+
+    1. 统计：每个会话的最近助手消息时间 + 未读条数（未读要跟各自的 last_read_at
+       比较，所以把这一页的 (id, last_read_at) 作为 CTE 传进去）；
+    2. 预览：窗口函数按会话分组取最后一条消息，顺带拿到该会话消息总数。
+
+    两条 SQL 都显式走 gdag_nodes 的 (conversation_id, stage) 表达式索引，
+    只扫本页会话的消息，不随总会话数线性变慢。
+    """
+    if not items:
+        return
+    from sqlalchemy import text
+    from services.agent_zero.stores.zero_store import _q
+
+    values = []
+    params: Dict[str, Any] = {}
+    for i, item in enumerate(items):
+        params[f"id{i}"] = str(item.get("id") or "")
+        params[f"lr{i}"] = str(item.get("last_read_at") or "")
+        values.append(f"(:id{i}, :lr{i})")
+    page = f"WITH page(id, last_read) AS (VALUES {', '.join(values)})"
+
+    stats_sql = (
+        f"{page} "
+        f"SELECT p.id AS cid, "
+        f"  MAX(CASE WHEN json_extract(g.props, '$.by') = 'assistant' "
+        f"           THEN g.created_at END) AS last_assistant_at, "
+        f"  SUM(CASE WHEN json_extract(g.props, '$.by') = 'assistant' "
+        f"           AND json_extract(g.props, '$.stage') = 'exploration' "
+        f"           AND COALESCE(json_extract(g.props, '$.kind'), '') <> 'checkpoint' "
+        f"           AND g.created_at > COALESCE(p.last_read, '') "
+        f"           THEN 1 ELSE 0 END) AS unread_count "
+        f"FROM page p JOIN {_q('gdag_nodes')} g INDEXED BY idx_gdag_conv "
+        f"  ON json_extract(g.props, '$.conversation_id') = p.id "
+        f"WHERE g.type = 'fact' "
+        f"GROUP BY p.id"
+    )
+    preview_sql = (
+        f"{page} "
+        f"SELECT cid, content, n FROM ("
+        f"  SELECT json_extract(g.props, '$.conversation_id') AS cid, "
+        f"    json_extract(g.props, '$.content') AS content, "
+        f"    COUNT(*) OVER (PARTITION BY json_extract(g.props, '$.conversation_id')) AS n, "
+        f"    ROW_NUMBER() OVER (PARTITION BY json_extract(g.props, '$.conversation_id') "
+        f"      ORDER BY g.created_at DESC, g.rowid DESC) AS rn "
+        f"  FROM page p JOIN {_q('gdag_nodes')} g INDEXED BY idx_gdag_conv "
+        f"    ON json_extract(g.props, '$.conversation_id') = p.id "
+        f"  WHERE g.type = 'fact' "
+        f"    AND json_extract(g.props, '$.stage') = 'exploration' "
+        f"    AND COALESCE(json_extract(g.props, '$.kind'), '') "
+        f"        NOT IN ('checkpoint', :clear_kind)"
+        f") WHERE rn = 1"
+    )
+
+    stats = {str(r["cid"]): r for r in
+             db.execute(text(stats_sql), params).mappings().all()}
+    previews = {str(r["cid"]): r for r in
+                db.execute(text(preview_sql),
+                           {**params, "clear_kind": CLEAR_KIND}).mappings().all()}
+
+    for item in items:
+        cid = str(item.get("id") or "")
+        st = stats.get(cid)
+        last_at = str(st["last_assistant_at"] or "") if st else ""
+        item["unread"] = bool(last_at) and last_at > str(item.get("last_read_at") or "")
+        item["unread_count"] = int(st["unread_count"] or 0) if st else 0
+        pv = previews.get(cid)
+        item["message_count"] = int(pv["n"] or 0) if pv else 0
+        item["last_message"] = str(pv["content"] or "")[:120] if pv else ""
+
+
 def list_conversations(workspace_id: Optional[str] = None,
                        role_id: Optional[str] = None,
                        limit: int = 50, offset: int = 0,
@@ -5821,33 +6703,19 @@ def list_conversations(workspace_id: Optional[str] = None,
         f"  WHERE gg.conversation_id = c.id AND gg.status = 'active') "
         f"THEN 1 ELSE 0 END"
     )
-    unread_expr = (
-        f"CASE WHEN COALESCE((SELECT MAX(g.created_at) FROM {_q('gdag_nodes')} g "
-        f"  WHERE g.type = 'fact' "
-        f"  AND g.props->>'conversation_id' = c.id "
-        f"  AND g.props->>'by' = 'assistant'), '') "
-        f"  > COALESCE(c.last_read_at, '') THEN 1 ELSE 0 END"
-    )
-    unread_count_expr = (
-        f"(SELECT COUNT(*) FROM {_q('gdag_nodes')} g "
-        f"  WHERE g.type = 'fact' "
-        f"  AND g.props->>'conversation_id' = c.id "
-        f"  AND g.props->>'by' = 'assistant' "
-        f"  AND g.props->>'stage' = 'exploration' "
-        f"  AND COALESCE(g.props->>'kind', '') <> 'checkpoint' "
-        f"  AND g.created_at > COALESCE(c.last_read_at, ''))"
-    )
+    # 未读 / 消息数不在主查询里做相关子查询：那是「每个会话各扫一遍 gdag_nodes」，
+    # 300 个会话就要扫 300 次全表（实测 3.6s）。主查询只取分页需要的最小列，
+    # 未读与预览在拿到这一页 id 之后按页批量算，见 _page_message_stats。
     running_count_expr = (
         f"(SELECT COUNT(*) FROM {_q('conversation_runs')} r "
         f"  WHERE r.conversation_id = c.id "
         f"  AND r.status IN ('queued','running','waiting'))"
     )
-    base = (f"SELECT c.id, c.workspace_id, c.bound_workspace_id, c.role_id, c.team_id, "
+    base = (f"SELECT c.id, c.workspace_id, c.bound_workspace_id, c.workspace_custom, "
+            f"c.role_id, c.team_id, "
             f"c.zone, c.source, c.title, "
             f"c.archived, c.forked_from_id, c.forked_from_message_id, "
             f"c.created_by, c.created_at, c.updated_at, c.last_read_at, "
-            f"{unread_expr} AS has_unread, "
-            f"{unread_count_expr} AS unread_count, "
             f"{running_count_expr} AS running_count, "
             f"(SELECT r2.status FROM {_q('conversation_runs')} r2 "
             f"  WHERE r2.conversation_id = c.id "
@@ -5872,12 +6740,13 @@ def list_conversations(workspace_id: Optional[str] = None,
         base += " AND c.source = :src"
         params["src"] = source
     if keyword:
+        # 用 json_extract 而不是 ->>：表达式索引建在 json_extract 上，->> 命中不了。
         base += (f" AND EXISTS (SELECT 1 FROM {_q('gdag_nodes')} g "
                  f"WHERE g.type = 'fact' "
-                 f"AND g.props->>'conversation_id' = c.id "
-                 f"AND g.props->>'stage' = 'exploration' "
-                 f"AND COALESCE(g.props->>'kind', '') <> 'checkpoint' "
-                 f"AND g.props->>'content' LIKE :kw)")
+                 f"AND json_extract(g.props, '$.conversation_id') = c.id "
+                 f"AND json_extract(g.props, '$.stage') = 'exploration' "
+                 f"AND COALESCE(json_extract(g.props, '$.kind'), '') <> 'checkpoint' "
+                 f"AND json_extract(g.props, '$.content') LIKE :kw)")
         params["kw"] = f"%{keyword}%"
     # 进行中在前（is_live DESC），组内时间倒序。
     sql = (f"SELECT * FROM ({base}) t "
@@ -5892,42 +6761,33 @@ def list_conversations(workspace_id: Optional[str] = None,
             item["created_at"] = str(item.get("created_at") or "")
             item["updated_at"] = str(item.get("updated_at") or item["created_at"])
             item["active"] = bool(item.pop("is_live", 0))
-            item["unread"] = bool(item.pop("has_unread", 0))
-            item["unread_count"] = int(item.get("unread_count") or 0)
             item["running_count"] = int(item.get("running_count") or 0)
             item["last_read_at"] = str(item.get("last_read_at") or "")
             item["run_status"] = str(item.pop("run_status", "") or "")
+            item["workspace_custom"] = bool(item.get("workspace_custom"))
             item["has_active_goal"] = item.pop("goal_status", None) == "active"
-            item["message_count"] = _count_messages(db, item["id"])
-            item["last_message"] = _last_message(db, item["id"])
             out.append(item)
+        # 未读 / 消息数 / 最后一条预览：整页两次聚合查询，不再逐条 N+1。
+        _page_message_stats(db, out)
+    # token 用量：整页一次聚合（输入 / 输出 / 速度 / 缓存），列表卡片直接展示。
+    from services.agent_zero.services import usage_service
+
+    usage_map = usage_service.usage_by_conversation(
+        [item["id"] for item in out], stage="exploration")
+    for item in out:
+        item["usage"] = usage_map.get(item["id"]) or usage_service.empty_usage()
     return out
 
 
 def update_bound_workspace(conv_id: str, workspace_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """兼容旧接口：把「会话绑定工作区」改为会话工作区归属。
+    """兼容旧接口：手动指定会话工作区。
 
-    新模型下工作区由角色 / 群组绑定；这个入口只用于兼容旧前端 / 旧链接。
+    新模型下这等价于「本会话固定使用该工作区」（不跟随角色 / 群组）；
+    空值保留原工作区（旧前端的清空语义）。
     """
-    from sqlalchemy import text
-    from services.agent_zero.database import get_session_local
-    from services.agent_zero.stores.zero_store import _q
-
-    ws = str(workspace_id or "").strip() or None
-    if ws:
-        row = zero_store.get_workspace(ws)
-        if not row or row.get("archived"):
-            raise ValueError(f"工作区不存在或已归档: {ws}")
-    SessionLocal = get_session_local()
-    with SessionLocal() as db:
-        db.execute(
-            text(f"UPDATE {_q('conversations')} SET workspace_id = COALESCE(:wid, workspace_id), "
-                 f"bound_workspace_id = NULL, "
-                 f"updated_at = datetime('now','localtime') WHERE id = :id"),
-            {"wid": ws, "id": conv_id},
-        )
-        db.commit()
-    return get_conversation(conv_id)
+    if not str(workspace_id or "").strip():
+        return get_conversation(conv_id)
+    return set_conversation_workspace(conv_id, workspace_id)
 
 
 def mark_conversation_read(conv_id: str) -> bool:
@@ -5987,10 +6847,10 @@ def count_conversations(workspace_id: Optional[str] = None,
     if keyword:
         sql += (f" AND EXISTS (SELECT 1 FROM {_q('gdag_nodes')} g "
                 f"WHERE g.type = 'fact' "
-                f"AND g.props->>'conversation_id' = {_q('conversations')}.id "
-                f"AND g.props->>'stage' = 'exploration' "
-                f"AND COALESCE(g.props->>'kind', '') <> 'checkpoint' "
-                f"AND g.props->>'content' LIKE :kw)")
+                f"AND json_extract(g.props, '$.conversation_id') = {_q('conversations')}.id "
+                f"AND json_extract(g.props, '$.stage') = 'exploration' "
+                f"AND COALESCE(json_extract(g.props, '$.kind'), '') <> 'checkpoint' "
+                f"AND json_extract(g.props, '$.content') LIKE :kw)")
         params["kw"] = f"%{keyword}%"
     if source:
         sql += " AND source = :src"
@@ -6081,9 +6941,9 @@ def usage_total(conv_id: str) -> Dict[str, Any]:
                 f"SUM(CASE WHEN json_extract(props, '$.usage') IS NOT NULL THEN 1 ELSE 0 END) AS turns "
                 f"FROM {_q('gdag_nodes')} "
                 f"WHERE type = 'fact' "
-                f"  AND props->>'conversation_id' = :cid "
-                f"  AND props->>'stage' = 'exploration' "
-                f"  AND props->>'by' = 'assistant'"
+                f"  AND json_extract(props, '$.conversation_id') = :cid "
+                f"  AND json_extract(props, '$.stage') = 'exploration' "
+                f"  AND json_extract(props, '$.by') = 'assistant'"
             ),
             {"cid": conv_id},
         ).mappings().first()
@@ -6092,10 +6952,11 @@ def usage_total(conv_id: str) -> Dict[str, Any]:
         # 老数据没有 last_prompt_tokens 字段时退回该轮的 max_context_tokens。
         last_row = db.execute(
             text(f"SELECT props FROM {_q('gdag_nodes')} "
+                 f"INDEXED BY idx_gdag_conv_stage "
                  f"WHERE type = 'fact' "
-                 f"  AND props->>'conversation_id' = :cid "
-                 f"  AND props->>'stage' = 'exploration' "
-                 f"  AND props->>'by' = 'assistant' "
+                 f"  AND json_extract(props, '$.conversation_id') = :cid "
+                 f"  AND json_extract(props, '$.stage') = 'exploration' "
+                 f"  AND json_extract(props, '$.by') = 'assistant' "
                  f"  AND COALESCE(CAST(json_extract(props, "
                  f"      '$.usage.prompt_tokens') AS INTEGER), 0) > 0 "
                  f"ORDER BY created_at DESC, rowid DESC LIMIT 1"),
@@ -6109,17 +6970,21 @@ def usage_total(conv_id: str) -> Dict[str, Any]:
     completion = int(data.get("completion_tokens") or 0)
     cached = int(data.get("cached_tokens") or 0)
     llm_ms = int(data.get("llm_ms") or 0)
+    total = prompt + completion
+    turns = int(data.get("turns") or 0)
     return {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
+        "total_tokens": total,
         "cached_tokens": cached,
         "llm_ms": llm_ms,
         "rounds": int(data.get("rounds") or 0),
         "max_context_tokens": int(data.get("max_context_tokens") or 0),
         "last_prompt_tokens": last_prompt,
-        "turns": int(data.get("turns") or 0),
+        "turns": turns,
         "cache_rate": round(cached / prompt * 100, 1) if prompt else 0,
         "speed": round(completion / (llm_ms / 1000), 1) if llm_ms else 0,
+        "avg_tokens_per_turn": round(total / turns, 1) if turns else 0,
     }
 
 
@@ -6133,14 +6998,15 @@ def list_messages(conv_id: str, limit: int = 200) -> list:
     with SessionLocal() as db:
         rows = db.execute(
             text(f"SELECT id, props, created_at FROM {_q('gdag_nodes')} "
-                 f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
-                 f"AND props->>'stage' = 'exploration' "
+                 f"WHERE type = 'fact' "
+                 f"AND json_extract(props, '$.conversation_id') = :cid "
+                 f"AND json_extract(props, '$.stage') = 'exploration' "
                  # 转任务建议节点不单独成条消息：它现在是那次回复轨迹里的
                  # 一个 step（kind='proposal'），单独列出来会变成一个"额外回合"，
                  # 看起来跑到正文前面去了（实测踩到）。
                  # 节点本身仍保留——确认/忽略要靠它的 status/task_id。
-                 f"AND COALESCE(props->>'kind', '') <> 'task_proposal' "
-                 f"AND COALESCE(props->>'kind', '') <> 'checkpoint' "
+                 f"AND COALESCE(json_extract(props, '$.kind'), '') <> 'task_proposal' "
+                 f"AND COALESCE(json_extract(props, '$.kind'), '') <> 'checkpoint' "
                  f"ORDER BY created_at ASC, rowid ASC LIMIT :n"),
             {"cid": conv_id, "n": max(1, min(int(limit), 500))},
         ).mappings().all()
@@ -6148,8 +7014,9 @@ def list_messages(conv_id: str, limit: int = 200) -> list:
         # 这里以节点为准回填，否则刷新后已忽略/已接受会重新变回 pending。
         proposal_rows = db.execute(
             text(f"SELECT id, props FROM {_q('gdag_nodes')} "
-                 f"WHERE type = 'fact' AND props->>'conversation_id' = :cid "
-                 f"AND props->>'kind' = 'task_proposal'"),
+                 f"WHERE type = 'fact' "
+                 f"AND json_extract(props, '$.conversation_id') = :cid "
+                 f"AND json_extract(props, '$.kind') = 'task_proposal'"),
             {"cid": conv_id},
         ).mappings().all()
         # 消息所属 run：排队消息的**真实回合位置**由 run 决定，而不是它的发送时刻。
@@ -6158,7 +7025,8 @@ def list_messages(conv_id: str, limit: int = 200) -> list:
         # 上一轮回复**前面**（实测：u2 排在了 a1 之前），看起来像回复答错了对象。
         # rowid 作次级键：时间只到秒，同一秒内建的多条 run 靠它区分先后。
         run_rows = db.execute(
-            text(f"SELECT rowid AS seq, id, queued_msg_id, status, started_at, created_at "
+            text(f"SELECT rowid AS seq, id, queued_msg_id, target_role_id, status, "
+                 f"started_at, created_at "
                  f"FROM {_q('conversation_runs')} WHERE conversation_id = :cid"),
             {"cid": conv_id},
         ).mappings().all()
@@ -6188,12 +7056,22 @@ def list_messages(conv_id: str, limit: int = 200) -> list:
     # 只到秒的时间戳不足以区分同一秒内建的 run，所以带上 rowid 作次级键。
     msg_run_anchor: dict = {}
     run_anchor_by_id: dict = {}
+    # 老数据兜底：`task_ack` 的 anchor_run_id 是后加的。历史确认消息没有这个字段，
+    # 但它的 run 与它由同一次派发几乎同时创建（同一秒），且 run 的 target_role_id
+    # 就是确认消息的 role_id。据此还原锚点，老会话刷新后顺序也正确，不必迁移数据。
+    ack_run_by_role_created: dict = {}
     for rr in run_rows:
         rid = str(rr["id"] or "")
         seq = int(rr["seq"] or 0)
         anchor = (str(rr["started_at"] or rr["created_at"] or ""), seq)
         if rid:
             run_anchor_by_id[rid] = anchor
+        trid = str(rr["target_role_id"] or "")
+        created = str(rr["created_at"] or "")
+        if trid and created:
+            prev = ack_run_by_role_created.get((trid, created))
+            if prev is None or seq > prev[0]:
+                ack_run_by_role_created[(trid, created)] = (seq, rid)
         mid = str(rr["queued_msg_id"] or "")
         if not mid:
             continue
@@ -6225,6 +7103,14 @@ def list_messages(conv_id: str, limit: int = 200) -> list:
                     step["status"] = live["status"]
                     if live["run_id"]:
                         step["run_id"] = live["run_id"]
+        kind = str(props.get("kind") or "")
+        anchor_run_id = str(props.get("anchor_run_id") or "")
+        if not anchor_run_id and kind == "task_ack":
+            role_id = str(props.get("role_id") or "")
+            created = str(r["created_at"] or "")
+            if role_id and created:
+                anchor_run_id = (ack_run_by_role_created.get((role_id, created))
+                                 or (0, ""))[1]
         out.append({
             "id": r["id"],
             "content": props.get("content") or "",
@@ -6246,7 +7132,7 @@ def list_messages(conv_id: str, limit: int = 200) -> list:
             "refs": props.get("refs") or [],
             "attachments": attachment_service.public_attachments(
                 conv_id, props.get("attachments") or []),
-            "kind": props.get("kind") or "",
+            "kind": kind,
             "goal": props.get("goal") or "",
             "reason": props.get("reason") or "",
             "status": props.get("status") or "",
@@ -6257,6 +7143,8 @@ def list_messages(conv_id: str, limit: int = 200) -> list:
             "task_id": props.get("task_id") or "",
             "task_title": props.get("task_title") or "",
             "task_status": props.get("task_status") or "",
+            # 完成触发器是否已交回对话（自动继续 / 手动点「继续对话」都会置位）
+            "task_continued": bool(props.get("continued")),
             "summary": props.get("summary") or "",
             # 该条回复所属的运行：转录排序要以这一轮 run 的启动时刻为锚点
             "run_id": props.get("run_id") or "",
@@ -6265,6 +7153,9 @@ def list_messages(conv_id: str, limit: int = 200) -> list:
             # 老数据从事件日志还原，见 injected_run_by_msg。
             "injected_into_run": (props.get("injected_into_run")
                                   or injected_run_by_msg.get(str(r["id"] or "")) or ""),
+            # 确认消息（task_ack）属于哪一轮：只用于转录排序。新数据写在
+            # props.anchor_run_id；老数据按 (role_id, 创建秒) 反查成员 run 还原。
+            "anchor_run_id": anchor_run_id,
             "queued": int(props.get("queued") or 0) == 1,
             "edited": bool(props.get("edited_at")),
             "ts": props.get("ts") or str(r["created_at"] or ""),
@@ -6280,6 +7171,8 @@ def _order_messages_by_turn(messages: list, msg_run_anchor: dict,
       - 助手回复：用 `props.run_id` 找那一轮 run；
       - 用户消息：用 `queued_msg_id` 反查（见 msg_run_anchor）；「立即插入」被取走的
         消息用它自己的 `injected_into_run`；
+      - 只服务于某个回合、本身不产出内容的助手消息（如成员「收到，我在后台执行」
+        的 task_ack）：用 `anchor_run_id` 归到那一轮，排在回合内的 @ 消息之后；
       - 尚未启动的排队 run（started_at 为空）→ 用 run 自己的 created_at；
       - 没有 run 的消息（闲聊 / 历史遗留）→ 自己的 ts。
 
@@ -6315,6 +7208,10 @@ def _order_messages_by_turn(messages: list, msg_run_anchor: dict,
             # 「立即插入」被某轮取走：它的排队 run 已删，只能靠这个归属回锚，
             # 否则会退回自己的 created_at 而夹到当前回答**上面**。
             anchor = run_anchor_by_id.get(str(m.get("injected_into_run") or ""))
+        if anchor is None:
+            # 确认消息等「不产出内容、只代表这一回合开始」的助手消息：归到那一轮，
+            # 与 @ 消息共用锚点，再靠下面的 role_rank 排在其后。
+            anchor = run_anchor_by_id.get(str(m.get("anchor_run_id") or ""))
         if anchor is not None:
             anchor = (_norm(anchor[0]), anchor[1])
         else:

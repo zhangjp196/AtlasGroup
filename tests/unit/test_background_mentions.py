@@ -51,6 +51,74 @@ def _quiet_dispatch(monkeypatch):
     return woke
 
 
+def test_mention_precedes_member_ack_in_transcript(app_env, monkeypatch):
+    """转录顺序：先「@成员」，再成员的「收到，我在后台执行…」。
+
+    确认消息落库早于成员 run 启动，只按自己的 created_at 排会跑到 @ 消息前面
+    （用户反馈的「@ 在后、回复在前」）。它必须用 run 锚点回到这一回合里。
+    """
+    ws = _env(app_env)
+    team, conv = _team_conversation(ws)
+    leader = team["leader"]
+    member = team["members"][0]
+    _quiet_dispatch(monkeypatch)
+
+    team_task_service.create_task(
+        conv, team, leader,
+        [{"role_id": member["id"], "role_name": member["name"],
+          "goal": "整理接口文档", "role": member}],
+        "local")
+    task = team_task_service.list_tasks(conv["id"])[0]
+    run_id = str(task["members"][0]["run_id"])
+
+    messages = conversation.list_messages(conv["id"])
+    kinds = [m.get("kind") for m in messages]
+    mention_idx, ack_idx = kinds.index("team_mention"), kinds.index("task_ack")
+    assert mention_idx < ack_idx
+    assert member["name"] in messages[mention_idx]["content"]
+    # 锚点落在成员 run 上；确认消息本身不是那一轮的产出（run_id 仍为空）
+    assert messages[ack_idx]["anchor_run_id"] == run_id
+    assert messages[ack_idx].get("run_id") == ""
+
+
+def test_legacy_ack_without_anchor_still_follows_mention(app_env, monkeypatch):
+    """老数据兜底：没有 anchor_run_id 的历史确认消息也要排在 @ 消息之后。"""
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+
+    ws = _env(app_env)
+    team, conv = _team_conversation(ws)
+    leader = team["leader"]
+    member = team["members"][0]
+    _quiet_dispatch(monkeypatch)
+
+    task = team_task_service.create_task(
+        conv, team, leader,
+        [{"role_id": member["id"], "role_name": member["name"],
+          "goal": "整理接口文档", "role": member}],
+        "local")
+    run_id = str(task["members"][0]["run_id"])
+    before = conversation.list_messages(conv["id"])
+    ack_id = next(m["id"] for m in before if m.get("kind") == "task_ack")
+
+    # 模拟升级前的数据：去掉排序锚点，并把确认消息与 run 固定到同一秒，
+    # 还原「确认先落库、run 后启动」的真实时间关系。
+    stamp = "2026-01-01 00:00:00"
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(text("UPDATE conversation_runs SET created_at = :t "
+                        "WHERE id = :rid"), {"t": stamp, "rid": run_id})
+        db.execute(text("UPDATE gdag_nodes SET created_at = :t, "
+                        "props = json_remove(props, '$.anchor_run_id') "
+                        "WHERE id = :mid"), {"t": stamp, "mid": ack_id})
+        db.commit()
+
+    messages = conversation.list_messages(conv["id"])
+    kinds = [m.get("kind") for m in messages]
+    assert kinds.index("team_mention") < kinds.index("task_ack")
+
+
 def test_role_mention_dispatches_member_reply(app_env, monkeypatch):
     ws = _env(app_env)
     team, conv = _team_conversation(ws)

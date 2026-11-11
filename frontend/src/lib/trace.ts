@@ -111,7 +111,8 @@ export function splitEntries(entries: ProcessEntry[]): {
   if (!final) {
     for (let i = entries.length - 1; i >= 0; i -= 1) {
       if (entries[i].kind === 'text' && String(entries[i].text || '').trim()) {
-        entries[i].final = true
+        // 只把这条当成本次的「正文」，**不回写 final 标记**：渲染是只读操作，
+        // 回写会让 done 事件以为正文已经定稿，从而再 push 一条重复的最终正文。
         final = entries[i]
         break
       }

@@ -116,15 +116,19 @@ def _stall_timeout() -> float:
 
 
 # delta / thinking 合并落库阈值：字符与时间双阈值。太小写库频繁，太大正文攒成
-# 一大块，前端就一段一段跳。150ms 大约十几个字符，配合 run_service 的进程内
-# 总线推送，观感接近逐 token 流；重连 replay 的块也更细。
-TEXT_FLUSH_CHARS = 120
-TEXT_FLUSH_MS = 100
+# 一大块，前端就一段一段跳。上游有些网关是按「一大段」吐字的（一次 100~300 字），
+# 阈值必须明显小于一次吐字量，才能把它们切细；60ms 约等于一帧多，配合进程内总线
+# 推送，观感接近逐 token 流，重连 replay 的块也更细。
+# 前端另有「打字机」平滑（把一次到达的整段按帧展开），两层叠加后即使上游卡顿后
+# 猛吐一大段，界面也是稳定推进而不是整块闪出。
+TEXT_FLUSH_CHARS = 64
+TEXT_FLUSH_MS = 60
 _EVENT_KEYS = ("done", "error", "start", "delta", "thinking", "tool_call", "tool_result",
                "task_proposal", "plan", "context_compressed",
                "context_compress_start", "context_compress_done", "ping",
                "tool_approval", "approval_decided", "hook",
-               "retry", "todo_update", "goal_update", "usage")
+               "retry", "todo_update", "goal_update", "usage",
+               "role_update", "org_update", "app_update", "schedule_update")
 
 
 def _evt_kind(evt: Dict[str, Any]) -> str:
@@ -144,6 +148,16 @@ def autonomous_deadline(run: Dict[str, Any]) -> Optional[float]:
         return None
     limit = float(get_settings().autonomous_run_max_seconds or 0)
     return (time.monotonic() + limit) if limit > 0 else None
+
+
+def _goal_after_failure(conv_id: str, run_id: str, error: str) -> None:
+    """目标模式：失败也自动继续，入队一条诊断 / 重试 run。"""
+    try:
+        from services.agent_zero.task_layer import goal_service
+
+        goal_service.after_run_failed(conv_id, run_id, error)
+    except Exception:
+        logger.exception("目标模式失败续跑处理失败 run=%s", run_id)
 
 
 class ConversationRunWorker:
@@ -481,11 +495,15 @@ class ConversationRunWorker:
                 logger.exception("解除排队消息标记失败 run=%s", run_id)
 
         # 文件检查点：在真正执行前记录工作区状态（之后可回退）。失败不影响本轮。
+        # **不阻塞发言角色上报**：检查点跑在线程池里，与「第一帧（start）+ 提示词
+        # 准备」并行；进入事件循环、发出第一帧之后才 join 它，保证任何工具动手前
+        # 快照已就绪。
+        checkpoint_task: Optional[asyncio.Task] = None
         try:
             from services.agent_zero.services import file_checkpoint_service
 
-            await asyncio.to_thread(
-                file_checkpoint_service.create_for_run, run, conv)
+            checkpoint_task = asyncio.ensure_future(asyncio.to_thread(
+                file_checkpoint_service.create_for_run, run, conv))
         except Exception:
             logger.exception("创建文件检查点失败 run=%s", run_id)
 
@@ -522,14 +540,29 @@ class ConversationRunWorker:
         # 用 task + 短 timeout 轮询解决，且**不取消**它（取消会向生成器内部注入
         # CancelledError，把正常运行掐死）；只有真的要停时才 cancel。
         prefetch: Optional[asyncio.Task] = None
+        # 检查点还没收尾时，等它完成再落**后续**事件；第一帧（start = 谁在说话）
+        # 不等它——用户先看到正确的发言角色，比先拍完快照重要。
+        checkpoint_pending: Optional[asyncio.Task] = checkpoint_task
         silent_since = time.monotonic()
         next_stop_check = 0.0
         next_beat = time.monotonic() + _HEARTBEAT_S
+        first_event_sent = False
         try:
             stall_s = _stall_timeout()
             while True:
                 if prefetch is None:
                     prefetch = asyncio.ensure_future(events.__anext__())
+                if checkpoint_pending is not None and first_event_sent:
+                    # 第一帧（start = 谁在说话）已经落库下发；检查点在这里收尾。
+                    # 此刻 prefetch 已经建好，生成器的提示词 / 历史准备与检查点
+                    # 并行跑，谁快谁先，不再把「谁在说话」一起堵在后面。
+                    try:
+                        await checkpoint_pending
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("创建文件检查点失败 run=%s", run_id)
+                    checkpoint_pending = None
                 done, _pending = await asyncio.wait({prefetch}, timeout=_TICK_S)
                 if not done:
                     # 这一个 tick 内没有事件：查停止 / 墙钟 / 静默，都不命中就继续等。
@@ -574,6 +607,8 @@ class ConversationRunWorker:
                     prefetch = None
                 silent_since = time.monotonic()
                 next_beat = silent_since + _HEARTBEAT_S
+                # 已经拿到第一帧：下一轮循环开头会把检查点收掉（第一帧不等它）。
+                first_event_sent = True
                 if run_service.is_stop_requested(run_id):
                     break
                 if deadline is not None and time.monotonic() > deadline:
@@ -617,6 +652,16 @@ class ConversationRunWorker:
                 raise          # 停止时的正常现象：正文已落库，取消继续向上传播
             except Exception:
                 pass
+            # 检查点还没被收尾（生成器一帧都没出 / 提前取消）：别把它的异常
+            # 留成 "Task exception was never retrieved"。
+            if checkpoint_pending is not None:
+                if checkpoint_pending.done():
+                    try:
+                        checkpoint_pending.exception()
+                    except BaseException:      # noqa: BLE001 - 已收尾，忽略
+                        pass
+                else:
+                    checkpoint_pending.cancel()
 
         if stalled and error_text:
             try:
@@ -691,8 +736,10 @@ class ConversationRunWorker:
                 run_id, "error",
                 {"error": "自主执行超时，已停止；可缩小目标或拆分后重试"})
             run_service.finish_run(run_id, run_service.STATUS_FAILED, "autonomous_timeout")
+            _goal_after_failure(conv_id, run_id, "自主执行超时，已停止")
         elif error_text and not saw_done:
             run_service.finish_run(run_id, run_service.STATUS_FAILED, error_text)
+            _goal_after_failure(conv_id, run_id, str(error_text))
         else:
             run_service.finish_run(run_id, run_service.STATUS_DONE)
             # 首轮回复完成：异步生成 AI 标题（不阻塞、失败静默保留占位标题）
@@ -710,8 +757,8 @@ class ConversationRunWorker:
             except Exception:
                 logger.exception("目标模式续跑处理失败 run=%s", run_id)
 
-        # 群组后台任务：成员 run 收尾后，若整个任务已结束，写一条前台触发器。
-        # 不自动唤醒主持——任务与对话分离，由用户点「继续对话」再整合。
+        # 群组后台任务：成员 run 收尾后，若整个任务已结束，写一条完成触发器，
+        # 并由任务层把结果自动交回主会话（完成 / 失败都继续）。
         try:
             from services.agent_zero.services import team_task_service
 

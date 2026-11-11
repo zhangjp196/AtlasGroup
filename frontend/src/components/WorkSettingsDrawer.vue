@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Markdown from '@/components/chat/Markdown.vue'
+import TokenMeter from '@/components/TokenMeter.vue'
 import WorkEditorDialog from '@/components/WorkEditorDialog.vue'
 import { api } from '@/api/client'
-import type { WorkItem } from '@/api/types'
+import type { TokenUsage, WorkItem } from '@/api/types'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -20,6 +21,28 @@ const data = useDataStore()
 const router = useRouter()
 const editing = ref(false)
 const busy = ref(false)
+// 工单详情用轻量刷新拿到最新用量：浮窗里的旧列表对象可能是几分钟前的快照。
+const usage = ref<TokenUsage | null>(null)
+const usageLoading = ref(false)
+
+watch(() => [props.open, props.item], () => {
+  usage.value = null
+  if (props.open && props.item?.id) void loadUsage()
+}, { immediate: true })
+
+async function loadUsage(): Promise<void> {
+  const id = String(props.item?.id || '')
+  if (!id) return
+  usageLoading.value = true
+  try {
+    const fresh = await api<WorkItem>(`/work-items/${encodeURIComponent(id)}`)
+    if (fresh?.usage) usage.value = fresh.usage
+  } catch {
+    /* 保留列表里的旧快照 */
+  } finally {
+    usageLoading.value = false
+  }
+}
 
 const statusLabels: Record<string, string> = {
   inbox: '待分派',
@@ -138,9 +161,15 @@ function onSaved(): void {
             <span v-if="item.source_actor"><i>发起人</i><b>{{ item.source_actor }}</b></span>
             <span><i>工作区</i><b>{{ item.workspace_name || item.workspace_id || '默认' }}</b></span>
             <span><i>角色</i><b>{{ [item.role_name || item.role_id || '默认', item.role_title, item.role_department].filter(Boolean).join(' · ') }}</b></span>
-            <span v-if="item.team_name"><i>群组</i><b>{{ item.team_name }}</b></span>
             <span><i>创建</i><b>{{ item.created_at || '' }}</b></span>
           </div>
+
+          <section class="work-tokens">
+            <div class="sa-detail-label" style="margin:0">
+              Token 用量 · {{ usageLoading ? '统计中…' : '输入 / 输出 / 速度 / 缓存' }}
+            </div>
+            <TokenMeter :usage="usage || item.usage" variant="panel" headless />
+          </section>
 
           <div v-if="item.status === 'needs_attention'" class="work-attention">
             <span class="sa-attention-ico danger">

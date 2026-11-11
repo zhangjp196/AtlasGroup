@@ -9,6 +9,8 @@ import type {
   ModelProfile,
   ModelsResponse,
   Role,
+  ScheduleListResponse,
+  ScheduledTask,
   Subscription,
   Team,
   Workspace,
@@ -28,10 +30,15 @@ export const useDataStore = defineStore('data', () => {
   const workItems = ref<WorkItemsResponse['items']>([])
   const workStats = ref<WorkItemsResponse['stats']>({})
   const workPolicy = ref<Record<string, unknown>>({})
+  const schedules = ref<ScheduledTask[]>([])
+  const scheduleStats = ref<ScheduleListResponse['stats']>({})
   const loading = ref(false)
   const lastError = ref('')
 
-  const persistentRoles = computed(() => roles.value.filter((role) => role.scope !== 'temporary'))
+  // 默认兜底角色「通用助手」和全局 AtlasX 不进入普通角色视图 / 在线角色栏。
+  const persistentRoles = computed(() => roles.value.filter(
+    (role) => role.scope !== 'temporary' && role.id !== 'default' && role.id !== 'global-agent',
+  ))
   const activeWorkspaces = computed(() => workspaces.value.filter((workspace) => !workspace.archived))
   const archivedWorkspaces = computed(() => workspaces.value.filter((workspace) => workspace.archived))
 
@@ -113,6 +120,38 @@ export const useDataStore = defineStore('data', () => {
     }
   }
 
+  async function loadSchedules(): Promise<void> {
+    try {
+      const next = await api<ScheduleListResponse>('/schedules')
+      const items = next.items || []
+      if (JSON.stringify(items) !== JSON.stringify(schedules.value)) schedules.value = items
+      if (JSON.stringify(next.stats || {}) !== JSON.stringify(scheduleStats.value)) {
+        scheduleStats.value = next.stats || {}
+      }
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  async function loadConversations(): Promise<void> {
+    try {
+      const result = await api<ListResponse<Conversation>>('/conversations?limit=80')
+      const items = result.items || []
+      if (JSON.stringify(conversations.value) !== JSON.stringify(items)) conversations.value = items
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  async function loadRoles(): Promise<void> {    try {
+      const result = await api<ListResponse<Role>>('/roles')
+      const items = result.items || []
+      if (JSON.stringify(roles.value) !== JSON.stringify(items)) roles.value = items
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : String(error)
+    }
+  }
+
   async function loadInfo(): Promise<void> {
     try {
       info.value = await api<AppInfo>('/app/info')
@@ -148,13 +187,18 @@ export const useDataStore = defineStore('data', () => {
     workPolicy,
     loading,
     lastError,
+    schedules,
+    scheduleStats,
     persistentRoles,
     activeWorkspaces,
     archivedWorkspaces,
     roleAvatarMap,
     roleAvatar,
     loadAll,
+    loadRoles,
+    loadConversations,
     loadWork,
+    loadSchedules,
     loadInfo,
     refreshConversation,
     activateModel,

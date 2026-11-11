@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ElButton } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 import AvatarField from '@/components/AvatarField.vue'
 import SideDrawer from '@/components/SideDrawer.vue'

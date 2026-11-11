@@ -1,10 +1,14 @@
 <script setup lang="ts">
+import { ElButton } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 import Avatar from '@/components/Avatar.vue'
+import ListPager from '@/components/ListPager.vue'
 import Markdown from '@/components/chat/Markdown.vue'
 import Modal from '@/components/Modal.vue'
+import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
 import type { Role, Skill, ToolItem } from '@/api/types'
+import { DEFAULT_PAGE_SIZE, pageSlice } from '@/lib/paging'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -26,6 +30,9 @@ const skillsLoading = ref(false)
 const deleting = ref(false)
 const workspaceSaving = ref(false)
 const workspaceDraft = ref('')
+interface ScopeGrant { id: string; tool: string; scope?: string; created_at?: string }
+const grants = ref<ScopeGrant[]>([])
+const grantsLoading = ref(false)
 
 const skillOpen = ref(false)
 const skillSaving = ref(false)
@@ -48,6 +55,27 @@ const toolNames = computed(() => {
 })
 const roleTools = computed(() => props.role?.tools || [])
 
+// 角色详情的工具 / 授权 / 技能都可能超过 12 条，统一按每页 12 条分页。
+const toolPage = ref(1)
+const grantPage = ref(1)
+const skillPage = ref(1)
+const mergePage = ref(1)
+const pagedRoleTools = computed(
+  () => pageSlice(roleTools.value, toolPage.value, DEFAULT_PAGE_SIZE),
+)
+const pagedGrants = computed(
+  () => pageSlice(grants.value, grantPage.value, DEFAULT_PAGE_SIZE),
+)
+const pagedSkills = computed(
+  () => pageSlice(skills.value, skillPage.value, DEFAULT_PAGE_SIZE),
+)
+const pagedMergeSkills = computed(
+  () => pageSlice(skills.value, mergePage.value, DEFAULT_PAGE_SIZE),
+)
+watch(roleTools, () => { toolPage.value = 1 })
+watch(grants, () => { grantPage.value = 1 })
+watch(skills, () => { skillPage.value = 1; mergePage.value = 1 })
+
 function toolName(code: string): string {
   return toolNames.value.get(code) || code
 }
@@ -56,6 +84,7 @@ watch(() => [props.open, props.role?.id], () => {
   if (!props.open || !props.role) return
   workspaceDraft.value = String(props.role.workspace_id || '')
   skills.value = []
+  void loadGrants(props.role.id)
   void loadSkills(props.role.id)
   if (!toolsLoaded.value) void loadTools()
 }, { immediate: true })
@@ -75,6 +104,29 @@ async function loadTools(): Promise<void> {
   }
 }
 
+async function loadGrants(roleId: string): Promise<void> {
+  grantsLoading.value = true
+  try {
+    const out = await api<{ items: ScopeGrant[] }>(
+      `/app/permissions/grants?role_id=${encodeURIComponent(roleId)}`)
+    if (props.role?.id === roleId) grants.value = out.items || []
+  } catch {
+    if (props.role?.id === roleId) grants.value = []
+  } finally {
+    grantsLoading.value = false
+  }
+}
+
+async function revokeGrant(grantId: string): Promise<void> {
+  try {
+    await api(`/app/permissions/grants/${encodeURIComponent(grantId)}`, { method: 'DELETE' })
+    if (props.role?.id) await loadGrants(props.role.id)
+    app.toast('永久授权已撤销')
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  }
+}
+
 async function loadSkills(roleId: string): Promise<void> {
   skillsLoading.value = true
   try {
@@ -88,12 +140,13 @@ async function loadSkills(roleId: string): Promise<void> {
   }
 }
 
-async function switchWorkspace(event: Event): Promise<void> {
+async function switchWorkspace(value?: string): Promise<void> {
   const role = props.role
   if (!role || workspaceSaving.value) return
-  const wsId = (event.target as HTMLSelectElement).value
+  const wsId = String(value || '')
   const previous = String(role.workspace_id || '')
   if (wsId === previous) return
+  workspaceDraft.value = wsId
   workspaceSaving.value = true
   try {
     await api(`/roles/${encodeURIComponent(role.id)}`, {
@@ -288,20 +341,15 @@ async function removeRole(): Promise<void> {
             <div class="role-line mono">模型：{{ role.model_code || '未指定' }}</div>
             <div class="role-line role-ws-line">
               <span>工作区</span>
-              <select
-                class="role-ws-select"
-                :value="workspaceDraft"
+              <WorkspacePicker
+                :model-value="workspaceDraft"
+                :workspaces="data.workspaces"
                 :disabled="workspaceSaving"
+                empty-label="默认工作区（不绑定）"
+                placeholder="默认工作区（不绑定）"
                 :title="workspaceSaving ? '正在切换工作区…' : '直接切换角色绑定的工作区'"
-                @change="switchWorkspace"
-              >
-                <option value="">默认工作区（不绑定）</option>
-                <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
-                <option
-                  v-if="workspaceDraft && !data.activeWorkspaces.some((ws) => ws.id === workspaceDraft)"
-                  :value="workspaceDraft"
-                >{{ workspaceName(workspaceDraft) }}（已归档）</option>
-              </select>
+                @update:model-value="switchWorkspace"
+              />
               <span v-if="workspaceSaving" class="role-line">切换中…</span>
             </div>
           </div>
@@ -321,9 +369,38 @@ async function removeRole(): Promise<void> {
             <span>{{ roleTools.length ? `${roleTools.length} 个工具` : '全部工具' }}</span>
           </div>
           <div class="chips">
-            <span v-for="code in roleTools" :key="code" class="chip" :title="code">{{ toolName(code) }}</span>
+            <span v-for="code in pagedRoleTools" :key="code" class="chip" :title="code">{{ toolName(code) }}</span>
             <span v-if="!roleTools.length" class="chip">全部工具</span>
           </div>
+          <ListPager
+            :page="toolPage"
+            :total="roleTools.length"
+            :page-size="DEFAULT_PAGE_SIZE"
+            @update:page="toolPage = $event"
+          />
+        </section>
+
+        <section class="group-section">
+          <div class="group-section-head">
+            <h3>永久工具授权</h3>
+            <span>{{ grantsLoading ? '加载中…' : (grants.length ? `${grants.length} 条` : '未设置') }}</span>
+          </div>
+          <div v-if="grants.length" class="grant-list">
+            <div v-for="grant in pagedGrants" :key="grant.id" class="grant-row">
+              <span class="grant-main">
+                <b>{{ toolName(grant.tool) }}</b>
+                <small>{{ grant.tool }}</small>
+              </span>
+              <button class="iconbtn" type="button" title="撤销永久授权" aria-label="撤销永久授权" @click="revokeGrant(grant.id)">×</button>
+            </div>
+          </div>
+          <div v-else class="group-empty">在审批弹窗里选「永久（本角色）」后会出现在这里，跨会话生效。</div>
+          <ListPager
+            :page="grantPage"
+            :total="grants.length"
+            :page-size="DEFAULT_PAGE_SIZE"
+            @update:page="grantPage = $event"
+          />
         </section>
 
         <section class="group-section">
@@ -335,7 +412,7 @@ async function removeRole(): Promise<void> {
             只属于「{{ role.name || '当前角色' }}」；其他角色看不到，也不会出现在它们的技能清单里。可通过文件、图片、网页搜索等材料整理后创建。
           </p>
           <div class="role-skill-list">
-            <div v-for="skill in skills" :key="skill.id" class="role-skill-row">
+            <div v-for="skill in pagedSkills" :key="skill.id" class="role-skill-row">
               <div class="role-skill-main">
                 <b>{{ skill.name }}</b>
                 <span>{{ skill.description || '无描述' }}</span>
@@ -344,6 +421,12 @@ async function removeRole(): Promise<void> {
             </div>
             <div v-if="!skills.length && !skillsLoading" class="group-empty">还没有专属技能</div>
           </div>
+          <ListPager
+            :page="skillPage"
+            :total="skills.length"
+            :page-size="DEFAULT_PAGE_SIZE"
+            @update:page="skillPage = $event"
+          />
           <div class="avatar-actions">
             <button class="btn small" type="button" @click="openSkillEditor">新建专属技能</button>
             <button class="btn small" type="button" :disabled="skills.length < 2" @click="openMerge">合并所选…</button>
@@ -400,11 +483,17 @@ async function removeRole(): Promise<void> {
       <div class="field">
         <label>选择要合并的技能（至少 2 个）</label>
         <div class="role-skill-picker">
-          <label v-for="skill in skills" :key="skill.id" class="role-skill-choice">
+          <label v-for="skill in pagedMergeSkills" :key="skill.id" class="role-skill-choice">
             <input type="checkbox" :checked="mergePicked.includes(skill.id)" @change="toggleMerge(skill.id)" />
             <span>{{ skill.name }}<small>{{ skill.description || '' }}</small></span>
           </label>
         </div>
+        <ListPager
+          :page="mergePage"
+          :total="skills.length"
+          :page-size="DEFAULT_PAGE_SIZE"
+          @update:page="mergePage = $event"
+        />
       </div>
       <div class="field">
         <label>合并后的名称</label>

@@ -8,7 +8,16 @@ import type {
   QueueResponse,
   RunEvent,
   RunStartResponse,
+  TokenUsage,
 } from '@/api/types'
+import {
+  expectedSpeaker,
+  findPerson,
+  REVEAL_INTERVAL_MS,
+  revealStep,
+  speakerOf,
+  type LiveSpeaker,
+} from '@/lib/live'
 import type { ProcessEntry } from '@/lib/trace'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
@@ -16,6 +25,10 @@ import { useDataStore } from '@/stores/data'
 export interface LiveEntry extends ProcessEntry {
   key: string
   closed?: boolean
+  /** 这条轨迹属于哪个发言角色（群聊一轮里会有多个）。 */
+  speaker?: string
+  /** 已经收到、但还没被「打字机」推出来的全文（text 是当前已展示的部分）。 */
+  full?: string
 }
 
 export interface TaskItem {
@@ -65,10 +78,15 @@ export function useChat() {
   const streaming = ref(false)
   const runId = ref('')
   const error = ref('')
-  const roleName = ref('助手')
-  const roleAvatar = ref('')
-  const roleSub = ref('')
+  // 本轮发言者：`speakers` 记每个角色的展示信息，`speakerId` 是当前正在说的那个。
+  // 群聊一轮里会有多个角色，流式轨迹按 speaker 分组渲染（见 LiveMessage）。
+  const speakers = ref<Record<string, LiveSpeaker>>({})
+  const speakerId = ref('')
+  const liveStarted = ref(false)
   const cursor = ref(0)
+  // 运行中这一轮的实时用量：库里只统计已结束的轮次，这里叠加当轮快照。
+  const liveUsage = ref<TokenUsage | null>(null)
+  const contextTokens = ref(0)
 
   let source: EventSource | null = null
   let entrySeq = 0
@@ -79,15 +97,142 @@ export function useChat() {
     return `live-${entrySeq}`
   }
 
+  // ── 打字机平滑 ────────────────────────────────────────────────
+  // 上游经常「静默几秒 → 一次吐一大段」，直接渲染就是整块闪出。这里把收到的
+  // 全文放进 entry.full，按固定节拍把字符推进 entry.text（真正渲染的部分）：
+  // 小段跟得上，大段在约 0.5s 内追平，观感稳定。
+  let revealTimer: number | null = null
+
+  function stopReveal(): void {
+    if (revealTimer) {
+      window.clearTimeout(revealTimer)
+      revealTimer = null
+    }
+  }
+
+  function scheduleReveal(): void {
+    if (revealTimer) return
+    revealTimer = window.setTimeout(revealTick, REVEAL_INTERVAL_MS)
+  }
+
+  function revealTick(): void {
+    revealTimer = null
+    let more = false
+    for (const entry of entries.value) {
+      if (entry.kind !== 'text' && entry.kind !== 'thinking') continue
+      const full = String(entry.full || '')
+      const shown = String(entry.text || '')
+      if (full.length <= shown.length) continue
+      entry.text = full.slice(0, shown.length + revealStep(full.length - shown.length))
+      more = true
+    }
+    if (more) scheduleReveal()
+  }
+
+  function revealBacklog(): number {
+    let total = 0
+    for (const entry of entries.value) {
+      if (entry.kind !== 'text' && entry.kind !== 'thinking') continue
+      total += Math.max(0, String(entry.full || '').length - String(entry.text || '').length)
+    }
+    return total
+  }
+
+  /** 收尾时等打字机把最后一段放完（有上限），避免「刚打到一半整段跳出」。 */
+  async function drainReveal(maxMs = 700): Promise<void> {
+    const deadline = Date.now() + maxMs
+    while (revealBacklog() > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, REVEAL_INTERVAL_MS))
+    }
+  }
+
+  // ── 首字等待计时 ──────────────────────────────────────────────
+  // 模型首 token 可能等好几秒；把「等了多久」显示出来，比一个静态的「正在思考」
+  // 更不容易被当成卡死。
+  const waitSeconds = ref(0)
+  let waitTimer: number | null = null
+  let waitSince = 0
+
+  function stopWaitClock(): void {
+    if (waitTimer) {
+      window.clearInterval(waitTimer)
+      waitTimer = null
+    }
+  }
+
+  function startWaitClock(): void {
+    if (waitTimer) return
+    waitSince = Date.now()
+    waitSeconds.value = 0
+    waitTimer = window.setInterval(() => {
+      if (!streaming.value) {
+        stopWaitClock()
+        return
+      }
+      waitSeconds.value = Math.max(0, Math.floor((Date.now() - waitSince) / 1000))
+      const hasContent = entries.value.some((entry) =>
+        (entry.kind === 'text' || entry.kind === 'thinking')
+        && String(entry.full || entry.text || '').length > 0)
+      if (hasContent) stopWaitClock()
+    }, 1000)
+  }
+
   function resetLive(): void {
     entries.value = []
     tasks.value = []
     error.value = ''
+    liveUsage.value = null
+    contextTokens.value = 0
+    speakers.value = {}
+    speakerId.value = ''
+    liveStarted.value = false
+    waitSeconds.value = 0
+    stopWaitClock()
+    stopReveal()
+  }
+
+  /**
+   * start 事件到达前，先把气泡挂到「这一轮最可能开口的角色」上。
+   *
+   * 以前这里留空，LiveMessage 就退回兜底的「助手」，等服务端把身份事件送上来
+   * 才换成真实角色——群聊里看起来就是「先显示助手，再变成指定 / 通用角色」。
+   * 现在一发送就按会话绑定（群组主持 / 被 @ 的成员 / 角色）预置身份，之后由
+   * start 事件纠正。
+   */
+  function primeSpeaker(mentions: string[] = []): void {
+    const expected = expectedSpeaker(conversation.value, data.teams, data.roles, mentions)
+    if (!expected) return
+    const key = expected.id || 'pending'
+    speakers.value = {
+      [key]: { ...expected, avatar: data.roleAvatar(expected.id, expected.avatar) },
+    }
+    speakerId.value = key
   }
 
   function userQueue(items?: Array<{ id: string; content?: string; title?: string; target_role_id?: string }>): Array<{ id: string; content?: string; title?: string }> {
     // 团队成员的后台并行 run 不属于用户排队消息；只在执行画布里展示。
     return (items || []).filter((item) => !item.target_role_id)
+  }
+
+  /** 打开一条还没有后端记录的草稿会话：先只展示角色和空对话。 */
+  function beginDraft(roleId: string, workspaceId = ''): void {
+    closeStream()
+    loading.value = false
+    error.value = ''
+    conversation.value = {
+      id: '',
+      role_id: roleId,
+      workspace_id: workspaceId || undefined,
+    }
+    messages.value = []
+    entries.value = []
+    tasks.value = []
+    approvals.value = []
+    questions.value = []
+    queue.value = []
+    resetLive()
+    primeSpeaker()
+    clearAttachments()
   }
 
   async function open(id: string): Promise<void> {
@@ -99,6 +244,7 @@ export function useChat() {
       conversation.value = conv
       messages.value = conv.messages || []
       resetLive()
+      primeSpeaker()
       clearAttachments()
       queue.value = []
       await loadPending()
@@ -164,6 +310,9 @@ export function useChat() {
     const files = pendingAttachments.value.slice()
     if (!content && !files.length) return false
     const convId = conversation.value.id
+    // 正在生成时再发送 = 入队：不打断当前回复，也不切换直播流。
+    // 当前 run 结束后 worker 自动认领队列，pollQueue 再把流接到下一条。
+    const enqueue = streaming.value
     const optimisticId = `local-${Date.now()}`
     messages.value.push({
       id: optimisticId,
@@ -178,9 +327,11 @@ export function useChat() {
         url: item.preview,
       })),
     })
-    resetLive()
+    if (!enqueue) {
+      streaming.value = true
+      startWaitClock()
+    }
     sending.value = true
-    streaming.value = true
     try {
       const attachmentPayloads = []
       for (const item of files) {
@@ -207,17 +358,28 @@ export function useChat() {
       )
       clearAttachments()
       queue.value = userQueue(run.queue)
-      if (queue.value.length) scheduleQueuePoll()
-      runId.value = run.id
-      openStream(run.id)
+      if (queue.value.length || enqueue) scheduleQueuePoll()
+      if (enqueue) {
+        // 已排在当前 run 后面：保持现有直播流不动，队列条会即时显示。
+        app.toast('当前回复结束后执行（可在队列条上插队）', 'ok', 2600)
+      } else {
+        runId.value = run.id
+        openStream(run.id)
+        primeSpeaker(mentionsOf(content))
+      }
       return true
     } catch (err) {
       messages.value = messages.value.filter((message) => message.id !== optimisticId)
-      streaming.value = false
-      sending.value = false
+      if (!enqueue) {
+        streaming.value = false
+        resetLive()
+      }
       error.value = err instanceof Error ? err.message : String(err)
       app.toast(error.value, 'bad', 5000)
       return false
+    } finally {
+      // sending 只表示「这次 HTTP 提交还没回来」；流式期间也允许继续入队。
+      sending.value = false
     }
   }
 
@@ -315,6 +477,32 @@ export function useChat() {
         body: { direction },
       })
       await pollQueue()
+    } catch (err) {
+      app.toast(err instanceof Error ? err.message : String(err), 'bad')
+    }
+  }
+
+  /** 插队 = 停止当前回复，并让这条排队消息成为下一轮（后端 /queue/{id}/inject）。 */
+  async function injectQueued(id: string): Promise<void> {
+    if (!conversation.value) return
+    const convId = conversation.value.id
+    try {
+      await api(`/conversations/${encodeURIComponent(convId)}/queue/${encodeURIComponent(id)}/inject`, {
+        method: 'POST',
+      })
+      closeStream()
+      streaming.value = false
+      sending.value = false
+      runId.value = ''
+      resetLive()
+      // 被停止的这一轮已由后端收尾落库：重读转录，再交给队列轮询接上新的流。
+      const conv = await api<Conversation>(`/conversations/${encodeURIComponent(convId)}`)
+      if (conversation.value?.id === convId) {
+        conversation.value = conv
+        messages.value = conv.messages || []
+      }
+      await pollQueue()
+      app.toast('已停止当前回复，插队消息即将执行', 'ok', 2600)
     } catch (err) {
       app.toast(err instanceof Error ? err.message : String(err), 'bad')
     }
@@ -428,9 +616,12 @@ export function useChat() {
 
   function openStream(id: string): void {
     closeStream()
+    // 新的 run = 新的直播区：队列里下一条开始时，不能把上一轮的实时输出带进来。
+    resetLive()
     runId.value = id
     cursor.value = 0
     streaming.value = true
+    startWaitClock()
     const es = new EventSource(sseUrl(`/runs/${encodeURIComponent(id)}/stream?since=0`))
     source = es
 
@@ -467,11 +658,19 @@ export function useChat() {
 
   async function finishRun(): Promise<void> {
     if (!conversation.value) return
+    const convId = conversation.value.id
+    // 先把直播区的打字机放完（最多几百毫秒），再切换成落库消息：
+    // 否则最后一段会「啪」地整块跳出，又变回不稳定的观感。
+    await drainReveal()
+    // 等待期间可能已经切了会话：不要用旧会话的结果覆盖当前界面。
+    if (!conversation.value || conversation.value.id !== convId) return
     try {
-      const conv = await api<Conversation>(`/conversations/${encodeURIComponent(conversation.value.id)}`)
+      const conv = await api<Conversation>(`/conversations/${encodeURIComponent(convId)}`)
       conversation.value = conv
+      // 即使队列里的下一条已经开始（streaming=true），也要把刚结束这轮的落库
+      // 消息补进来；只是不能清掉新一轮的直播条目。
       messages.value = conv.messages || []
-      resetLive()
+      if (!streaming.value) resetLive()
       await loadPending()
     } catch {
       /* keep the live transcript if reload fails */
@@ -489,11 +688,23 @@ export function useChat() {
 
   function applyEvent(evt: RunEvent): void {
     if (evt.start) {
-      roleName.value = evt.role_name || '助手'
-      const role = data.roles.find((item) => item.id === evt.role_id)
-      // 群组里的临时角色 / 成员不在 /roles 列表里，头像按 role_id 从团队来源兜底。
-      roleAvatar.value = data.roleAvatar(evt.role_id, role?.avatar || '')
-      roleSub.value = role ? [role.title, role.department].filter(Boolean).join(' · ') : ''
+      const id = String(evt.role_id || '')
+      // 群组里的临时角色 / 成员不在 /roles 列表里：名字用事件里的快照，
+      // 头像 / 职务再从团队来源兜底。
+      const person = findPerson(data.roles, data.teams, id)
+      const meta = speakerOf(person, String(evt.role_name || '').trim() || '助手')
+      const key = id || 'default'
+      speakers.value = {
+        ...speakers.value,
+        [key]: {
+          id,
+          name: String(evt.role_name || '').trim() || meta.name,
+          avatar: data.roleAvatar(id, meta.avatar),
+          sub: meta.sub,
+        },
+      }
+      speakerId.value = key
+      liveStarted.value = true
       return
     }
     if (evt.thinking !== undefined) {
@@ -525,6 +736,7 @@ export function useChat() {
           ok: true,
           args: call.args,
           display: call.display,
+          speaker: speakerId.value,
         })
       }
       return
@@ -550,9 +762,16 @@ export function useChat() {
           duration_ms: result.duration_ms,
           args: result.args,
           display: result.display,
+          speaker: speakerId.value,
         })
       }
       return
+    }
+    // 后端每轮模型请求后推一次累计快照（输入 / 输出 / 缓存 / 速度）；收尾的
+    // done 事件也带 usage/context_tokens，所以这里**不能 return**，要继续走 done 分支。
+    if (evt.usage) liveUsage.value = evt.usage
+    if (evt.context_tokens !== undefined) {
+      contextTokens.value = Number(evt.context_tokens) || 0
     }
     if (evt.todo_update) {
       tasks.value = evt.todo_update.items || []
@@ -588,16 +807,24 @@ export function useChat() {
       if (content) {
         const last = entries.value[entries.value.length - 1]
         if (last && last.kind === 'text' && !last.final) {
-          last.text = content
+          // 定稿：正文以这里为准，但**不打断打字机**——最后一段继续按拍推进，
+          // run_end 收尾时会等它放完再换成落库消息。只有后端正文和已输出的
+          // 前缀对不上（裁剪 / 改写）时才直接跳过去。
+          const shown = String(last.text || '')
+          last.full = content
+          if (shown && !content.startsWith(shown)) last.text = content
           last.final = true
           last.round = evt.round
+          if (String(last.text || '').length < content.length) scheduleReveal()
         } else {
           entries.value.push({
             key: newKey(),
             kind: 'text',
             text: content,
+            full: content,
             final: true,
             round: evt.round,
+            speaker: speakerId.value,
           })
         }
       }
@@ -605,15 +832,22 @@ export function useChat() {
     if (evt.org_update || evt.role_update || evt.app_update) {
       void data.loadAll()
     }
+    if (evt.schedule_update) {
+      void data.loadSchedules()
+    }
   }
 
   function appendText(kind: 'thinking' | 'text', piece: string, round?: number): void {
     const last = entries.value[entries.value.length - 1]
-    if (last && last.kind === kind && last.round === round && !last.closed) {
-      last.text = `${last.text || ''}${piece}`
-      return
+    if (last && last.kind === kind && last.round === round && last.speaker === speakerId.value
+      && !last.closed) {
+      last.full = `${last.full ?? last.text ?? ''}${piece}`
+    } else {
+      entries.value.push({
+        key: newKey(), kind, text: '', full: piece, round, speaker: speakerId.value,
+      })
     }
-    entries.value.push({ key: newKey(), kind, text: piece, round })
+    scheduleReveal()
   }
 
   async function decideApproval(id: string, action: string): Promise<void> {
@@ -650,6 +884,8 @@ export function useChat() {
 
   function dispose(): void {
     closeStream()
+    stopReveal()
+    stopWaitClock()
     if (queueTimer) {
       window.clearTimeout(queueTimer)
       queueTimer = null
@@ -672,10 +908,14 @@ export function useChat() {
     streaming,
     runId,
     error,
-    roleName,
-    roleAvatar,
-    roleSub,
+    speakers,
+    speakerId,
+    liveStarted,
+    waitSeconds,
+    liveUsage,
+    contextTokens,
     open,
+    beginDraft,
     send,
     stop,
     decideApproval,
@@ -685,12 +925,14 @@ export function useChat() {
     removeAttachment,
     clearAttachments,
     moveQueued,
+    injectQueued,
     cancelQueued,
     compact,
     clearContext,
     cleanConversation,
     continueTask,
     pollQueue,
+    resumeRunning,
     dispose,
   }
 }

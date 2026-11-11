@@ -39,3 +39,16 @@ export function hueOf(value: string): number {
   for (let i = 0; i < s.length; i += 1) n = (n * 31 + s.charCodeAt(i)) >>> 0
   return n % 360
 }
+
+/** token 数量紧凑显示：1200 → 1.2k，12500 → 12.5k，1234567 → 1.2M。 */
+export function compactNumber(value?: number | null): string {
+  const n = Number(value || 0)
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n < 1000) return String(Math.round(n))
+  if (n < 100_000) {
+    const text = (n / 1000).toFixed(1)
+    return `${text.endsWith('.0') ? text.slice(0, -2) : text}k`
+  }
+  if (n < 1_000_000) return `${Math.round(n / 1000)}k`
+  return `${(n / 1_000_000).toFixed(1)}M`
+}

@@ -40,6 +40,12 @@ if [ ! -f "$ROOT/desktop/Atlas.icns" ]; then
 fi
 
 rm -rf "$ROOT/build/desktop" "$ROOT/dist/AtlasX.app" "$ROOT/dist/AtlasX"
+
+# PyInstaller 默认把缓存写到 ~/Library/Application Support/pyinstaller；
+# 沙箱 / CI / 只读 HOME 下会直接 PermissionError。统一放到仓库 build 下，
+# 既避免权限问题，也让缓存随仓库清理。
+export PYINSTALLER_CONFIG_DIR="${PYINSTALLER_CONFIG_DIR:-$ROOT/build/pyinstaller-cache}"
+
 "$PY" -m PyInstaller \
   --noconfirm --clean \
   --distpath "$ROOT/dist" \
