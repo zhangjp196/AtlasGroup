@@ -155,7 +155,7 @@ async function switchWorkspace(value?: string): Promise<void> {
     })
     await data.loadAll()
     emit('saved')
-    app.toast(wsId ? `工作区已切换为「${workspaceName(wsId)}」` : '已改为默认工作区')
+    app.toast(wsId ? `工作区已切换为「${workspaceName(wsId)}」` : '已改为无工作区')
   } catch (error) {
     workspaceDraft.value = previous
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
@@ -166,7 +166,7 @@ async function switchWorkspace(value?: string): Promise<void> {
 
 function workspaceName(id?: string): string {
   const wsId = String(id || '')
-  return data.workspaces.find((ws) => ws.id === wsId)?.name || '默认工作区'
+  return data.workspaces.find((ws) => ws.id === wsId)?.name || '无工作区'
 }
 
 function close(): void {
@@ -345,8 +345,8 @@ async function removeRole(): Promise<void> {
                 :model-value="workspaceDraft"
                 :workspaces="data.workspaces"
                 :disabled="workspaceSaving"
-                empty-label="默认工作区（不绑定）"
-                placeholder="默认工作区（不绑定）"
+                empty-label="无工作区"
+                placeholder="无工作区"
                 :title="workspaceSaving ? '正在切换工作区…' : '直接切换角色绑定的工作区'"
                 @update:model-value="switchWorkspace"
               />

@@ -6,7 +6,6 @@ import logging
 import json
 import os
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -16,7 +15,7 @@ from pydantic import BaseModel, Field
 from services.agent_zero.config import get_settings
 from services.agent_zero.database import get_db_path
 from services.agent_zero.services import backup_service, diagnostics_service, metrics_service
-from services.agent_zero.stores import settings_store, zero_store
+from services.agent_zero.stores import settings_store
 from services.agent_zero.version import APP_NAME, APP_VERSION
 from services.shared.project_paths import get_project_root
 
@@ -593,9 +592,6 @@ def _llm_view() -> Dict[str, Any]:
 def app_info(request: Request):
     settings = get_settings()
     root = str(get_project_root())
-    ws = zero_store.get_workspace(zero_store.DEFAULT_WORKSPACE_ID) or {}
-    default_root = str(Path(ws.get("root_path")).expanduser().resolve()) if ws.get("root_path") else ""
-    chat_only = not default_root
     return {"code": 0, "data": {
         "name": APP_NAME,
         "version": APP_VERSION,
@@ -604,16 +600,6 @@ def app_info(request: Request):
         "url": str(request.base_url).rstrip("/"),
         "config_path": os.path.relpath(_config_path(), root),
         "db_path": os.path.relpath(get_db_path(), root),
-        "workspace": {
-            "id": ws.get("id") or zero_store.DEFAULT_WORKSPACE_ID,
-            "name": ws.get("name") or "Workspace",
-            "root_path": default_root,
-            "chat_only": chat_only,
-            "managed": chat_only,
-            "archived": bool(ws.get("archived")),
-            "is_default": True,
-            "conversation_count": 0,
-        },
         "llm": _llm_view(),
         "limits": {
             "max_concurrent_runs": settings.max_concurrent_conversation_runs,
@@ -621,8 +607,8 @@ def app_info(request: Request):
             "context_compress_percent": settings.context_compress_percent,
             "autonomous_run_max_seconds": settings.autonomous_run_max_seconds,
         },
-        "tools": _tool_names(has_working_dir=not chat_only),
-        "tool_catalog": _tool_catalog(has_working_dir=not chat_only),
+        "tools": _tool_names(),
+        "tool_catalog": _tool_catalog(),
     }}
 
 

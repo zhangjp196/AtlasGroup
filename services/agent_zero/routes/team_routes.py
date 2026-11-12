@@ -43,7 +43,7 @@ class RoleSpecBody(BaseModel):
 
 
 class TeamCreateBody(BaseModel):
-    # 群组绑定一个工作区（默认工作区）；工作区提供文件 / 终端上下文。
+    # 群组可独立绑定工作区。
     workspace_id: Optional[str] = Field(None, max_length=80)
     name: str = Field(..., min_length=1, max_length=120)
     avatar: Optional[str] = Field(None, max_length=500)

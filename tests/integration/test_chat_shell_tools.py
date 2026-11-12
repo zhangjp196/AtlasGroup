@@ -86,3 +86,18 @@ def test_shell_and_fs_run_in_chat_workspace(client, app_env, monkeypatch):
     assert (workspace_service.exec_root(ws_id) / "note.txt").is_file()
     # workspace（中间存储）在纯聊天工作区不可用
     assert "workspace" in str(middle.get("error") or "")
+
+
+def test_conversation_without_workspace_omits_local_tools(client):
+    conv = conversation.create_conversation("", "local", role_id="default")
+    envelope = {"tools": list(registry.known_codes())}
+    specs = conversation._chat_tool_specs(envelope, None, False, conv["workspace_id"])
+    names = {spec["function"]["name"] for spec in specs}
+    assert {"net", "plan", "ask_user"} <= names
+    assert not ({"shell", "fs", "workspace"} & names)
+
+    result = asyncio.run(ToolDispatcher()._dispatch(
+        conv, {"zero": {"envelope": envelope}}, {},
+        {"name": "fs", "arguments": {"op": "list", "path": "."}},
+    ))
+    assert result == {"error": "请先为会话绑定工作区"}

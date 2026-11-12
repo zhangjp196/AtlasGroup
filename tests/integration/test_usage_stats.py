@@ -115,10 +115,7 @@ def test_work_item_usage_and_stats(client, monkeypatch):
 
 
 def test_team_task_usage_from_member_runs(client):
-    ws = client.get(f"{API}/workspaces").json()["data"]["items"]
-    workspace_id = next((w for w in ws if w.get("is_default")), ws[0])["id"]
-    conv = client.post(f"{API}/conversations",
-                       json={"workspace_id": workspace_id}).json()["data"]
+    conv = client.post(f"{API}/conversations", json={}).json()["data"]
     task = client.post(f"{API}/conversations/{conv['id']}/team-tasks",
                        json={"goal": "跑一个后台任务"}).json()["data"]
     run_id = str(task["members"][0]["run_id"])

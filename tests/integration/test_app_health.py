@@ -51,10 +51,8 @@ def test_process_panel_end_to_end(client):
     from services.agent_zero.task_layer import tool_jobs
 
     API = "/api/agent-zero"
-    ws = client.get(f"{API}/workspaces").json()["data"]["items"]
-    wid = ws[0]["id"]
     conv = client.post(f"{API}/conversations",
-                       json={"workspace_id": wid, "title": "proc-e2e"})
+                       json={"title": "proc-e2e"})
     assert conv.status_code == 200, conv.text
     cid = conv.json()["data"]["id"]
 

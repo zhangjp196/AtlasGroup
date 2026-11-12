@@ -98,7 +98,7 @@ function roleName(task: ScheduledTask): string {
 }
 
 function workspaceName(task: ScheduledTask): string {
-  return data.workspaces.find((ws) => ws.id === task.workspace_id)?.name || '默认工作区'
+  return data.workspaces.find((ws) => ws.id === task.workspace_id)?.name || '无工作区'
 }
 
 function openCreate(): void {
@@ -122,7 +122,7 @@ function openEdit(task: ScheduledTask): void {
     condition: task.condition || '',
     eval_minutes: Number(schedule.every_minutes || 30),
     role_id: task.role_id || '',
-    workspace_id: task.workspace_id || '',
+    workspace_id: data.workspaces.find((ws) => ws.id === task.workspace_id)?.id || '',
     run_mode: task.run_mode || 'chat',
     auto_execute: Boolean(task.auto_execute),
     max_runs: Number(task.max_runs || 0),
@@ -165,7 +165,7 @@ async function save(): Promise<void> {
       schedule: schedulePayload(),
       condition: form.condition.trim(),
       role_id: form.role_id || undefined,
-      workspace_id: form.workspace_id || undefined,
+      workspace_id: form.workspace_id,
       run_mode: form.run_mode,
       auto_execute: form.auto_execute,
       max_runs: Number(form.max_runs) || 0,
@@ -371,7 +371,7 @@ void data.loadSchedules()
       </div>
       <div class="field">
         <label>执行工作区</label>
-        <WorkspacePicker v-model="form.workspace_id" :workspaces="data.workspaces" empty-label="默认工作区" placeholder="默认工作区" />
+        <WorkspacePicker v-model="form.workspace_id" :workspaces="data.workspaces" empty-label="无工作区" placeholder="无工作区" />
       </div>
     </div>
 

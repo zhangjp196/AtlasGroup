@@ -222,7 +222,7 @@ function workspaceOf(conv: (typeof data.conversations)[number]): string {
 
 function workspaceName(id?: string): string {
   const wsId = String(id || '')
-  return data.workspaces.find((ws) => ws.id === wsId)?.name || '默认工作区'
+  return data.workspaces.find((ws) => ws.id === wsId)?.name || '无工作区'
 }
 
 // 会话列表显示在办工单数（角色 / 群组后台任务自动建单）。

@@ -32,7 +32,6 @@ export interface Workspace {
   chat_only?: boolean
   managed?: boolean
   archived?: boolean
-  is_default?: boolean
   conversation_count?: number
   created_at?: string
   last_conv_updated?: string
@@ -44,8 +43,6 @@ export interface Conversation {
   id: string
   title?: string
   workspace_id?: string
-  /** true = 本会话手动指定工作区，切换主持角色不会覆盖 */
-  workspace_custom?: boolean
   bound_workspace_id?: string
   team_id?: string
   role_id?: string
@@ -244,7 +241,6 @@ export interface AppInfo {
   url?: string
   config_path?: string
   db_path?: string
-  workspace?: Workspace
   llm?: {
     models?: ModelProfile[]
     subscriptions?: Subscription[]

@@ -15,7 +15,9 @@ def _env(app_env):
 
 
 def test_clean_removes_history_runs_todos_and_goals(app_env, monkeypatch):
-    ws = _env(app_env)
+    _env(app_env)
+    ws = "ws-clean"
+    zero_store.create_workspace("group", ws, "清理测试", "local")
     conv = conversation.create_conversation(ws, "local")
     conversation.send_message(conv["id"], "你好", "local")
     run = run_service.create_run(conv["id"], "local", content="你好", mode="chat")

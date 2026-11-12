@@ -26,11 +26,11 @@ def test_delete_hides_and_readd_restores(client, tmp_path):
     assert restored["archived"] is False
 
 
-def test_default_workspace_cannot_be_deleted(client):
+def test_legacy_workspace_is_not_public(client):
     from services.agent_zero.stores import zero_store
 
     resp = client.delete(f"{API}/workspaces/{zero_store.DEFAULT_WORKSPACE_ID}")
-    assert resp.status_code == 400
+    assert resp.status_code == 404
 
 
 def test_workspace_list_includes_hidden_directories(client, tmp_path):

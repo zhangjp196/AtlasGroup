@@ -10,8 +10,7 @@ def _make_conv(client, ws_id: str) -> str:
 
 
 def test_delete_all_conversations_requires_confirm(client):
-    ws = client.get(f"{API}/workspaces").json()["data"]["items"][0]
-    resp = client.delete(f"{API}/conversations", params={"workspace_id": ws["id"]})
+    resp = client.delete(f"{API}/conversations")
     assert resp.status_code == 400
     assert "confirm" in resp.text
 

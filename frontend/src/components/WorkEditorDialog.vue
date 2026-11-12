@@ -125,8 +125,8 @@ async function save(): Promise<void> {
         <WorkspacePicker
           v-model="form.workspace_id"
           :workspaces="data.workspaces"
-          empty-label="默认工作区"
-          placeholder="默认工作区"
+          empty-label="使用工单设置"
+          placeholder="使用工单设置"
         />
       </div>
       <div class="field">

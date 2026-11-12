@@ -5,9 +5,8 @@ from __future__ import annotations
 
 def _new_conversation(client):
     API = "/api/agent-zero"
-    ws = client.get(f"{API}/workspaces").json()["data"]["items"]
     conv = client.post(f"{API}/conversations",
-                       json={"workspace_id": ws[0]["id"], "title": "plan-tools"})
+                       json={"title": "plan-tools"})
     assert conv.status_code == 200, conv.text
     return conv.json()["data"]["id"]
 

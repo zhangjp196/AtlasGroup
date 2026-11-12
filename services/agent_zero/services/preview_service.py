@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import html
 import logging
+import mimetypes
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
+from services.agent_zero.services import document_service
 from services.agent_zero.services.workspace_service import (
     WorkspacePathError,
     resolve_workspace_path,
@@ -341,10 +343,16 @@ def preview_file(ws_id: str, rel_path: str) -> Dict[str, Any]:
     if not target.exists() or not target.is_file():
         raise WorkspacePathError(f"文件不存在: {rel_path}")
 
-    ext = target.suffix.lower()
+    return preview_path(target, safe_relpath(ws_id, target))
+
+
+def preview_path(target: Path, name: str) -> Dict[str, Any]:
+    ext = Path(name).suffix.lower()
     size = target.stat().st_size
+    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
     result: Dict[str, Any] = {
-        "path": safe_relpath(ws_id, target),
+        "path": name,
+        "mime": mime,
         "size": size,
         "ext": ext,
         "kind": "text",
@@ -356,7 +364,8 @@ def preview_file(ws_id: str, rel_path: str) -> Dict[str, Any]:
     }
 
     if ext in HTML_EXT or ext in SVG_EXT:
-        data = target.read_bytes()[:MAX_PREVIEW_BYTES]
+        with target.open("rb") as stream:
+            data = stream.read(MAX_PREVIEW_BYTES)
         text = data.decode("utf-8", errors="replace")
         result["kind"] = "html"
         result["render"] = "iframe"
@@ -384,6 +393,15 @@ def preview_file(ws_id: str, rel_path: str) -> Dict[str, Any]:
         result["truncated"] = rows_cut or len(plain) > MAX_TEXT_CHARS
         return result
 
+    if ext in document_service.LEGACY_OFFICE_EXT:
+        try:
+            text = document_service.extract_text(target)
+        except document_service.DocumentError:
+            result.update(kind="binary", note_key="preview.unavailable")
+        else:
+            result.update(kind="office", text=text[:MAX_TEXT_CHARS], truncated=len(text) > MAX_TEXT_CHARS)
+        return result
+
     if ext in IMAGE_EXT:
         result["kind"] = "image"
         result["render"] = "image"
@@ -394,8 +412,14 @@ def preview_file(ws_id: str, rel_path: str) -> Dict[str, Any]:
         result["render"] = "pdf"
         return result
 
+    if mime.startswith(("video/", "audio/")):
+        result["kind"] = mime.split("/", 1)[0]
+        result["render"] = result["kind"]
+        return result
+
     # 其它文件：能按文本读出来的就读，读不出来的提示下载。
-    data = target.read_bytes()[:MAX_PREVIEW_BYTES]
+    with target.open("rb") as stream:
+        data = stream.read(MAX_PREVIEW_BYTES)
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:

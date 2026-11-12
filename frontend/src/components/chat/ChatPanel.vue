@@ -13,17 +13,19 @@ import type { Conversation, SlashCommand, WorkItem } from '@/api/types'
 import { ACTION_COMMANDS } from '@/lib/commands'
 import { conversationIsSharedGroup, conversationMeta, conversationTitle, GLOBAL_AGENT_ZONE } from '@/lib/derive'
 import { compactNumber } from '@/lib/format'
+import { resolveConversationLink, type ConversationLink } from '@/lib/conversationLinks'
 import { cacheTone, mergeUsage, usageSummary } from '@/lib/usage'
 import { useChat } from '@/composables/useChat'
 import { useAppStore } from '@/stores/app'
 import { useAttentionStore } from '@/stores/attention'
-import { useChatWindowsStore, type ChatPresentation } from '@/stores/chatWindows'
+import { useChatWindowsStore, type ChatPopup, type ChatPresentation } from '@/stores/chatWindows'
 import { useDataStore } from '@/stores/data'
 import ChatTaskCenter from './ChatTaskCenter.vue'
 import ApprovalCard from './ApprovalCard.vue'
 import AskCard from './AskCard.vue'
 import Composer from './Composer.vue'
 import ConversationSettingsDrawer from './ConversationSettingsDrawer.vue'
+import LinkPreview from './LinkPreview.vue'
 import GroupSettingsDrawer from '@/components/GroupSettingsDrawer.vue'
 import GlobalInbox from './GlobalInbox.vue'
 import LiveMessage from './LiveMessage.vue'
@@ -41,6 +43,7 @@ const chat = useChat()
 const props = defineProps<{
   conversationId: string
   presentation?: ChatPresentation
+  popup?: ChatPopup
   globalAgent?: boolean
   globalConversation?: boolean
   initialTab?: 'chat' | 'inbox'
@@ -49,7 +52,7 @@ const props = defineProps<{
   draftWorkspaceId?: string
   draftTeamId?: string
 }>()
-const emit = defineEmits<{ (e: 'close'): void; (e: 'title', title: string): void; (e: 'promoted', conversationId: string): void; (e: 'update:presentation', mode: ChatPresentation): void }>()
+const emit = defineEmits<{ (e: 'close'): void; (e: 'title', title: string): void; (e: 'promoted', conversationId: string): void; (e: 'draft-workspace', workspaceId: string): void; (e: 'update:presentation', mode: ChatPresentation): void; (e: 'update:popup', popup: ChatPopup): void }>()
 const floating = computed(() => (props.presentation || 'popup') === 'popup')
 
 const BUILTIN_COMMANDS = ACTION_COMMANDS
@@ -61,6 +64,7 @@ const selectedModel = ref('')
 const perm = ref('once')
 const thinking = ref('')
 const commands = ref<SlashCommand[]>(BUILTIN_COMMANDS)
+let commandRequest = 0
 const scroller = ref<HTMLElement | null>(null)
 const msgsEl = ref<HTMLElement | null>(null)
 const stickToBottom = ref(true)
@@ -214,68 +218,8 @@ const globalTab = ref<'chat' | 'inbox'>(props.initialTab || 'chat')
 // 角标只算必须由人处理的事项：待授权 + 待回答。
 const inboxCount = computed(() => Number(attention.counts.authorizations || 0))
 watch(() => props.initialTab, (tab) => { if (tab) globalTab.value = tab })
-// 浮窗记忆：按「作用 / 组件」区分，普通会话统一一份，全局管理、全局对话各自独立。
-// 位置和尺寸都分开保存，互不覆盖。
-const memoryKey = computed(() => {
-  if (props.globalAgent) return 'global-agent'
-  if (props.globalConversation) return 'global-chat'
-  return 'session'
-})
-
-// 浮窗尺寸：右 / 下 / 右下角三处可拖拽拉伸。
-const CHAT_SIZE_KEY = 'atlasx.chat.size.v4'
-const LEGACY_CHAT_SIZE_KEY = 'atlasx.chat.size.v3'
-type ChatSize = { w: number; h: number }
-function readSizes(): Record<string, ChatSize> {
-  try {
-    const raw = JSON.parse(localStorage.getItem(CHAT_SIZE_KEY) || '{}')
-    return raw && typeof raw === 'object' ? raw : {}
-  } catch {
-    return {}
-  }
-}
-function legacySize(): ChatSize | null {
-  try {
-    const saved = JSON.parse(localStorage.getItem(LEGACY_CHAT_SIZE_KEY) || '{}')
-    if (Number.isFinite(saved.w) && Number.isFinite(saved.h)) {
-      return { w: Number(saved.w), h: Number(saved.h) }
-    }
-  } catch { /* ignore */ }
-  return null
-}
-const size = ref<ChatSize>({ w: 440, h: 640 })
-{
-  const sizes = readSizes()
-  const saved = sizes[memoryKey.value]
-    || (memoryKey.value === 'session' ? legacySize() : null)
-  if (saved && Number.isFinite(saved.w) && Number.isFinite(saved.h)) size.value = { w: saved.w, h: saved.h }
-}
-function persistSize(): void {
-  if (!floating.value) return
-  const map = readSizes()
-  map[memoryKey.value] = { w: Math.round(size.value.w), h: Math.round(size.value.h) }
-  try { localStorage.setItem(CHAT_SIZE_KEY, JSON.stringify(map)) } catch { /* ignore */ }
-}
-
-// 浮窗位置：普通会话统一使用一个位置，不按会话 / 角色区分；
-// 全局管理 / 全局对话各自记住自己的位置。每次拖动都落盘。
-const CHAT_POS_KEY = 'atlasx.chat.pos.v3'
-type ChatPos = { x: number; y: number }
-function readPositions(): Record<string, ChatPos> {
-  try {
-    const raw = JSON.parse(localStorage.getItem(CHAT_POS_KEY) || '{}')
-    return raw && typeof raw === 'object' ? raw : {}
-  } catch {
-    return {}
-  }
-}
-function clampPosition(value: ChatPos): ChatPos {
-  return {
-    x: Math.min(Math.max(8, window.innerWidth - 120), Math.max(8, value.x)),
-    y: Math.min(Math.max(8, window.innerHeight - 80), Math.max(8, value.y)),
-  }
-}
-function defaultPosition(): ChatPos {
+const size = ref({ w: props.popup?.w ?? 440, h: props.popup?.h ?? 640 })
+function defaultPosition(): Pick<ChatPopup, 'x' | 'y'> {
   const w = Math.min(size.value.w, Math.max(320, window.innerWidth - 32))
   const h = Math.min(size.value.h, Math.max(260, window.innerHeight - 40))
   const y = Math.max(8, window.innerHeight - h - 20)
@@ -285,28 +229,17 @@ function defaultPosition(): ChatPos {
   }
   return { x: Math.max(8, window.innerWidth - w - 20), y }
 }
-const pos = ref<ChatPos>(defaultPosition())
-{
-  const saved = readPositions()[memoryKey.value]
-  if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
-    pos.value = clampPosition({ x: Number(saved.x), y: Number(saved.y) })
-  }
-}
-function persistPosition(): void {
-  if (!floating.value) return
-  const map = readPositions()
-  map[memoryKey.value] = { x: Math.round(pos.value.x), y: Math.round(pos.value.y) }
-  try { localStorage.setItem(CHAT_POS_KEY, JSON.stringify(map)) } catch { /* ignore */ }
-}
-watch(memoryKey, (next) => {
-  const savedPos = readPositions()[next]
-  if (savedPos && Number.isFinite(savedPos.x) && Number.isFinite(savedPos.y)) {
-    pos.value = clampPosition({ x: Number(savedPos.x), y: Number(savedPos.y) })
-  }
-  const sizes = readSizes()
-  const savedSize = sizes[next] || (next === 'session' ? legacySize() : null)
-  if (savedSize && Number.isFinite(savedSize.w) && Number.isFinite(savedSize.h)) size.value = { w: savedSize.w, h: savedSize.h }
+const pos = ref(props.popup ? { x: props.popup.x, y: props.popup.y } : defaultPosition())
+watch(() => props.popup, (popup) => {
+  if (!popup || dragging.value || resizing.value) return
+  size.value = { w: popup.w, h: popup.h }
+  pos.value = { x: popup.x, y: popup.y }
 })
+
+function persistPopup(): void {
+  const { x, y, w, h } = popupRect.value
+  emit('update:popup', { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) })
+}
 
 const viewport = ref({ w: window.innerWidth, h: window.innerHeight })
 function updateViewport(): void {
@@ -359,8 +292,7 @@ function startResize(event: PointerEvent, edge: ResizeEdge): void {
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onEnd)
     window.removeEventListener('pointercancel', onEnd)
-    persistSize()
-    persistPosition()
+    persistPopup()
     stopResize = undefined
   }
   window.addEventListener('pointermove', onMove)
@@ -370,7 +302,7 @@ function startResize(event: PointerEvent, edge: ResizeEdge): void {
 let dragStart: { x: number; y: number; baseX: number; baseY: number } | null = null
 
 function startDrag(event: PointerEvent): void {
-  if (!floating.value) return
+  if (!floating.value || event.button !== 0) return
   const target = event.target as HTMLElement | null
   if (target?.closest('button, a, input, select, textarea, .chip')) return
   dragStart = { x: event.clientX, y: event.clientY, baseX: popupRect.value.x, baseY: popupRect.value.y }
@@ -388,16 +320,16 @@ function onDrag(event: PointerEvent): void {
     x: Math.min(maxX, Math.max(8, dragStart.baseX + event.clientX - dragStart.x)),
     y: Math.min(maxY, Math.max(8, dragStart.baseY + event.clientY - dragStart.y)),
   }
-  persistPosition()
 }
 
 function endDrag(): void {
+  if (!dragStart) return
   dragging.value = false
   dragStart = null
   window.removeEventListener('pointermove', onDrag)
   window.removeEventListener('pointerup', endDrag)
   window.removeEventListener('pointercancel', endDrag)
-  persistPosition()
+  persistPopup()
 }
 
 onMounted(() => {
@@ -478,7 +410,6 @@ const effectiveModel = computed(() => {
   const code = roleModel.value || model.value
   return code === 'default' ? data.activeModel || code : code
 })
-const followLabel = computed(() => (isGroupChat.value ? '跟随群组' : '跟随角色'))
 // 头部只留一行：去掉与标题重复的角色名，避免「陈思 · 角色：陈思 · CTO · 董事会」折成三行。
 const headerMeta = computed(() => {
   let sub = String(meta.value.sub || '')
@@ -515,37 +446,30 @@ const members = computed(() => {
   })
 })
 const queued = computed(() => chat.queue.value.filter((item) => item.id !== chat.runId.value))
-// 「跟随」时实际会使用的工作区：群组优先于角色，和创建 / 执行链路一致。
-const followWorkspace = computed(() => {
-  const conv = conversation.value
-  if (!conv) return null
-  const groupWs = String(currentGroup.value?.workspace_id || '')
-  if (groupWs) return data.workspaces.find((ws) => ws.id === groupWs) || null
-  const role = data.roles.find((item) => item.id === conv.role_id)
-  return data.workspaces.find((ws) => ws.id === String(role?.workspace_id || '')) || null
-})
+const draftWorkspace = ref('')
 const workspaceSwitching = ref(false)
 
-async function switchConversationWorkspace(wsId: string | null): Promise<void> {
+async function switchConversationWorkspace(wsId: string): Promise<void> {
+  if (isDraft.value) {
+    draftWorkspace.value = wsId
+    emit('draft-workspace', wsId)
+    await loadCommands(wsId)
+    return
+  }
   const conv = conversation.value
-  if (!conv || workspaceSwitching.value) return
-  const same = wsId
-    ? Boolean(conv.workspace_custom) && String(conv.workspace_id || '') === wsId
-    : !conv.workspace_custom
-  if (same) return
+  if (!conv || workspaceSwitching.value || (conv.workspace_id || '') === wsId) return
   workspaceSwitching.value = true
   try {
-    const body = wsId ? { workspace_id: wsId } : { workspace_follow: true }
+    const body = { workspace_id: wsId }
     const updated = await api<Conversation>(
       `/conversations/${encodeURIComponent(conv.id)}/settings`,
       { method: 'PATCH', body },
     )
     chat.conversation.value = updated
     await data.loadAll()
-    const name = wsId
-      ? data.workspaces.find((ws) => ws.id === wsId)?.name || wsId
-      : followWorkspace.value?.name || '默认工作区'
-    app.toast(wsId ? `已切换到工作区「${name}」` : `已改为跟随角色（${name}）`, 'ok', 2400)
+    await loadCommands(updated.workspace_id || '')
+    const name = data.workspaces.find((ws) => ws.id === wsId)?.name || wsId
+    app.toast(wsId ? `已绑定工作区「${name}」` : '已解除工作区绑定', 'ok', 2400)
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad', 5000)
   } finally {
@@ -642,11 +566,12 @@ async function createTempRole(): Promise<void> {
 
 watch(convId, async (id) => {
   if (isDraft.value) {
-    chat.beginDraft(props.draftRoleId || '', props.draftWorkspaceId || '', props.draftTeamId || '')
+    draftWorkspace.value = props.draftWorkspaceId || ''
+    chat.beginDraft(props.draftRoleId || '', draftWorkspace.value, props.draftTeamId || '')
     selectedModel.value = ''
     thinking.value = ''
     perm.value = normalizePerm('once')
-    await loadCommands(props.draftWorkspaceId || '')
+    await loadCommands(draftWorkspace.value)
     await nextTick()
     settleBottom()
     return
@@ -749,13 +674,15 @@ function scrollToTop(): void {
 }
 
 async function loadCommands(workspaceId: string): Promise<void> {
+  const request = ++commandRequest
+  commands.value = ACTION_COMMANDS
   try {
     const data = await api<{ commands: SlashCommand[] }>(
       `/app/commands?workspace_id=${encodeURIComponent(workspaceId)}`,
     )
-    commands.value = [...ACTION_COMMANDS, ...(data.commands || [])]
+    if (request === commandRequest) commands.value = [...ACTION_COMMANDS, ...(data.commands || [])]
   } catch {
-    commands.value = ACTION_COMMANDS
+    // 保留内置命令。
   }
 }
 
@@ -857,7 +784,7 @@ async function sendDraft(): Promise<void> {
         method: 'POST',
         body: {
           role_id: props.draftRoleId || undefined,
-          workspace_id: props.draftWorkspaceId || undefined,
+          workspace_id: draftWorkspace.value,
           team_id: props.draftTeamId || undefined,
           model_code: model.value || undefined,
           thinking_level: thinking.value || undefined,
@@ -1046,6 +973,9 @@ async function deleteConversation(): Promise<void> {
 }
 
 function onConversationSaved(updated: Conversation): void {
+  if ((updated.workspace_id || '') !== (conversation.value?.workspace_id || '')) {
+    void loadCommands(updated.workspace_id || '')
+  }
   chat.conversation.value = updated
   void data.loadAll()
   settingsOpen.value = false
@@ -1079,6 +1009,26 @@ async function onGroupDeleted(): Promise<void> {
   // 群组解散后会话会被后端解绑：重新拉一次，头部从「群聊」退回单聊。
   await refreshConversation()
 }
+const previewLink = ref<ConversationLink | null>(null)
+
+function onConversationLink(event: MouseEvent): void {
+  if (event.type === 'auxclick' && event.button !== 1) return
+  const element = event.target
+  if (!(element instanceof Element)) return
+  const link = element.closest<HTMLAnchorElement>('.md a[href], .attachments a[href]')
+  if (!link) return
+  event.preventDefault()
+  const href = link.dataset.previewHref || link.getAttribute('href') || ''
+  try {
+    previewLink.value = resolveConversationLink(
+      href, link.getAttribute('aria-label') || link.textContent || '',
+      props.conversationId, conversation.value?.workspace_id || '', location.origin,
+    )
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  }
+}
+
 </script>
 
 <template>
@@ -1087,6 +1037,8 @@ async function onGroupDeleted(): Promise<void> {
     :class="floating ? 'ga-win' : presentation === 'drawer' ? 'chat-shell' : 'chat-tab-panel'"
     :style="popupStyle"
     :data-dragging="(dragging || resizing) || undefined"
+    @click.capture="onConversationLink"
+    @auxclick.capture="onConversationLink"
   >
     <header class="win-head chat-head" @pointerdown="startDrag">
       <button class="chat-avatar-btn" type="button" title="右键：更多会话操作" aria-label="会话头像，右键更多操作"
@@ -1098,17 +1050,15 @@ async function onGroupDeleted(): Promise<void> {
         <span :title="headerMeta">{{ headerMeta }}</span>
       </span>
       <WorkspacePicker
-        v-if="!globalAgent && !isDraft"
-        :model-value="conversation?.workspace_custom ? String(conversation?.workspace_id || '') : ''"
+        v-if="isDraft || conversation"
+        :model-value="isDraft ? draftWorkspace : conversation?.workspace_id || ''"
         :workspaces="data.workspaces"
         variant="chip"
         title="切换会话工作区"
-        :empty-label="followLabel"
-        :empty-display="followWorkspace?.name || '默认工作区'"
-        :empty-hint="`当前跟随：${followWorkspace?.name || '默认工作区'}`"
-        :trigger-hint="`点击切换工作区（默认${followLabel}）`"
+        empty-label="无工作区"
+        trigger-hint="点击切换会话工作区"
         :disabled="workspaceSwitching"
-        @update:model-value="(value) => switchConversationWorkspace(value || null)"
+        @update:model-value="switchConversationWorkspace"
       />
       <span v-if="chat.streaming.value" class="run-state">
         <span class="pulse" /><span>运行中</span>
@@ -1204,6 +1154,7 @@ async function onGroupDeleted(): Promise<void> {
           :speakers="chat.speakers.value"
           :current="chat.speakerId.value"
           :started="chat.liveStarted.value"
+          :streaming="chat.streaming.value"
           :wait-seconds="chat.waitSeconds.value"
           :error="chat.error.value"
         />
@@ -1292,6 +1243,8 @@ async function onGroupDeleted(): Promise<void> {
       @close="taskCenterOpen = false; loadBackgroundTasks()"
       @changed="loadBackgroundTasks"
     />
+
+    <LinkPreview :link="previewLink" @close="previewLink = null" @link-click="onConversationLink" />
 
     <ConversationSettingsDrawer
       :open="settingsOpen"

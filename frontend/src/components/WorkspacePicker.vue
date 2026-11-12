@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElInput, ElTag } from 'element-plus'
+import { ElInput } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import ListPager from '@/components/ListPager.vue'
 import Modal from '@/components/Modal.vue'
@@ -176,7 +176,6 @@ watch(() => props.workspaces, () => { page.value = 1 })
           <span class="ws-picker-main">
             <span class="ws-picker-name">
               <b>{{ workspace.name || workspace.id }}</b>
-              <el-tag v-if="workspace.is_default" size="small" type="success" effect="plain">默认</el-tag>
               <el-tag v-if="workspace.archived" size="small" type="info" effect="plain">已归档</el-tag>
             </span>
             <small>{{ workspace.root_path || '聊天工作区（托管目录）' }}<template v-if="workspace.conversation_count"> · {{ workspace.conversation_count }} 个会话</template></small>

@@ -164,8 +164,8 @@ async function save(): Promise<void> {
       <WorkspacePicker
         v-model="form.workspace_id"
         :workspaces="data.workspaces"
-        empty-label="不绑定（使用默认工作区）"
-        placeholder="不绑定（使用默认工作区）"
+        empty-label="无工作区"
+        placeholder="无工作区"
       />
       <small class="role-line">会话使用这个角色时，会自动在该工作区里运行。</small>
     </div>

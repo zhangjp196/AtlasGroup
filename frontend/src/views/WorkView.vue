@@ -147,7 +147,7 @@ const permissionText = computed(() => ({
   always: '完全允许',
 } as Record<string, string>)[String(policy.value.permission_mode || 'auto')] || '自动判断')
 const defaultWorkspace = computed(() => data.workspaces.find((ws) => ws.id === policy.value.default_workspace_id))
-const defaultWorkspaceText = computed(() => defaultWorkspace.value?.name || String(policy.value.default_workspace_id || '默认'))
+const defaultWorkspaceText = computed(() => defaultWorkspace.value?.name || '无工作区')
 
 const keyword = ref('')
 const teamFilter = ref(String(route.query.team_id || ''))
@@ -272,7 +272,7 @@ function onDeleted(): void {
 function openPolicy(): void {
   policyForm.mode = String(policy.value.mode || 'observe')
   policyForm.permission_mode = String(policy.value.permission_mode || 'auto')
-  policyForm.default_workspace_id = String(policy.value.default_workspace_id || '')
+  policyForm.default_workspace_id = defaultWorkspace.value?.id || ''
   policyForm.default_role_id = String(policy.value.default_role_id || '')
   policyForm.auto_execute = Boolean(policy.value.auto_execute)
   policyOpen.value = true
@@ -475,8 +475,8 @@ function openAttentionConversation(conversationId?: string): void {
         <WorkspacePicker
           v-model="policyForm.default_workspace_id"
           :workspaces="data.workspaces"
-          empty-label="默认"
-          placeholder="默认"
+          empty-label="无工作区"
+          placeholder="无工作区"
         />
       </div>
       <div class="field">

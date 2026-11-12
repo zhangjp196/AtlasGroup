@@ -192,7 +192,7 @@ def _team_public(team: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": team.get("id"),
         "kind": "participants" if str(team.get("kind") or "") == "participants" else "group",
-        "workspace_id": team.get("workspace_id"),
+        "workspace_id": zero_store.public_workspace_id(team.get("workspace_id")),
         "name": team.get("name") or "",
         "avatar": str(team.get("avatar") or ""),
         "description": team.get("description") or "",
@@ -526,16 +526,6 @@ def update_team(team_id: str, name: Optional[str] = None,
              "leader": leader_id, "members": zero_store._json(member_ids)},
         )
         if new_ws_id and new_ws_id != ws_id:
-            # 群组换了工作区：绑定它的「跟随」群聊会话跟着迁移；
-            # 手动指定工作区的会话保留自己的选择。
-            db.execute(
-                text(f"UPDATE {_q('conversations')} SET workspace_id = :ws, "
-                     f"workspace_custom = 0, "
-                     f"updated_at = datetime('now','localtime') WHERE team_id = :id "
-                     f"AND COALESCE(workspace_custom, 0) = 0"),
-                {"ws": new_ws_id, "id": team_id},
-            )
-            # 群成员角色也跟随群组工作区（单聊该角色时使用同一目录）。
             role_ids = [rid for rid in ([leader_id] + list(member_ids)) if rid]
             if role_ids:
                 marks = ",".join(f":r{i}" for i in range(len(role_ids)))
@@ -663,12 +653,6 @@ def bind_team(conv_id: str, team_id: Optional[str],
             {"tid": team_id or None, "id": conv_id},
         )
         db.commit()
-    try:
-        from services.agent_zero.task_layer import conversation
-
-        conversation.sync_conversation_workspace(conv_id)
-    except Exception:
-        logger.debug("同步会话工作区失败（忽略）", exc_info=True)
     if notice:
         _notice([conv_id], notice)
     elif team_id:

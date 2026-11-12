@@ -395,10 +395,9 @@ function onWorkSaved(): void {
           <div class="field">
             <label>绑定工作区</label>
             <select v-model="draft.workspace_id" class="input">
-              <option value="">默认工作区</option>
+              <option value="">无工作区</option>
               <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
             </select>
-            <small class="group-mode-hint">默认工作区；会话自己手动指定过工作区的不会被覆盖。</small>
           </div>
           <div class="field">
             <label>协作方式</label>

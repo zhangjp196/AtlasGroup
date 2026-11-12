@@ -556,7 +556,7 @@ TOOL_DEFS: List[ToolDef] = [
             "department_id": {"type": "string",
                               "description": "所属部门 id（可空 = 未安排）"},
             "workspace_id": {"type": "string",
-                             "description": ("角色绑定的工作区 id（可空 = 不绑定 / 默认工作区）；"
+                             "description": ("角色绑定的工作区 id（可空 = 无工作区）；"
                                              "切换工作区时更新该字段")},
             "expertise": {"type": "string", "description": "一句话专长"},
             "persona": {"type": "string", "description": "人格 / 工作方式"},
@@ -875,6 +875,10 @@ MODEL_HIDDEN = frozenset({
 # 用户的项目里。其余工具（shell / 文件读写 / vcs / codegraph / tool_job）在纯聊天
 # 工作区里都可用，落点是托管目录 `workspace_service.exec_root`。
 WORKSPACE_REQUIRED_TOOLS = frozenset({"workspace"})
+WORKSPACE_BOUND_TOOLS = frozenset({
+    "shell", "workspace", "vcs", "codegraph", "tool_job", "save_analysis",
+    "read_file", "read_office", "write_file", "edit_file", "list_files",
+})
 
 
 def build_tool_specs(envelope_tools: List[str], *,

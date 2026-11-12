@@ -67,7 +67,6 @@ def _public_workspace(ws: Dict[str, Any]) -> Dict[str, Any]:
         "chat_only": chat_only,
         "managed": chat_only,
         "archived": bool(ws.get("archived")),
-        "is_default": ws_id == zero_store.DEFAULT_WORKSPACE_ID,
         "conversation_count": count,
         "created_at": str(ws.get("created_at") or ""),
         "last_conv_updated": str(ws.get("last_conv_updated") or ""),
@@ -86,7 +85,7 @@ def _public_workspace(ws: Dict[str, Any]) -> Dict[str, Any]:
 
 def _get_or_404(ws_id: str) -> Dict[str, Any]:
     ws = zero_store.get_workspace(ws_id)
-    if not ws:
+    if not ws or ws_id == zero_store.DEFAULT_WORKSPACE_ID:
         raise HTTPException(status_code=404, detail=f"工作区不存在: {ws_id}")
     return ws
 
@@ -231,8 +230,6 @@ def delete_workspace(ws_id: str):
     """删除工作区 = 仅从列表隐藏（归档）。目录、会话、记忆、文件一律保留；
     之后重新添加同一目录会自动恢复该工作区。"""
     ws = _get_or_404(ws_id)
-    if ws_id == zero_store.DEFAULT_WORKSPACE_ID:
-        raise HTTPException(status_code=400, detail="默认工作区不能删除")
     zero_store.update_workspace(ws_id, {"archived": True})
     full = zero_store.list_workspaces(limit=500, include_archived=True)
     row = next((w for w in full if w.get("id") == ws_id), ws)
@@ -254,8 +251,6 @@ def update_workspace(ws_id: str, body: UpdateWorkspaceBody):
             raise HTTPException(status_code=400, detail="工作区名称不能为空")
         fields["name"] = name
     if body.archived is not None:
-        if body.archived and ws_id == zero_store.DEFAULT_WORKSPACE_ID:
-            raise HTTPException(status_code=400, detail="默认工作区不能归档")
         fields["archived"] = bool(body.archived)
     if not fields:
         return {"code": 0, "data": _public_workspace(ws)}

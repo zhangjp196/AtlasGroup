@@ -85,6 +85,8 @@ def _kind_of(ext: str, mime: str, name: str = "") -> str:
         return "pdf"
     if ext in OFFICE_ZIP_EXT or ext in LEGACY_OFFICE_EXT:
         return "office"
+    if mime.startswith(("audio/", "video/")):
+        return "media"
     if Path(name or "").name in TEXT_NAMES:
         return "text"
     if ext in TEXT_EXT or mime.startswith("text/"):

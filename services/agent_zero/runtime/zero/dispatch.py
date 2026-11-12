@@ -318,6 +318,8 @@ class ToolDispatcher:
             result = self._spill_if_huge(result, task, canon)
             self._invalidate_codegraph(task, canon)
             return result
+        if not task.get("workspace_id") and canon in tool_reg.WORKSPACE_BOUND_TOOLS:
+            return {"error": "请先为会话绑定工作区"}
         tdef = tool_reg.get_tool(canon)
         if tdef is None:
             return {"error": f"未知工具: {name}"}

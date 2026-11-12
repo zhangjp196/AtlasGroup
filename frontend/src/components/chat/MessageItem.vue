@@ -7,7 +7,6 @@ import { usageSummary } from '@/lib/usage'
 import { entriesFromMessage, splitEntries } from '@/lib/trace'
 import { useDataStore } from '@/stores/data'
 import Attachments from './Attachments.vue'
-import Markdown from './Markdown.vue'
 import ProcessList from './ProcessList.vue'
 
 const props = defineProps<{ message: Message }>()
@@ -56,14 +55,6 @@ const turnUsage = computed(() => {
     ].filter(Boolean).join('\n'),
   }
 })
-const processMeta = computed(() => {
-  const thoughts = parts.value.process.filter((entry) => entry.kind === 'thinking').length
-  const tools = parts.value.process.filter((entry) => entry.kind === 'tool').length
-  const out: string[] = []
-  if (thoughts) out.push(`think ${thoughts}`)
-  if (tools) out.push(`工具 ${tools}`)
-  return out.join(' · ')
-})
 </script>
 
 <template>
@@ -95,9 +86,7 @@ const processMeta = computed(() => {
   <div v-else-if="isSystem" class="sys">{{ message.content }}</div>
 
   <div v-else-if="isUser" class="msg user">
-    <Avatar name="我" round />
     <div class="msg-body">
-      <div class="msg-who"><b>我</b></div>
       <div v-if="message.content" class="bubble">{{ message.content }}</div>
       <Attachments :items="message.attachments" />
     </div>
@@ -119,20 +108,7 @@ const processMeta = computed(() => {
         >↑{{ compactNumber(turnUsage.view.input) }} ↓{{ compactNumber(turnUsage.view.output) }}</span>
       </div>
 
-      <details v-if="parts.process.length" class="turn-fold history-fold">
-        <summary class="turn-fold-bar">
-          <span class="fold-caret">›</span>
-          <span class="turn-fold-title">过程</span>
-          <span class="turn-fold-meta">{{ processMeta }}</span>
-        </summary>
-        <div class="turn-fold-body">
-          <ProcessList :entries="parts.process" />
-        </div>
-      </details>
-
-      <div v-if="parts.final" class="bubble assistant-text">
-        <Markdown :text="parts.final.text" />
-      </div>
+      <ProcessList v-if="entries.length" :entries="entries" :final="parts.final" />
 
       <Attachments :items="message.attachments" />
       <div v-if="message.error" class="run-error">{{ message.error }}</div>

@@ -399,13 +399,13 @@ export function useChat() {
     return String(file.type || '').startsWith('image/') || IMAGE_EXT_RE.test(file.name || '')
   }
 
-  function isDocumentFile(file: File): boolean {
+  function isSupportedFile(file: File): boolean {
     const name = String(file.name || '').toLowerCase()
     const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')) : ''
     if (DOC_EXTENSIONS.includes(ext)) return true
     const base = name.split('/').pop() || ''
     if (['dockerfile', 'makefile', 'rakefile', 'gemfile', 'procfile'].includes(base)) return true
-    return String(file.type || '').startsWith('text/')
+    return /^(text|audio|video)\//.test(file.type || '')
   }
 
   function supportsVision(effectiveModel?: string): boolean {
@@ -433,7 +433,7 @@ export function useChat() {
         app.toast('当前模型未开启图片支持，请切换模型或在设置中开启', 'bad', 5000)
         continue
       }
-      if (!image && !isDocumentFile(file)) {
+      if (!image && !isSupportedFile(file)) {
         app.toast(`不支持的文件：${file.name}`, 'bad', 4000)
         continue
       }

@@ -465,7 +465,7 @@ function onWorkSaved(): void {
             </div>
             <div class="role-line">{{ role.department ? `部门：${role.department}` : '未安排部门' }}</div>
             <div class="role-line">模型：{{ role.model_code || '未指定' }}</div>
-            <div class="role-line">工作区：{{ workspaceName(role.workspace_id) || '默认工作区' }}</div>
+            <div class="role-line">工作区：{{ workspaceName(role.workspace_id) || '无工作区' }}</div>
             <div class="chips">
               <span v-if="openWorkByRole.get(role.id)" class="chip work-chip">{{ openWorkByRole.get(role.id) }} 个工单在办</span>
               <span v-for="tool in (role.tools || []).slice(0, 6)" :key="tool" class="chip">{{ tool }}</span>

@@ -27,156 +27,40 @@ GLOBAL_AGENT_ZONE = "global-agent"
 GLOBAL_CHAT_ZONE = "global-chat"
 
 
-def workspace_for_conversation(role_id: Optional[str],
-                               team_id: Optional[str]) -> Optional[str]:
-    """角色 / 群组绑定的默认工作区；都没有时返回 None。
-
-    这是新会话的默认值，也是「跟随角色 / 群组」会话在工作区变更后同步的目标。
-    群组优先于角色（群聊使用群组的工作区），只接受存在且未归档的工作区。
-    """
-    from services.agent_zero.services import team_service
-
-    def _usable(ws_id: str) -> Optional[str]:
-        ws = zero_store.get_workspace(ws_id) if ws_id else None
-        if ws and not ws.get("archived"):
-            return str(ws_id)
-        return None
-
-    tid = str(team_id or "").strip()
-    if tid:
-        team = team_service.get_team(tid) or {}
-        hit = _usable(str(team.get("workspace_id") or ""))
-        if hit:
-            return hit
-    rid = str(role_id or "").strip()
-    if rid:
-        role = zero_store.get_role(rid) or {}
-        hit = _usable(str(role.get("group_id") or ""))
-        if hit:
-            return hit
-    return None
-
-
-def default_workspace_for_conversation(conv: Dict[str, Any]) -> str:
-    """会话「跟随角色 / 群组」时应该使用的工作区。"""
-    return (workspace_for_conversation(conv.get("role_id"), conv.get("team_id"))
-            or zero_store.DEFAULT_WORKSPACE_ID)
-
-
-def sync_conversation_workspace(conv_id: str,
-                                *,
-                                force: bool = False) -> Optional[Dict[str, Any]]:
-    """按当前角色 / 群组重新解析会话工作区并落库。
-
-    手动指定工作区的会话（``workspace_custom=1``）默认保留自己的选择；
-    ``force=True`` 用于用户显式选择「跟随角色 / 群组」，此时清除手动标记。
-    角色 / 群组都没有绑定工作区时落到默认工作区。
-    """
-    from sqlalchemy import text
-
-    from services.agent_zero.database import get_session_local
-    from services.agent_zero.stores.zero_store import _q
-
-    conv = get_conversation(conv_id)
-    if not conv:
-        return None
-    if conv.get("workspace_custom") and not force:
-        return conv
-    ws_id = default_workspace_for_conversation(conv)
-    if not force and str(conv.get("workspace_id") or "") == ws_id:
-        return conv
-    SessionLocal = get_session_local()
-    with SessionLocal() as db:
-        db.execute(
-            text(f"UPDATE {_q('conversations')} SET workspace_id = :ws, "
-                 f"workspace_custom = 0, "
-                 f"updated_at = datetime('now','localtime') WHERE id = :id"),
-            {"ws": ws_id, "id": conv_id},
-        )
-        db.commit()
-    return get_conversation(conv_id)
+def validate_conversation_workspace(workspace_id: Optional[str]) -> str:
+    ws_id = zero_store.public_workspace_id(workspace_id)
+    if ws_id:
+        row = zero_store.get_workspace(ws_id)
+        if not row:
+            raise ValueError(f"工作区不存在: {ws_id}")
+        if row.get("archived"):
+            raise ValueError(f"工作区已归档: {ws_id}")
+    return ws_id
 
 
 def set_conversation_workspace(conv_id: str,
-                               workspace_id: Optional[str] = None,
-                               *,
-                               follow: bool = False) -> Optional[Dict[str, Any]]:
-    """切换会话工作区。
-
-    - ``follow=True``：清除手动标记，回到角色 / 群组绑定的默认工作区；
-    - 否则使用 ``workspace_id``（空值同样回到默认），并标记为本会话手动指定。
-      同一角色的不同会话因此可以使用各自的工作区，切换角色 / 群组不会覆盖。
-    """
+                               workspace_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """保存会话自己的工作区，空值解除绑定。"""
     from sqlalchemy import text
 
     from services.agent_zero.database import get_session_local
     from services.agent_zero.stores.zero_store import _q
 
-    conv = get_conversation(conv_id)
-    if not conv:
-        raise ValueError(f"对话不存在: {conv_id}")
-    if follow:
-        ws_id = default_workspace_for_conversation(conv)
-        custom = 0
-    else:
-        ws_id = str(workspace_id or "").strip()
-        if not ws_id:
-            ws_id = default_workspace_for_conversation(conv)
-            custom = 0
-        else:
-            row = zero_store.get_workspace(ws_id)
-            if not row:
-                raise ValueError(f"工作区不存在: {ws_id}")
-            if row.get("archived"):
-                raise ValueError(f"工作区已归档: {ws_id}")
-            custom = 1
-    SessionLocal = get_session_local()
-    with SessionLocal() as db:
+    ws_id = validate_conversation_workspace(workspace_id)
+    with get_session_local()() as db:
         db.execute(
             text(f"UPDATE {_q('conversations')} SET workspace_id = :ws, "
-                 f"workspace_custom = :custom, "
+                 f"workspace_custom = :custom, bound_workspace_id = NULL, "
                  f"updated_at = datetime('now','localtime') WHERE id = :id"),
-            {"ws": ws_id, "custom": custom, "id": conv_id},
+            {"ws": ws_id or zero_store.DEFAULT_WORKSPACE_ID,
+             "custom": int(bool(ws_id)), "id": conv_id},
         )
         db.commit()
     return get_conversation(conv_id)
 
 
-def sync_conversations_workspace_for_role(role_id: str,
-                                          workspace_id: Optional[str]) -> int:
-    """角色换了工作区：同步它名下「跟随角色」的单聊会话。
-
-    手动指定工作区的会话不动，避免把某个会话单独选的工作区改掉。
-    """
-    from sqlalchemy import text
-
-    from services.agent_zero.database import get_session_local
-    from services.agent_zero.stores.zero_store import _q
-
-    rid = str(role_id or "").strip()
-    if not rid:
-        return 0
-    ws_id = str(workspace_id or "").strip() or zero_store.DEFAULT_WORKSPACE_ID
-    SessionLocal = get_session_local()
-    with SessionLocal() as db:
-        res = db.execute(
-            text(f"UPDATE {_q('conversations')} SET workspace_id = :ws, "
-                 f"workspace_custom = 0, "
-                 f"updated_at = datetime('now','localtime') "
-                 f"WHERE role_id = :rid AND (team_id IS NULL OR team_id = '') "
-                 f"AND COALESCE(workspace_custom, 0) = 0"),
-            {"ws": ws_id, "rid": rid},
-        )
-        db.commit()
-        return int(res.rowcount or 0)
-
-
 def migrate_bound_workspaces() -> int:
-    """旧版「会话绑定工作区」→ 工作区归属迁移（幂等）。
-
-    以前会话用 bound_workspace_id 只给文件上下文；现在工作区由角色 / 群组绑定，
-    用户手动绑定的会话提升为「手动指定工作区」，之后不会被角色 / 群组覆盖。
-    """
+    """把旧版 bound_workspace_id 迁移到会话自己的 workspace_id（幂等）。"""
     from sqlalchemy import text
 
     from services.agent_zero.database import get_session_local
@@ -204,8 +88,7 @@ def create_conversation(workspace_id: str, user: str,
                         model_code: Optional[str] = None,
                         thinking_level: Optional[str] = None,
                         permission_mode: Optional[str] = None,
-                        run_mode: Optional[str] = None,
-                        workspace_custom: bool = False) -> Dict[str, Any]:
+                        run_mode: Optional[str] = None) -> Dict[str, Any]:
     """发起对话（本地单用户）。可绑定团队。"""
     zone = str(zone or "").strip() or None
     role_id = str(role_id or "").strip() or None
@@ -234,23 +117,9 @@ def create_conversation(workspace_id: str, user: str,
             leader = team.get("leader") or {}
             role_id = str(leader.get("id") or "").strip() or None
 
-    # 工作区由角色 / 群组决定；旧版 bound_workspace_id 作为兼容入口提升为归属。
-    bound_workspace_id = str(bound_workspace_id or "").strip() or None
-    requested_ws = bound_workspace_id or str(workspace_id or "").strip()
-    if not requested_ws:
-        requested_ws = (workspace_for_conversation(role_id, team_id)
-                        or zero_store.DEFAULT_WORKSPACE_ID)
-    workspace_id = str(requested_ws)
-    ws = zero_store.get_workspace(workspace_id)
-    if not ws:
-        raise ValueError(f"工作区不存在: {workspace_id}")
-    if ws.get("archived"):
-        raise ValueError(f"工作区已归档: {workspace_id}")
-    workspace_custom = bool(workspace_custom or bound_workspace_id)
+    workspace_id = validate_conversation_workspace(bound_workspace_id or workspace_id)
+    workspace_custom = bool(workspace_id)
     bound_workspace_id = None
-    if role_id:
-        # 角色入口 = 独立工作区（P0：记录 role_id，空间锚定到角色）
-        pass
     conv_id = zero_store.new_id("conv")
     from services.agent_zero.database import get_session_local
 
@@ -276,7 +145,7 @@ def create_conversation(workspace_id: str, user: str,
                  f"permission_mode, run_mode, team_id, model_code, thinking_level, last_read_at) "
                  f"VALUES (:id, :wid, :bwid, :wcustom, :rid, :zone, :by, :src, :mode, :run_mode, "
                  f":team, :model, :think, datetime('now','localtime'))"),
-            {"id": conv_id, "wid": workspace_id, "bwid": bound_workspace_id or None,
+            {"id": conv_id, "wid": workspace_id or zero_store.DEFAULT_WORKSPACE_ID, "bwid": None,
              "wcustom": 1 if workspace_custom else 0,
              "rid": role_id,
              "zone": zone, "by": user, "src": source or "chat",
@@ -334,7 +203,7 @@ def ensure_global_chat_conversation(user: str = "local") -> Dict[str, Any]:
                                {"id": row["id"]})
                     db.commit()
                 return get_conversation(str(row["id"])) or {}
-        return create_conversation(zero_store.DEFAULT_WORKSPACE_ID, user,
+        return create_conversation("", user,
                                    role_id=zero_store.DEFAULT_ROLE_ID,
                                    zone=GLOBAL_CHAT_ZONE, source="global-chat")
 
@@ -383,7 +252,7 @@ def ensure_global_agent_conversation(user: str = "local") -> Dict[str, Any]:
                 db.commit()
                 return get_conversation(keep_id) or {}
         return create_conversation(
-            zero_store.DEFAULT_WORKSPACE_ID, user,
+            "", user,
             zone=GLOBAL_AGENT_ZONE, source="global-agent")
 
 
@@ -633,7 +502,8 @@ def get_conversation(conv_id: str) -> Optional[Dict[str, Any]]:
     if not row:
         return None
     data = dict(row)
-    data["workspace_custom"] = bool(data.get("workspace_custom"))
+    data["workspace_id"] = zero_store.public_workspace_id(data.get("workspace_id"))
+    data["workspace_custom"] = bool(data["workspace_id"])
     return data
 
 
@@ -692,7 +562,6 @@ def fork_conversation(conv_id: str, *, message_id: Optional[str] = None,
         thinking_level=src.get("thinking_level"),
         permission_mode=src.get("permission_mode"),
         run_mode=src.get("run_mode"),
-        workspace_custom=bool(src.get("workspace_custom")),
     )
     new_id = str(new["id"])
     if src_team and not src_is_shared_group:
@@ -1938,20 +1807,22 @@ def _chat_tool_specs(envelope: Dict[str, Any],
 
     has_dir = wsvc.has_working_dir(workspace_id) if workspace_id else False
     allowed = envelope.get("tools") or []
+    excluded = tool_reg.WORKSPACE_BOUND_TOOLS if not workspace_id else frozenset()
     use_packs = tool_packs.enabled()
 
     specs: List[Dict[str, Any]] = []
     if use_packs:
         # 工具包：一个包一个 function + op；命令类工具由 unpacked_specs 单独下发
         specs.extend(tool_packs.build_pack_specs(
-            allowed, has_working_dir=has_dir))
+            allowed, has_working_dir=has_dir, excluded=excluded))
         # 独立工具：shell / workspace / ask_user（vcs / codegraph / tool_job
         # 由 dev 包统一下发）。
         specs.extend(tool_packs.unpacked_specs(
-            allowed, has_working_dir=has_dir))
+            allowed, has_working_dir=has_dir, excluded=excluded))
     else:
         for s in tool_reg.build_tool_specs(allowed, has_working_dir=has_dir):
-            specs.append(s)
+            if s["function"]["name"] not in excluded:
+                specs.append(s)
     specs.extend(list(getattr(caps, "tool_specs", None) or []))
     specs.append(PROPOSE_TASK_TOOL)
 
@@ -2279,7 +2150,7 @@ async def _exec_call_agent(conv: Dict[str, Any], user: str, role: Dict[str, Any]
     child = zero_store.get_role(role_id) if role_id else None
     if role_id and not child:
         return json.dumps({"error": f"角色不存在: {role_id}"}, ensure_ascii=False)
-    if child and str(child.get("group_id") or "") != str(conv.get("workspace_id") or ""):
+    if child and zero_store.public_workspace_id(child.get("group_id")) != (conv.get("workspace_id") or ""):
         return json.dumps({"error": "该角色不属于当前工作区，不能调用"}, ensure_ascii=False)
     if child is None:
         child = role        # 未指定 role_id → 由当前角色自己再跑一轮
@@ -2697,8 +2568,6 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
                         **role,
                         "group_id": ws_id or None,
                     })
-                    sync_conversations_workspace_for_role(
-                        str(role["id"]), ws_id or None)
         if role is None:
             role = zero_store.upsert_role({
                 "id": zero_store.new_id("role"),
@@ -2773,8 +2642,6 @@ def _exec_role_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, A
             merged["envelope"] = dict(merged["envelope"])
             merged["envelope"]["status"] = status
         role = zero_store.upsert_role(merged)
-        if ws_changed:
-            sync_conversations_workspace_for_role(role_id, ws_id or None)
         return {"ok": True, "role": _role_public(role)}
     if action == "promote":
         merged = dict(current)
@@ -6820,7 +6687,8 @@ def list_conversations(workspace_id: Optional[str] = None,
             item["running_count"] = int(item.get("running_count") or 0)
             item["last_read_at"] = str(item.get("last_read_at") or "")
             item["run_status"] = str(item.pop("run_status", "") or "")
-            item["workspace_custom"] = bool(item.get("workspace_custom"))
+            item["workspace_id"] = zero_store.public_workspace_id(item.get("workspace_id"))
+            item["workspace_custom"] = bool(item["workspace_id"])
             item["has_active_goal"] = item.pop("goal_status", None) == "active"
             out.append(item)
         # 未读 / 消息数 / 最后一条预览：整页两次聚合查询，不再逐条 N+1。
@@ -6833,17 +6701,6 @@ def list_conversations(workspace_id: Optional[str] = None,
     for item in out:
         item["usage"] = usage_map.get(item["id"]) or usage_service.empty_usage()
     return out
-
-
-def update_bound_workspace(conv_id: str, workspace_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """兼容旧接口：手动指定会话工作区。
-
-    新模型下这等价于「本会话固定使用该工作区」（不跟随角色 / 群组）；
-    空值保留原工作区（旧前端的清空语义）。
-    """
-    if not str(workspace_id or "").strip():
-        return get_conversation(conv_id)
-    return set_conversation_workspace(conv_id, workspace_id)
 
 
 def mark_conversation_read(conv_id: str) -> bool:

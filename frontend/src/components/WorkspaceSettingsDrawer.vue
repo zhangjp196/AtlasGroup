@@ -140,7 +140,7 @@ async function toggleArchive(): Promise<void> {
   if (!ws || busy.value) return
   const archived = !ws.archived
   const bindHint = boundRoles.value.length
-    ? `有 ${boundRoles.value.length} 个角色绑定此工作区，归档后它们会回退到默认工作区。`
+    ? `有 ${boundRoles.value.length} 个角色绑定此工作区。`
     : ''
   if (archived && !window.confirm(`归档工作区「${ws.name}」？${bindHint}`)) return
   busy.value = true
@@ -160,7 +160,7 @@ async function removeWorkspace(): Promise<void> {
   const ws = props.workspace
   if (!ws || busy.value) return
   const bindHint = boundRoles.value.length
-    ? `有 ${boundRoles.value.length} 个角色绑定此工作区，之后会回退到默认工作区。`
+    ? `有 ${boundRoles.value.length} 个角色绑定此工作区。`
     : ''
   if (!window.confirm(`删除工作区「${ws.name}」？目录本身不会被删除。${bindHint}`)) return
   busy.value = true

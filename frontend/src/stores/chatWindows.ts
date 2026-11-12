@@ -8,24 +8,29 @@ import { useDataStore } from '@/stores/data'
 
 export type ChatPresentation = 'popup' | 'drawer' | 'tab'
 
-const PRESENTATION_KEY = 'atlasx.chat.presentation'
-function isPresentation(value: unknown): value is ChatPresentation {
-  return value === 'popup' || value === 'drawer' || value === 'tab'
-}
+export type ChatPopup = { x: number; y: number; w: number; h: number }
+type ChatLayout = { presentation?: ChatPresentation; popup?: ChatPopup }
 
-function readPresentation(): { last: ChatPresentation; conversations: Record<string, ChatPresentation> } {
+const LAYOUT_KEY = 'atlasx.chat.layout'
+function readLayouts(): Record<string, ChatLayout> {
   try {
-    const saved = JSON.parse(localStorage.getItem(PRESENTATION_KEY) || '{}')
-    return { last: isPresentation(saved?.last) ? saved.last : 'popup', conversations: saved?.conversations && typeof saved.conversations === 'object' ? saved.conversations : {} }
+    const stored = localStorage.getItem(LAYOUT_KEY)
+    if (stored) return JSON.parse(stored) || {}
+    const legacy = JSON.parse(localStorage.getItem('atlasx.chat.presentation') || '{}')
+    return Object.fromEntries(Object.entries(legacy.conversations || {})
+      .filter(([, mode]) => mode === 'popup' || mode === 'drawer' || mode === 'tab')
+      .map(([id, presentation]) => [id, { presentation }])) as Record<string, ChatLayout>
   } catch {
-    return { last: 'popup', conversations: {} }
+    return {}
   }
 }
+
 export interface ChatWindowState {
   key: string
   conversationId: string
   draft: boolean
   presentation: ChatPresentation
+  popup?: ChatPopup
   title?: string
   roleId?: string
   participantIds?: string[]
@@ -37,17 +42,63 @@ export interface ChatWindowState {
 export const useChatWindowsStore = defineStore('chatWindows', () => {
   const windows = ref<ChatWindowState[]>([])
   const activeTab = ref('')
-  const preferences = ref(readPresentation())
+  let draftSequence = 0
+  let openSequence = 0
+  const layouts = ref(readLayouts())
+  const loads = new Map<string, Promise<void>>()
+  const writes = new Map<string, Promise<void>>()
 
   function presentationFor(id: string): ChatPresentation {
-    const saved = preferences.value.conversations[id]
-    return isPresentation(saved) ? saved : preferences.value.last
+    return layouts.value[id]?.presentation || 'popup'
+  }
+
+  function popupFor(id: string): ChatPopup | undefined {
+    return layouts.value[id]?.popup
+  }
+
+  function cacheLayout(id: string, layout: ChatLayout): void {
+    layouts.value[id] = layout
+    try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layouts.value)) } catch { /* ignore */ }
+  }
+
+  function saveLayout(id: string, patch: ChatLayout): void {
+    if (!id) return
+    cacheLayout(id, { ...layouts.value[id], ...patch })
+    const write = (writes.get(id) || Promise.resolve()).then(async () => {
+      await api(`/conversations/${encodeURIComponent(id)}/window-layout`, { method: 'PATCH', body: patch })
+    }).catch(() => {
+      loads.delete(id)
+    })
+    writes.set(id, write)
+    void write.then(() => { if (writes.get(id) === write) writes.delete(id) })
+  }
+
+  function loadLayout(id: string): Promise<void> {
+    const existing = loads.get(id)
+    if (existing) return existing
+    const before = layouts.value[id]
+    const load = api<ChatLayout>(`/conversations/${encodeURIComponent(id)}/window-layout`).then((saved) => {
+      if (layouts.value[id] !== before || writes.has(id)) return
+      if (saved.presentation || saved.popup) cacheLayout(id, { ...before, ...saved })
+      else if (before) saveLayout(id, before)
+    }).catch(() => { loads.delete(id) })
+    loads.set(id, load)
+    return load
   }
 
   function rememberPresentation(id: string, presentation: ChatPresentation): void {
-    preferences.value.last = presentation
-    if (id) preferences.value.conversations = { ...preferences.value.conversations, [id]: presentation }
-    try { localStorage.setItem(PRESENTATION_KEY, JSON.stringify(preferences.value)) } catch { /* ignore */ }
+    saveLayout(id, { presentation })
+  }
+
+  function rememberPopup(id: string, popup: ChatPopup): void {
+    saveLayout(id, { popup })
+  }
+
+  function setPopup(key: string, popup: ChatPopup): void {
+    const hit = windows.value.find((item) => item.key === key)
+    if (!hit) return
+    hit.popup = popup
+    rememberPopup(hit.conversationId, popup)
   }
 
   function focus(key: string): void {
@@ -86,10 +137,21 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     focus(next.key)
   }
 
-  function openConversation(conversationId: string): void {
+  async function openConversation(conversationId: string): Promise<void> {
     const id = String(conversationId || '').trim()
     if (!id) return
-    push({ key: `conv:${id}`, conversationId: id, draft: false, presentation: presentationFor(id) })
+    const sequence = ++openSequence
+    const current = windows.value.find((item) => item.conversationId === id)
+    if (current) {
+      focus(current.key)
+      return
+    }
+    await loadLayout(id)
+    if (sequence !== openSequence) return
+    push({
+      key: `conv:${id}`, conversationId: id, draft: false,
+      presentation: presentationFor(id), popup: popupFor(id),
+    })
   }
 
   function openDraft(roleId: string, options: {
@@ -100,15 +162,18 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     const rid = String(roleId || '').trim()
     const tid = String(options.teamId || '').trim()
     if (!rid && !tid) return
-    const existing = tid
-      ? windows.value.find((item) => item.draft && item.teamId === tid)
-      : windows.value.find((item) => item.draft && !item.teamId && item.roleId === rid)
+    openSequence += 1
+    const existing = windows.value.find((item) => {
+      if (!item.draft) return false
+      if (options.workspaceId !== undefined && item.workspaceId !== options.workspaceId) return false
+      return tid ? item.teamId === tid : !item.teamId && item.roleId === rid
+    })
     if (existing) {
       focus(existing.key)
       return
     }
     push({
-      key: tid ? `draft:team:${tid}` : `draft:${rid}:${Date.now()}`,
+      key: `draft:${tid || rid}:${++draftSequence}`,
       conversationId: '',
       draft: true,
       presentation: presentationFor(''),
@@ -137,7 +202,7 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
         ).catch(() => null)
         existing = result?.items?.find(matches)
       }
-      if (existing) openConversation(existing.id)
+      if (existing) await openConversation(existing.id)
       else openDraft(team.leader.id, { teamId: team.id })
       return true
     } finally {
@@ -151,12 +216,12 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     if (!id) return
     const hit = windows.value.find((item) => item.key === key)
     if (!hit) {
-      openConversation(id)
+      void openConversation(id)
       return
     }
     hit.conversationId = id
     hit.draft = false
-    rememberPresentation(id, hit.presentation)
+    saveLayout(id, { presentation: hit.presentation, popup: hit.popup })
     if (participantIds) hit.participantIds = participantIds
     const duplicate = windows.value.find((item) => item.key !== key && item.conversationId === id)
     if (duplicate && activeTab.value === duplicate.key) activeTab.value = hit.presentation === 'tab' ? key : ''
@@ -180,6 +245,7 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
   }
 
   function clear(): void {
+    openSequence += 1
     windows.value = []
     activeTab.value = ''
   }
@@ -188,6 +254,10 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     windows,
     activeTab,
     presentationFor,
+    popupFor,
+    loadLayout,
+    setPopup,
+    rememberPopup,
     rememberPresentation,
     setPresentation,
     setTitle,

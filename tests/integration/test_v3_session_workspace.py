@@ -23,8 +23,7 @@ def test_group_list_without_workspace_returns_all(client, tmp_path):
     assert team["id"] in all_ids
 
 
-def test_conversation_workspace_comes_from_role(client, tmp_path):
-    """工作区由角色绑定；会话不再持有 bound_workspace_id。"""
+def test_conversation_workspace_is_independent_of_role(client, tmp_path):
     folder = tmp_path / "ws-c"
     folder.mkdir()
     ws = client.post(f"{API}/workspaces", json={
@@ -35,7 +34,7 @@ def test_conversation_workspace_comes_from_role(client, tmp_path):
 
     conv = client.post(f"{API}/conversations", json={
         "role_id": role["id"]}).json()["data"]
-    assert conv["workspace_id"] == ws
+    assert conv["workspace_id"] == ""
     assert conv["bound_workspace_id"] == ""
 
     folder2 = tmp_path / "ws-d"
@@ -44,10 +43,10 @@ def test_conversation_workspace_comes_from_role(client, tmp_path):
         "name": "空间 D", "path": str(folder2)}).json()["data"]["id"]
     client.patch(f"{API}/roles/{role['id']}", json={"workspace_id": ws2})
     fetched = client.get(f"{API}/conversations/{conv['id']}").json()["data"]
-    assert fetched["workspace_id"] == ws2
+    assert fetched["workspace_id"] == ""
 
 
-def test_conversation_workspace_comes_from_team(client, tmp_path):
+def test_conversation_workspace_is_independent_of_team(client, tmp_path):
     folder = tmp_path / "ws-e"
     folder.mkdir()
     ws = client.post(f"{API}/workspaces", json={
@@ -58,7 +57,7 @@ def test_conversation_workspace_comes_from_team(client, tmp_path):
 
     conv = client.post(f"{API}/conversations", json={
         "team_id": team["id"]}).json()["data"]
-    assert conv["workspace_id"] == ws
+    assert conv["workspace_id"] == ""
 
     folder2 = tmp_path / "ws-f"
     folder2.mkdir()
@@ -66,7 +65,7 @@ def test_conversation_workspace_comes_from_team(client, tmp_path):
         "name": "空间 F", "path": str(folder2)}).json()["data"]["id"]
     client.patch(f"{API}/teams/{team['id']}", json={"workspace_id": ws2})
     fetched = client.get(f"{API}/conversations/{conv['id']}").json()["data"]
-    assert fetched["workspace_id"] == ws2
+    assert fetched["workspace_id"] == ""
 
 
 def test_legacy_bound_workspace_migrates_to_owner(client, tmp_path):

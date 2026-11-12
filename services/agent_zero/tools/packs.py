@@ -552,10 +552,7 @@ def catalog(has_working_dir: bool = True) -> Dict[str, Any]:
         })
 
     standalone: List[Dict[str, Any]] = []
-    # 独立工具**总是全部列出**（纯聊天工作区只把可用性标成 false，页面置灰）。
-    # 原因：这份目录由 /app/info 生成，那里的 has_working_dir 取的是**默认工作区**；
-    # 若按它过滤，从纯聊天默认工作区切到有目录的工作区后，「独立工具」会一直是空的，
-    # 直到重启（用户反馈：设置 → 工具 需要先更新）。
+    # 设置页展示独立工具目录，可用性由工作区状态决定。
     for code in unpacked_codes(tool_reg.known_codes()):
         if code in _TOOL_TO_PACK:
             continue          # 已经作为某个包的动作出现，不再重复列

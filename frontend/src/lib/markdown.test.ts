@@ -20,4 +20,10 @@ describe('markdown rendering', () => {
     expect(html).toContain('target="_blank"')
     expect(html).toContain('rel="noopener noreferrer"')
   })
+  it('retains local file links as inert preview targets', () => {
+    const html = renderMarkdown('[报告](file:///Users/local/report.md)')
+    expect(html).toContain('data-preview-href="file:///Users/local/report.md"')
+    expect(html).toContain('href="#"')
+  })
+
 })

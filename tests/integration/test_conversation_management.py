@@ -175,44 +175,32 @@ def test_conversation_workspace_can_be_switched_per_conversation(client, tmp_pat
     }).json()["data"]
 
     conv1 = client.post(f"{API}/conversations", json={"role_id": role["id"]}).json()["data"]
-    conv2 = client.post(f"{API}/conversations", json={"role_id": role["id"]}).json()["data"]
-    assert conv1["workspace_id"] == ws_a["id"] and not conv1["workspace_custom"]
-    assert conv2["workspace_id"] == ws_a["id"] and not conv2["workspace_custom"]
+    conv2 = client.post(f"{API}/conversations", json={
+        "role_id": role["id"], "workspace_id": ws_a["id"],
+    }).json()["data"]
+    assert conv1["workspace_id"] == ""
+    assert conv2["workspace_id"] == ws_a["id"]
 
-    # 只改 conv1：同一角色的两条会话从此各用各的工作区。
     out = client.patch(f"{API}/conversations/{conv1['id']}/settings",
                        json={"workspace_id": ws_b["id"]}).json()["data"]
     assert out["workspace_id"] == ws_b["id"]
-    assert out["workspace_custom"] is True
-    assert client.get(f"{API}/conversations/{conv2['id']}").json()["data"]["workspace_id"] == ws_a["id"]
 
-    # 角色改绑工作区：跟随的 conv2 跟着走，手动指定的 conv1 保留。
     client.patch(f"{API}/roles/{role['id']}", json={"workspace_id": ""})
     assert client.get(f"{API}/conversations/{conv1['id']}").json()["data"]["workspace_id"] == ws_b["id"]
-    assert client.get(f"{API}/conversations/{conv2['id']}").json()["data"]["workspace_id"] \
-        == "default"
+    assert client.get(f"{API}/conversations/{conv2['id']}").json()["data"]["workspace_id"] == ws_a["id"]
+
+    out = client.patch(f"{API}/conversations/{conv1['id']}/workspace",
+                       json={"workspace_id": ""}).json()["data"]
+    assert out["workspace_id"] == ""
+    assert client.get(f"{API}/conversations/{conv1['id']}").json()["data"]["workspace_id"] == ""
 
 
-def test_conversation_workspace_follow_resets_to_role_binding(client, tmp_path):
-    ws_a = _mk_workspace(client, tmp_path, "follow-ws-a")
-    ws_b = _mk_workspace(client, tmp_path, "follow-ws-b")
-    role = client.post(f"{API}/roles", json={
-        "name": "跟随角色", "workspace_id": ws_a["id"],
-    }).json()["data"]
-    conv = client.post(f"{API}/conversations", json={"role_id": role["id"]}).json()["data"]
-
-    out = client.patch(f"{API}/conversations/{conv['id']}/settings",
-                       json={"workspace_id": ws_b["id"]}).json()["data"]
-    assert out["workspace_id"] == ws_b["id"] and out["workspace_custom"] is True
-
-    out = client.patch(f"{API}/conversations/{conv['id']}/settings",
-                       json={"workspace_follow": True}).json()["data"]
-    assert out["workspace_id"] == ws_a["id"]
-    assert out["workspace_custom"] is False
-
-    # 跟随状态下角色换工作区，会话自动更新。
-    client.patch(f"{API}/roles/{role['id']}", json={"workspace_id": ws_b["id"]})
-    assert client.get(f"{API}/conversations/{conv['id']}").json()["data"]["workspace_id"] == ws_b["id"]
+def test_legacy_default_workspace_is_hidden(client):
+    response = client.get(f"{API}/workspaces", params={"include_archived": True})
+    assert response.status_code == 200
+    assert all(ws["id"] != "default" for ws in response.json()["data"]["items"])
+    conv = client.post(f"{API}/conversations", json={"workspace_id": "default"}).json()["data"]
+    assert conv["workspace_id"] == ""
 
 
 def test_conversation_create_can_override_role_workspace(client, tmp_path):
@@ -241,7 +229,7 @@ def test_group_workspace_change_keeps_custom_conversation_workspace(client, tmp_
         "leader": {"name": "主持"}, "members": [{"name": "成员"}],
     }).json()["data"]
     conv = client.post(f"{API}/conversations", json={"team_id": team["id"]}).json()["data"]
-    assert conv["workspace_id"] == ws_a["id"]
+    assert conv["workspace_id"] == ""
 
     client.patch(f"{API}/conversations/{conv['id']}/settings",
                  json={"workspace_id": ws_b["id"]})

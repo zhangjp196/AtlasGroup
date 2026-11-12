@@ -49,7 +49,7 @@ def test_promote_and_delete_role(app_env):
     assert deleted["ok"] and zero_store.get_role(role["id"]) is None
 
 
-def test_role_can_switch_workspace_and_syncs_conversations(app_env):
+def test_role_can_switch_workspace_independently_of_conversations(app_env):
     conv, _ = _setup(app_env)
     zero_store.create_workspace("group", "ws-role-target", "目标工作区", "local",
                                 root_path=str(app_env["tmp"] / "ws-role-target"))
@@ -61,14 +61,14 @@ def test_role_can_switch_workspace_and_syncs_conversations(app_env):
     assert role["workspace_id"] == "ws-role-target"
 
     single = conversation.create_conversation(
-        "", "local", role_id=role["id"])
+        "ws-role-target", "local", role_id=role["id"])
     assert single["workspace_id"] == "ws-role-target"
 
     switched = conversation._exec_role_manage(conv, {
         "action": "update", "role_id": role["id"], "workspace_id": ""})["role"]
     assert switched["workspace_id"] == ""
     assert zero_store.get_role(role["id"])["group_id"] is None
-    assert conversation.get_conversation(single["id"])["workspace_id"] == zero_store.DEFAULT_WORKSPACE_ID
+    assert conversation.get_conversation(single["id"])["workspace_id"] == "ws-role-target"
 
     bad = conversation._exec_role_manage(conv, {
         "action": "update", "role_id": role["id"], "workspace_id": "ws-not-exist"})

@@ -37,6 +37,23 @@ describe('LiveMessage', () => {
     expect(blocks[1].text()).toContain('我补充')
   })
 
+  it('keeps progress text above its tool call and the later reply', async () => {
+    const entries: LiveEntry[] = [
+      { key: '1', kind: 'text', text: '检查会话样式', speaker: 'a' },
+      { key: '2', kind: 'tool', name: 'read_file', args: { path: 'app.css' }, status: 'running', speaker: 'a' },
+    ]
+    const wrapper = mount(LiveMessage, {
+      props: { entries, speakers, streaming: true },
+      global: { stubs },
+    })
+    expect(wrapper.findAll('.reply-entry').map((row) => row.find('.md, .activity-tool').text()))
+      .toEqual(['检查会话样式', 'read_file'])
+    expect(wrapper.find('.streaming').exists()).toBe(false)
+
+    await wrapper.setProps({ entries: [...entries, entry('3', '已调整样式', 'a')] })
+    expect(wrapper.find('.streaming').text()).toBe('已调整样式')
+  })
+
   it('shows the expected speaker while preparing, never a bare 助手', () => {
     const wrapper = mount(LiveMessage, {
       props: { entries: [], speakers, current: 'a', started: false },

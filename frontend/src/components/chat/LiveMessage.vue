@@ -3,8 +3,6 @@ import { computed } from 'vue'
 import Avatar from '@/components/Avatar.vue'
 import type { LiveEntry } from '@/composables/useChat'
 import { groupBySpeaker, type LiveSpeaker } from '@/lib/live'
-import { splitEntries } from '@/lib/trace'
-import Markdown from './Markdown.vue'
 import ProcessList from './ProcessList.vue'
 
 const props = defineProps<{
@@ -12,6 +10,7 @@ const props = defineProps<{
   speakers: Record<string, LiveSpeaker>
   current?: string
   started?: boolean
+  streaming?: boolean
   waitSeconds?: number
   error?: string
 }>()
@@ -21,13 +20,16 @@ const props = defineProps<{
 // 看起来就像「先说助手，再变成指定角色，然后一堆内容一起冒出来」。
 const groups = computed(() => {
   const blocks = groupBySpeaker(props.entries)
-  return blocks.map((group, index) => ({
-    key: `${group.speaker || 'unknown'}-${index}`,
-    meta: props.speakers[group.speaker] || null,
-    parts: splitEntries(group.entries),
-    // 只有最后一个发言者的正文还在生成：光标只该在那一块上闪。
-    active: index === blocks.length - 1,
-  }))
+  return blocks.map((group, index) => {
+    const last = group.entries[group.entries.length - 1]
+    return {
+      key: `${group.speaker || 'unknown'}-${index}`,
+      meta: props.speakers[group.speaker] || null,
+      entries: group.entries,
+      final: last?.kind === 'text' ? last : null,
+      active: props.streaming && index === blocks.length - 1,
+    }
+  })
 })
 
 // start 事件到达前也已经有「预期发言者」（会话绑定角色 / 群组主持 / 被 @ 成员），
@@ -47,10 +49,11 @@ const waitingText = computed(() => (props.started ? '正在思考…' : '正在�
           <b>{{ group.meta?.name || '助手' }}</b>
           <span v-if="group.meta?.sub" class="msg-role">{{ group.meta.sub }}</span>
         </div>
-        <ProcessList v-if="group.parts.process.length" :entries="group.parts.process" live />
-        <div v-if="group.parts.final" class="bubble assistant-text" :class="{ streaming: group.active }">
-          <Markdown :text="group.parts.final.text" />
-        </div>
+        <ProcessList
+          :entries="group.entries"
+          :final="group.final"
+          :live="group.active"
+        />
       </div>
     </div>
   </template>
@@ -62,7 +65,7 @@ const waitingText = computed(() => (props.started ? '正在思考…' : '正在�
         <b>{{ pending?.name || '正在启动…' }}</b>
         <span v-if="pending?.sub" class="msg-role">{{ pending.sub }}</span>
       </div>
-      <div class="live-wait">
+      <div class="live-wait" role="status">
         <span class="live-dots"><i /><i /><i /></span>
         <span>{{ waitingText }}</span>
         <span v-if="waitSeconds" class="live-wait-seconds">{{ waitSeconds }}s</span>

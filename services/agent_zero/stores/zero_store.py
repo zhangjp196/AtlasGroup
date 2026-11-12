@@ -109,6 +109,12 @@ def get_workspace(ws_id: str) -> Optional[Dict[str, Any]]:
     return decode_row(row) if row else None
 
 
+def public_workspace_id(workspace_id: Optional[str]) -> str:
+    """旧版 default 记录为非空外键提供占位，业务层把它视为无工作区。"""
+    ws_id = str(workspace_id or "").strip()
+    return "" if ws_id == DEFAULT_WORKSPACE_ID else ws_id
+
+
 def list_workspaces(limit: int = 100, offset: int = 0,
                     include_archived: bool = False,
                     keyword: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -116,7 +122,9 @@ def list_workspaces(limit: int = 100, offset: int = 0,
     附带对话数、最近会话更新时间与最近 6 条会话预览。
     keyword 按名称模糊过滤。"""
     SessionLocal = get_session_local()
-    clauses = [] if include_archived else ["w.archived = 0"]
+    clauses = ["w.id <> :internal_ws"]
+    if not include_archived:
+        clauses.append("w.archived = 0")
     kw = (keyword or "").strip()
     if kw:
         clauses.append("w.name LIKE :kw")
@@ -147,7 +155,7 @@ def list_workspaces(limit: int = 100, offset: int = 0,
                 f"LIMIT :limit OFFSET :offset"
             ),
             {"limit": max(1, min(int(limit), 500)), "offset": max(0, int(offset)),
-             "kw": f"%{kw}%"},
+             "kw": f"%{kw}%", "internal_ws": DEFAULT_WORKSPACE_ID},
         ).mappings().all()
     return [decode_row(r) for r in rows]
 
@@ -155,7 +163,9 @@ def list_workspaces(limit: int = 100, offset: int = 0,
 def count_workspaces(include_archived: bool = False,
                      keyword: Optional[str] = None) -> int:
     SessionLocal = get_session_local()
-    clauses = [] if include_archived else ["archived = 0"]
+    clauses = ["id <> :internal_ws"]
+    if not include_archived:
+        clauses.append("archived = 0")
     kw = (keyword or "").strip()
     if kw:
         clauses.append("name LIKE :kw")
@@ -163,7 +173,7 @@ def count_workspaces(include_archived: bool = False,
     with SessionLocal() as db:
         row = db.execute(
             text(f"SELECT COUNT(*) FROM {_q('workspaces')} {where}"),
-            {"kw": f"%{kw}%"},
+            {"kw": f"%{kw}%", "internal_ws": DEFAULT_WORKSPACE_ID},
         ).first()
     return int(row[0]) if row else 0
 

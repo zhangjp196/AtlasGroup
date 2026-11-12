@@ -32,7 +32,7 @@ def test_role_crud_and_tools(client):
     assert client.patch(f"{API}/roles/{role['id']}", json={"name": "x"}).status_code == 404
 
 
-def test_role_can_switch_workspace_and_existing_single_chat_follows(client, tmp_path):
+def test_role_can_switch_workspace_independently_of_single_chat(client, tmp_path):
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
     ws_a = client.post(f"{API}/workspaces",
@@ -44,16 +44,18 @@ def test_role_can_switch_workspace_and_existing_single_chat_follows(client, tmp_
         "name": "换工作区", "workspace_id": ws_a["id"]}).json()["data"]
     assert role["workspace_id"] == ws_a["id"]
 
-    conv = client.post(f"{API}/conversations", json={"role_id": role["id"]}).json()["data"]
+    conv = client.post(f"{API}/conversations", json={
+        "role_id": role["id"], "workspace_id": ws_a["id"],
+    }).json()["data"]
     assert conv["workspace_id"] == ws_a["id"]
 
     patched = client.patch(f"{API}/roles/{role['id']}",
                            json={"workspace_id": ws_b["id"]}).json()["data"]
     assert patched["workspace_id"] == ws_b["id"]
     moved = client.get(f"{API}/conversations/{conv['id']}").json()["data"]
-    assert moved["workspace_id"] == ws_b["id"]
+    assert moved["workspace_id"] == ws_a["id"]
 
-    # 空字符串 = 显式改回默认工作区。
+    # 空字符串 = 解除工作区绑定。
     cleared = client.patch(f"{API}/roles/{role['id']}",
                            json={"workspace_id": ""}).json()["data"]
     assert cleared["workspace_id"] == ""

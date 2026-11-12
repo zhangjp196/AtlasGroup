@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 import time
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -20,7 +21,6 @@ from services.agent_zero.stores.zero_store import (
     DEFAULT_ROLE_ID,
     DEFAULT_WORKSPACE_ID,
     GLOBAL_ROLE_ID,
-    get_workspace,
 )
 from services.agent_zero.stores import zero_store
 from services.shared.auth import LOCAL_USER_ID
@@ -55,26 +55,55 @@ def create_conversation(body: CreateConvBody):
         role_id = body.role_id or None
     else:
         role_id = body.role_id or DEFAULT_ROLE_ID
-    # 工作区由角色 / 群组绑定决定；显式 workspace_id 优先（会话 / 后台任务等入口），
-    # 并标记为本会话手动指定，之后切换角色 / 群组不覆盖。
-    ws_id = (str(body.workspace_id or "").strip()
-             or conversation.workspace_for_conversation(role_id, body.team_id)
-             or DEFAULT_WORKSPACE_ID)
-    if not get_workspace(ws_id):
-        raise HTTPException(status_code=404, detail=f"工作区不存在: {ws_id}")
     try:
         conv = conversation.create_conversation(
-            ws_id, USER, role_id=role_id, zone=zone,
+            body.workspace_id or "", USER, role_id=role_id, zone=zone,
             team_id=body.team_id,
             bound_workspace_id=body.bound_workspace_id,
             model_code=body.model_code, thinking_level=body.thinking_level,
             permission_mode=body.permission_mode, run_mode=body.run_mode,
-            workspace_custom=bool(str(body.workspace_id or "").strip()
-                                  or str(body.bound_workspace_id or "").strip()),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"code": 0, "data": conv}
+
+
+class ConversationPopup(BaseModel):
+    x: int = Field(ge=0, le=100_000)
+    y: int = Field(ge=0, le=100_000)
+    w: int = Field(gt=0, le=100_000)
+    h: int = Field(gt=0, le=100_000)
+
+
+class ConversationWindowLayout(BaseModel):
+    presentation: Optional[Literal["popup", "drawer", "tab"]] = None
+    popup: Optional[ConversationPopup] = None
+
+
+@router.get("/conversations/{conv_id}/window-layout")
+def get_conversation_window_layout(conv_id: str):
+    conv = conversation.get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+    return {"code": 0, "data": json.loads(conv.get("window_layout") or "{}")}
+
+
+@router.patch("/conversations/{conv_id}/window-layout")
+def save_conversation_window_layout(conv_id: str, body: ConversationWindowLayout):
+    from sqlalchemy import text
+
+    from services.agent_zero.database import get_session_local
+
+    with get_session_local()() as db:
+        saved = db.execute(
+            text("UPDATE conversations SET window_layout = json_patch("
+                 "COALESCE(window_layout, '{}'), :patch) WHERE id = :id RETURNING window_layout"),
+            {"id": conv_id, "patch": body.model_dump_json(exclude_none=True)},
+        ).scalar_one_or_none()
+        if saved is None:
+            raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
+        db.commit()
+    return {"code": 0, "data": json.loads(saved)}
 
 
 class ConversationTitleBody(BaseModel):
@@ -163,7 +192,6 @@ def set_conversation_participants(conv_id: str, body: ConversationParticipantsBo
                 f"改为会话私有参与角色",
             )
         team_service.bind_team(conv_id, team_id, allow_participants=True)
-    conversation.sync_conversation_workspace(conv_id)
     return {"code": 0, "data": {"conversation": conversation.get_conversation(conv_id), "team": team}}
 
 
@@ -189,11 +217,8 @@ class ConversationSettingsBody(BaseModel):
     title: Optional[str] = Field(None, max_length=200)
     role_id: Optional[str] = Field(None, max_length=80)
     team_id: Optional[str] = Field(None, max_length=80)
-    # 手动指定本会话工作区；传空字符串表示回到角色 / 群组默认工作区。
+    # 显式传空值解除工作区绑定。
     workspace_id: Optional[str] = Field(None, max_length=80)
-    # true = 清除手动指定，重新跟随角色 / 群组（与 workspace_id 同时出现时优先）。
-    workspace_follow: Optional[bool] = None
-    # 旧字段：等价于手动指定 workspace_id。
     bound_workspace_id: Optional[str] = Field(None, max_length=80)
 
 
@@ -210,6 +235,14 @@ def update_conversation_settings(conv_id: str, body: ConversationSettingsBody):
     if not conv:
         raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
     fields = body.model_fields_set
+    workspace_field = next(
+        (field for field in ("workspace_id", "bound_workspace_id") if field in fields), None)
+    workspace_id = None
+    if workspace_field:
+        try:
+            workspace_id = conversation.validate_conversation_workspace(getattr(body, workspace_field))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     zone = str(conv.get("zone") or "")
     SessionLocal = get_session_local()
 
@@ -267,25 +300,9 @@ def update_conversation_settings(conv_id: str, body: ConversationSettingsBody):
         elif current_team:
             team_service.bind_team(conv_id, None, notice="你已退出群聊")
 
-    role_changed = ("role_id" in fields
-                    and str(body.role_id or "").strip() != str(conv.get("role_id") or ""))
-    team_changed = ("team_id" in fields
-                    and str(body.team_id or "").strip() != str(conv.get("team_id") or ""))
-    if role_changed or team_changed:
-        conversation.sync_conversation_workspace(conv_id)
-
-    # 工作区最后处理：同一次保存里既切角色 / 群组又选工作区时，显式选择优先。
-    follow = ("workspace_follow" in fields and bool(body.workspace_follow))
-    if follow:
-        conversation.sync_conversation_workspace(conv_id, force=True)
-    elif "workspace_id" in fields:
+    if workspace_field:
         try:
-            conversation.set_conversation_workspace(conv_id, body.workspace_id)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-    elif "bound_workspace_id" in fields:
-        try:
-            conversation.update_bound_workspace(conv_id, body.bound_workspace_id or None)
+            conversation.set_conversation_workspace(conv_id, workspace_id)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -922,23 +939,64 @@ def list_conversation_messages(conv_id: str, limit: int = 200):
     return {"code": 0, "data": conversation.list_messages(conv_id, limit=limit)}
 
 
-@router.get("/conversations/{conv_id}/attachments/{attachment_id}")
-def get_conversation_attachment(conv_id: str, attachment_id: str):
-    """读取消息附件（图片内联显示 / 文档下载）。"""
-    from urllib.parse import quote
+def _resolve_conversation_link_file(conv_id: str, path: str) -> Path:
+    from services.agent_zero.services import workspace_service
 
+    conv = conversation.get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    ws_id = conv.get("workspace_id")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="请先为会话绑定包含此文件的工作区")
+
+    try:
+        candidate = Path(path)
+        if candidate.is_absolute():
+            root = workspace_service.exec_root(ws_id).resolve()
+            path = candidate.resolve().relative_to(root).as_posix()
+        return workspace_service.resolve_file_for_download(ws_id, path)
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=404, detail="文件不存在或不在会话工作区内") from exc
+
+
+@router.get("/conversations/{conv_id}/link-file/preview")
+def preview_conversation_link_file(conv_id: str, path: str = Query(min_length=1, max_length=4096)):
+    from services.agent_zero.services.preview_service import preview_path
+
+    target = _resolve_conversation_link_file(conv_id, path)
+    return {"code": 0, "data": preview_path(target, target.name)}
+
+
+def _linked_file_response(target: Path, name: str, download: bool) -> FileResponse:
+    from mimetypes import guess_type
+
+    mime = guess_type(name)[0] or "application/octet-stream"
+    inline = not download and (mime.startswith(("audio/", "video/"))
+                               or mime in {"application/pdf", "image/png", "image/jpeg",
+                                           "image/gif", "image/webp", "image/bmp", "image/avif"})
+    return FileResponse(
+        target, filename=name, media_type=mime if inline else "application/octet-stream",
+        content_disposition_type="inline" if inline else "attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get("/conversations/{conv_id}/link-file")
+def get_conversation_link_file(
+    conv_id: str, path: str = Query(min_length=1, max_length=4096), download: bool = False,
+):
+    target = _resolve_conversation_link_file(conv_id, path)
+    return _linked_file_response(target, target.name, download)
+
+
+@router.get("/conversations/{conv_id}/attachments/{attachment_id}")
+def get_conversation_attachment(conv_id: str, attachment_id: str, download: bool = False):
     from services.agent_zero.services import attachment_service
 
     path, meta = attachment_service.resolve_attachment(conv_id, attachment_id)
     if path is None:
         raise HTTPException(status_code=404, detail="附件不存在")
-    name = str(meta.get("name") or path.name)
-    media_type = str(meta.get("mime") or "application/octet-stream")
-    return FileResponse(
-        path,
-        media_type=media_type,
-        headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(name)}"},
-    )
+    return _linked_file_response(path, str(meta.get("name") or path.name), download)
 
 
 @router.get("/conversations/{conv_id}/attachments/{attachment_id}/preview")
@@ -952,20 +1010,25 @@ def preview_conversation_attachment(conv_id: str, attachment_id: str,
     from urllib.parse import quote
 
     from services.agent_zero.services import attachment_service
+    from services.agent_zero.services.preview_service import OFFICE_EXT, preview_path
 
     path, meta = attachment_service.resolve_attachment(conv_id, attachment_id)
     if path is None:
         raise HTTPException(status_code=404, detail="附件不存在")
     limit = max(1_000, min(int(max_chars or 120_000), 400_000))
-    text = attachment_service.read_attachment_text(conv_id, meta, max_chars=limit)
+    name = str(meta.get("name") or path.name)
+    office = preview_path(path, name) if Path(name).suffix.lower() in OFFICE_EXT else {}
+    text = (office.get("text", "")[:limit] if office
+            else attachment_service.read_attachment_text(conv_id, meta, max_chars=limit))
     return {"code": 0, "data": {
+        **office,
         "id": attachment_id,
-        "name": str(meta.get("name") or path.name),
+        "name": name,
         "mime": str(meta.get("mime") or "application/octet-stream"),
         "size": int(meta.get("size") or path.stat().st_size),
-        "kind": str(meta.get("kind") or "file"),
+        "kind": office.get("kind") or str(meta.get("kind") or "file"),
         "text": text,
-        "truncated": bool(meta.get("truncated") or len(text) >= limit),
+        "truncated": bool(office.get("truncated") or meta.get("truncated") or len(text) >= limit),
         "url": (f"/api/agent-zero/conversations/{quote(str(conv_id), safe='')}"
                 f"/attachments/{quote(str(attachment_id), safe='')}"),
     }}
@@ -1154,13 +1217,12 @@ class BoundWorkspaceBody(BaseModel):
 
 @router.patch("/conversations/{conv_id}/workspace")
 def set_conversation_workspace(conv_id: str, body: BoundWorkspaceBody):
-    """切换会话工作区（空 = 回到角色 / 群组的默认工作区）。"""
+    """切换会话工作区（空值解除绑定）。"""
     if not conversation.get_conversation(conv_id):
         raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
     try:
         conv = conversation.set_conversation_workspace(
-            conv_id, body.workspace_id,
-            follow=not str(body.workspace_id or "").strip())
+            conv_id, body.workspace_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     data = dict(conv or {})

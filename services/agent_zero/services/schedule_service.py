@@ -153,13 +153,11 @@ def _normalize_schedule(kind: str, raw: Any) -> Dict[str, Any]:
 
 def _resolve_target(data: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     role_id = str(data.get("role_id") or "").strip() or None
-    workspace_id = str(data.get("workspace_id") or "").strip() or None
+    workspace_id = zero_store.public_workspace_id(data.get("workspace_id"))
     if role_id and not zero_store.get_role(role_id):
         raise ValueError(f"角色不存在: {role_id}")
     if workspace_id and not zero_store.get_workspace(workspace_id):
         raise ValueError(f"工作区不存在: {workspace_id}")
-    if not workspace_id:
-        workspace_id = conversation.workspace_for_conversation(role_id, None)
     return role_id, workspace_id or DEFAULT_WORKSPACE_ID
 
 

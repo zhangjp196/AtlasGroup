@@ -65,28 +65,6 @@ const selectedGroup = computed(() => data.groups.find(
   (team) => team.id === convForm.team_id,
 ) || null)
 
-// 会话工作区默认跟随群组 / 角色；也可以在这里直接指定（只影响这条会话）。
-const followWorkspace = computed(() => {
-  const groupWs = String(selectedGroup.value?.workspace_id || '')
-  if (groupWs) return data.workspaces.find((ws) => ws.id === groupWs) || null
-  const roleId = convForm.role_id || 'default'
-  const role = data.roles.find((item) => item.id === roleId)
-  return data.workspaces.find((ws) => ws.id === String(role?.workspace_id || '')) || null
-})
-const convWorkspace = computed(() =>
-  data.workspaces.find((ws) => ws.id === convForm.workspace_id) || followWorkspace.value)
-const workspaceHint = computed(() => {
-  const name = convWorkspace.value?.name || '默认工作区'
-  if (convForm.team_id) {
-    return convForm.workspace_id
-      ? `群聊默认使用群组工作区；本会话固定使用「${name}」`
-      : `群聊默认跟随群组：「${name}」`
-  }
-  return convForm.workspace_id
-    ? `本会话固定使用「${name}」，之后切换角色不会覆盖`
-    : `默认跟随角色：「${name}」`
-})
-
 const labels: Record<CreateKind, string> = {
   conv: '新建会话',
   ws: '添加工作区',
@@ -146,18 +124,10 @@ async function submit(): Promise<void> {
         return
       }
       if (group) {
-        // 同一个群组复用已有群聊会话；没有就开草稿，发出第一条消息才落库。
-        const existing = data.conversations.find(
-          (conv) => conv.team_id === group.id && !['global-agent', 'global-chat'].includes(String(conv.zone || '')),
-        )
-        if (existing) {
-          chatWindows.openConversation(existing.id)
-        } else {
-          chatWindows.openDraft(group.leader?.id || group.members?.[0]?.id || '', {
-            teamId: group.id,
-            workspaceId: convForm.workspace_id,
-          })
-        }
+        chatWindows.openDraft(group.leader?.id || group.members?.[0]?.id || '', {
+          teamId: group.id,
+          workspaceId: convForm.workspace_id,
+        })
         emit('close')
         return
       }
@@ -275,17 +245,10 @@ async function submit(): Promise<void> {
           <WorkspacePicker
             v-model="convForm.workspace_id"
             :workspaces="data.workspaces"
-            :empty-label="convForm.team_id ? '跟随群组（默认）' : '跟随角色（默认）'"
-            :empty-hint="convForm.team_id ? '按群组绑定工作区' : '切换主持角色时自动更新'"
-            :placeholder="convForm.team_id ? '跟随群组（默认）' : '跟随角色（默认）'"
+            empty-label="无工作区"
+            placeholder="无工作区"
           />
         </el-form-item>
-        <el-alert
-          type="info"
-          :closable="false"
-          show-icon
-          :title="workspaceHint"
-        />
       </template>
 
       <template v-else-if="kind === 'ws'">
@@ -307,8 +270,8 @@ async function submit(): Promise<void> {
           <WorkspacePicker
             v-model="roleForm.workspace_id"
             :workspaces="data.workspaces"
-            empty-label="不绑定（默认工作区）"
-            placeholder="不绑定（默认工作区）"
+            empty-label="无工作区"
+            placeholder="无工作区"
           />
         </el-form-item>
         <el-form-item label="部门">
@@ -347,8 +310,8 @@ async function submit(): Promise<void> {
           <WorkspacePicker
             v-model="teamForm.workspace_id"
             :workspaces="data.workspaces"
-            empty-label="默认工作区"
-            placeholder="默认工作区"
+            empty-label="无工作区"
+            placeholder="无工作区"
           />
         </el-form-item>
         <el-form-item label="协作方式">

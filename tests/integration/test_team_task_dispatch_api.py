@@ -4,14 +4,8 @@ from __future__ import annotations
 API = "/api/agent-zero"
 
 
-def _ws(client) -> str:
-    rows = client.get(f"{API}/workspaces").json()["data"]["items"]
-    row = next((w for w in rows if w.get("is_default")), None)
-    return (row or rows[0])["id"]
-
-
 def test_dispatch_task_to_group_member(client):
-    ws = _ws(client)
+    ws = ""
     team = client.post(f"{API}/teams", json={
         "workspace_id": ws, "name": "派发群", "mode": "orchestrate",
         "leader": {"name": "主持"}, "members": [{"name": "后端"}, {"name": "测试"}],
@@ -36,7 +30,7 @@ def test_dispatch_task_to_group_member(client):
 
 
 def test_dispatch_task_requires_member_in_group(client):
-    ws = _ws(client)
+    ws = ""
     team = client.post(f"{API}/teams", json={
         "workspace_id": ws, "name": "缺成员群", "mode": "orchestrate",
         "leader": {"name": "主持"}, "members": [{"name": "后端"}],
@@ -48,7 +42,7 @@ def test_dispatch_task_requires_member_in_group(client):
 
 
 def test_dispatch_task_in_single_role_conversation(client):
-    ws = _ws(client)
+    ws = ""
     conv = client.post(f"{API}/conversations", json={"workspace_id": ws}).json()["data"]
     res = client.post(f"{API}/conversations/{conv['id']}/team-tasks", json={
         "goal": "跑一个长任务",

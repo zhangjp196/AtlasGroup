@@ -7,9 +7,8 @@ import asyncio
 
 def _new_conversation(client):
     API = "/api/agent-zero"
-    ws = client.get(f"{API}/workspaces").json()["data"]["items"]
     conv = client.post(f"{API}/conversations",
-                       json={"workspace_id": ws[0]["id"], "title": ""})
+                       json={"title": ""})
     assert conv.status_code == 200, conv.text
     return conv.json()["data"]["id"]
 

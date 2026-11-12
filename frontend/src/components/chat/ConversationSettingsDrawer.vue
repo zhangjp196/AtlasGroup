@@ -40,7 +40,6 @@ const draft = reactive({
   role_id: '',
   participant_ids: [] as string[],
   workspace_id: '',
-  workspace_follow: true,
 })
 
 const isGlobal = computed(() => String(props.conversation?.zone || '') === GLOBAL_AGENT_ZONE)
@@ -87,23 +86,6 @@ const participantOptions = computed(() => availableRoles.value
     tag: role.scope === 'temporary' ? '临时' : '',
   })))
 
-// 「跟随」时实际会使用的工作区：群组优先于角色。
-const followWorkspace = computed(() => {
-  const groupWs = String(sharedGroup.value?.workspace_id || '')
-  if (groupWs) return data.workspaces.find((ws) => ws.id === groupWs) || null
-  const roleId = draft.role_id || 'default'
-  const role = data.roles.find((item) => item.id === roleId)
-  return data.workspaces.find((ws) => ws.id === String(role?.workspace_id || '')) || null
-})
-const conversationWorkspace = computed(() => (draft.workspace_follow
-  ? followWorkspace.value
-  : data.workspaces.find((ws) => ws.id === draft.workspace_id) || null))
-
-// 跟随模式下切换角色：选择器与提示同步到新的默认工作区。
-watch(followWorkspace, (ws) => {
-  if (draft.workspace_follow) draft.workspace_id = ws?.id || ''
-})
-
 function loadDraft(): void {
   const conv = props.conversation
   const team = data.teams.find((item) => item.id === conv?.team_id)
@@ -115,11 +97,6 @@ function loadDraft(): void {
     .map((member) => String(member.id || ''))
     .filter((id) => Boolean(id) && id !== draft.role_id)
   draft.workspace_id = conv?.workspace_id || ''
-  draft.workspace_follow = !conv?.workspace_custom
-}
-
-function onFollowChange(): void {
-  if (draft.workspace_follow) draft.workspace_id = followWorkspace.value?.id || draft.workspace_id
 }
 
 function onGroupChange(): void {
@@ -129,11 +106,7 @@ function onGroupChange(): void {
   draft.participant_ids = (group.members || [])
     .map((member) => String(member.id || ''))
     .filter((id) => Boolean(id) && id !== draft.role_id)
-  if (draft.workspace_follow) draft.workspace_id = followWorkspace.value?.id || ''
-}
 
-function onWorkspaceChange(): void {
-  draft.workspace_follow = false
 }
 
 watch(() => [props.open, props.conversation?.id], () => {
@@ -266,10 +239,9 @@ async function save(): Promise<void> {
     if (!isGlobal.value) {
       body.team_id = draft.team_id || ''
       body.role_id = draft.role_id || ''
-      // 工作区默认跟随角色 / 群组；用户手动选择后只作用于本会话，
-      // 同一角色 / 群组的其他会话仍然可以各自使用不同工作区。
-      body.workspace_follow = draft.workspace_follow
-      if (!draft.workspace_follow) body.workspace_id = draft.workspace_id
+    }
+    if (draft.workspace_id !== (conv.workspace_id || '')) {
+      body.workspace_id = draft.workspace_id
     }
     await api<Conversation>(
       `/conversations/${encodeURIComponent(conv.id)}/settings`,
@@ -344,31 +316,13 @@ async function removeConversation(): Promise<void> {
           </div>
           <div class="field">
             <label>工作区</label>
-            <template v-if="!isGlobal">
-              <WorkspacePicker
-                v-model="draft.workspace_id"
-                :workspaces="data.workspaces"
-                :disabled="draft.workspace_follow"
-                empty-label="默认工作区"
-                placeholder="默认工作区"
-                title="选择本会话使用的工作区"
-                @update:model-value="onWorkspaceChange"
-              />
-              <label class="conv-follow">
-                <input v-model="draft.workspace_follow" type="checkbox" @change="onFollowChange" />
-                跟随角色
-              </label>
-              <small v-if="draft.workspace_follow" class="role-line">
-                切换角色时自动更新；当前为「{{ followWorkspace?.name || '默认工作区' }}」。
-              </small>
-              <small v-else class="role-line">
-                本会话固定使用「{{ conversationWorkspace?.name || '默认工作区' }}」，切换角色不会覆盖。
-              </small>
-            </template>
-            <template v-else>
-              <input class="input" value="默认工作区" readonly />
-              <small class="role-line">全局 Agent 固定使用默认工作区。</small>
-            </template>
+            <WorkspacePicker
+              v-model="draft.workspace_id"
+              :workspaces="data.workspaces"
+              empty-label="无工作区"
+              placeholder="无工作区"
+              title="选择本会话使用的工作区"
+            />
           </div>
         </section>
 

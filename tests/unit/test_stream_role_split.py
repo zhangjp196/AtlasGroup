@@ -38,7 +38,7 @@ def test_prepare_role_run_builds_prompt_team_and_tools(app_env):
     assert setup["models"] and setup["models"].get("loop")
     assert setup["specs"], "工具清单不能为空"
     assert setup["team"]["id"] == team["id"]
-    assert setup["ws_id"] == ws
+    assert setup["ws_id"] == ""
     assert setup["user_query"] == ""
 
 

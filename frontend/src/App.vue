@@ -227,6 +227,7 @@ async function openGlobalAgent(): Promise<void> {
     // 不能只看本地会话列表（只取最近 80 条），否则会反复新建全局 Agent。
     const conv = await api<Conversation>('/app/global-agent', { method: 'POST' })
     await data.loadAll()
+    await chatWindows.loadLayout(conv.id)
     globalAgentId.value = conv.id
     globalModes.value['global-agent'] = chatWindows.presentationFor(conv.id)
     if (globalModes.value['global-agent'] === 'tab') chatWindows.activeTab = 'global-agent'
@@ -247,6 +248,7 @@ async function openGlobalChat(): Promise<void> {
   try {
     const conv = await api<Conversation>('/app/global-chat', { method: 'POST' })
     await data.loadAll()
+    await chatWindows.loadLayout(conv.id)
     globalChatId.value = conv.id
     globalModes.value['global-chat'] = chatWindows.presentationFor(conv.id)
     if (globalModes.value['global-chat'] === 'tab') chatWindows.activeTab = 'global-chat'
@@ -423,10 +425,13 @@ onMounted(async () => {
       :draft-workspace-id="win.workspaceId || ''"
       :draft-team-id="win.teamId || ''"
       :presentation="win.presentation"
+      :popup="win.popup"
+      @update:popup="(popup) => chatWindows.setPopup(win.key, popup)"
       @title="(title) => chatWindows.setTitle(win.key, title)"
       @update:presentation="(mode) => chatWindows.setPresentation(win.key, mode)"
       @close="chatWindows.close(win.key)"
       @promoted="(id) => chatWindows.promote(win.key, id)"
+      @draft-workspace="(id) => win.workspaceId = id"
     />
   </Teleport>
 
@@ -436,6 +441,8 @@ onMounted(async () => {
       :conversation-id="panel.id" :initial-tab="panel.agent ? globalAgentTab : 'chat'"
       :global-agent="panel.agent" :global-conversation="!panel.agent"
       :presentation="globalModes[panel.key]"
+      :popup="chatWindows.popupFor(panel.id)"
+      @update:popup="(popup) => chatWindows.rememberPopup(panel.id, popup)"
       @update:presentation="(mode) => setGlobalPresentation(panel.key, panel.id, mode)"
       @close="closeGlobalPanel(panel.key)"
     />

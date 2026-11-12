@@ -67,7 +67,7 @@ def _public(role: Dict[str, Any],
     return {
         "id": role.get("id"),
         "name": str(role.get("name") or role.get("id") or ""),
-        "workspace_id": str(role.get("group_id") or ""),
+        "workspace_id": zero_store.public_workspace_id(role.get("group_id")),
         "title": str(role.get("title") or ""),
         "department_id": dept_id,
         "department": paths.get(dept_id, ""),
@@ -226,10 +226,6 @@ def update_role(role_id: str, body: RoleUpdateBody):
         "source": current.get("source") or "user",
         "session_id": session_id,
     })
-    if "workspace_id" in fields_set:
-        from services.agent_zero.task_layer import conversation
-
-        conversation.sync_conversations_workspace_for_role(role_id, workspace_id or None)
     return {"code": 0, "data": _public(role)}
 
 

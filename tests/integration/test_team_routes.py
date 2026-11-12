@@ -4,13 +4,6 @@ from __future__ import annotations
 API = "/api/agent-zero"
 
 
-def _default_ws(client) -> str:
-    items = client.get(f"{API}/workspaces").json()["data"]["items"]
-    # 跨用例时列表顺序会变（按最近活动排序）：明确取默认工作区，别取 items[0]
-    row = next((w for w in items if w.get("is_default")), None)
-    return (row or items[0])["id"]
-
-
 def _conversation(client, ws_id: str) -> str:
     res = client.post(f"{API}/conversations", json={"workspace_id": ws_id})
     assert res.status_code == 200, res.text
@@ -18,7 +11,7 @@ def _conversation(client, ws_id: str) -> str:
 
 
 def test_team_crud_bind_and_delete(client):
-    ws = _default_ws(client)
+    ws = ""
     created = client.post(f"{API}/teams", json={
         "workspace_id": ws,
         "name": "研发群",
@@ -76,7 +69,7 @@ def test_team_crud_bind_and_delete(client):
 
 
 def test_team_payload_validation(client):
-    ws = _default_ws(client)
+    ws = ""
     assert client.post(f"{API}/teams", json={
         "workspace_id": ws, "name": "x", "mode": "nope"}).status_code == 422
     assert client.post(f"{API}/teams", json={
@@ -88,7 +81,7 @@ def test_team_payload_validation(client):
 
 
 def test_bind_allows_cross_workspace_group(client, tmp_path):
-    """群组独立于工作区：绑定后会话跟随群组工作区。"""
+    """绑定群组后会话仍然可以使用无工作区。"""
     folder = tmp_path / "other-ws"
     folder.mkdir()
     other = client.post(f"{API}/workspaces", json={
@@ -99,19 +92,18 @@ def test_bind_allows_cross_workspace_group(client, tmp_path):
     team = client.post(f"{API}/teams", json={
         "workspace_id": other_ws, "name": "外部群", "mode": "orchestrate",
         "leader": {"name": "主持"}, "members": [{"name": "成员"}]}).json()["data"]
-    # 不显式指定工作区的会话才是「跟随」状态；手动指定的会话保留自己的选择。
     cid = client.post(f"{API}/conversations", json={}).json()["data"]["id"]
     res = client.post(f"{API}/teams/{team['id']}/bind",
                       json={"conversation_id": cid})
     assert res.status_code == 200, res.text
     conv = client.get(f"{API}/conversations/{cid}").json()["data"]
     assert conv["team_id"] == team["id"]
-    assert conv["workspace_id"] == other_ws
+    assert conv["workspace_id"] == ""
 
 
 def test_group_edits_are_live_across_bound_conversations(client):
     """群组是共享实体：改成员后，所有绑定会话读到的是同一份花名册。"""
-    ws = _default_ws(client)
+    ws = ""
     team = client.post(f"{API}/teams", json={
         "workspace_id": ws, "name": "共享群",
         "leader": {"name": "主持"}, "members": [{"name": "甲"}],
@@ -152,7 +144,7 @@ def test_private_participants_team_is_not_a_group(client):
 
 
 def test_delete_group_unbinds_and_revokes_group_grants(client):
-    ws = _default_ws(client)
+    ws = ""
     team = client.post(f"{API}/teams", json={
         "workspace_id": ws, "name": "授权群",
         "leader": {"name": "主持"}, "members": [{"name": "成员"}],
@@ -171,7 +163,7 @@ def test_delete_group_unbinds_and_revokes_group_grants(client):
 
 def test_conversation_list_filters_by_team_and_role(client):
     """群组 / 角色卡片点击要复用已有会话：列表必须支持按 team_id / role_id 过滤。"""
-    ws = _default_ws(client)
+    ws = ""
     role = client.post(f"{API}/roles", json={"name": "过滤角色"}).json()["data"]
     single = client.post(f"{API}/conversations", json={
         "role_id": role["id"], "workspace_id": ws,

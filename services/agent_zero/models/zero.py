@@ -175,11 +175,11 @@ class Conversation(Base):
     )
     # 会话级工作区绑定（历史字段，可空 = 纯聊天）：只做旧数据兼容
     bound_workspace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 工作区是否为会话手动指定：0 = 跟随角色 / 群组绑定，1 = 本会话固定使用
-    # workspace_id（切换角色 / 群组不覆盖，同一角色的不同会话可以用不同工作区）。
+    # 历史字段，保留供旧客户端读取。
     workspace_custom: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("0")
     )
+    window_layout: Mapped[str | None] = mapped_column(Text, nullable=True)
     role_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 空间分区（历史字段）：普通对话为空，群组/角色空间按 zone 分区展示。
     zone: Mapped[str | None] = mapped_column(Text, nullable=True)
