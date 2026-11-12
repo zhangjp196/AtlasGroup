@@ -1840,6 +1840,9 @@ html[data-theme="sepia"] select.input option{background:var(--panel-2);color:var
 .chat-panel .rs-bottom{left:0;right:0;bottom:0;height:7px;cursor:ns-resize;opacity:.35}
 .chat-panel .rs-corner{right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;opacity:.6;background:
   linear-gradient(135deg,transparent 0 55%,color-mix(in srgb,var(--accent) 45%,transparent) 55% 100%)}
+.chat-panel .rs-top-left{top:0;left:0;right:auto;bottom:auto;transform:rotate(180deg)}
+.chat-panel .rs-top-right{top:0;bottom:auto;cursor:nesw-resize;transform:rotate(-90deg)}
+.chat-panel .rs-bottom-left{left:0;right:auto;cursor:nesw-resize;transform:rotate(90deg)}
 .chat-panel .rs:hover,.chat-panel .rs:active{opacity:.85;background-color:color-mix(in srgb,var(--accent) 22%,transparent)}
 .side-drawer .rs-left{left:0;top:0;bottom:0;width:7px;cursor:ew-resize;opacity:0}
 .side-drawer .rs-left:hover,.side-drawer .rs-left:active{opacity:.85;background:color-mix(in srgb,var(--accent) 30%,transparent)}

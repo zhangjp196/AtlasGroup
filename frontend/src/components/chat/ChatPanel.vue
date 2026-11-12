@@ -218,7 +218,9 @@ const globalTab = ref<'chat' | 'inbox'>(props.initialTab || 'chat')
 // 角标只算必须由人处理的事项：待授权 + 待回答。
 const inboxCount = computed(() => Number(attention.counts.authorizations || 0))
 watch(() => props.initialTab, (tab) => { if (tab) globalTab.value = tab })
-const size = ref({ w: props.popup?.w ?? 440, h: props.popup?.h ?? 640 })
+const isGlobalPanel = computed(() => props.globalAgent || props.globalConversation)
+// 截图中的普通会话弹窗约为 1386 × 1280（2x）。
+const size = ref({ w: props.popup?.w ?? (isGlobalPanel.value ? 440 : 693), h: props.popup?.h ?? 640 })
 function defaultPosition(): Pick<ChatPopup, 'x' | 'y'> {
   const w = Math.min(size.value.w, Math.max(320, window.innerWidth - 32))
   const h = Math.min(size.value.h, Math.max(260, window.innerHeight - 40))
@@ -259,12 +261,12 @@ const popupStyle = computed(() => {
   if (!floating.value) return undefined
   const { w, h, x, y } = popupRect.value
   return { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`,
-    zIndex: props.globalAgent || props.globalConversation ? 104 : 102 }
+    zIndex: isGlobalPanel.value ? 104 : 102 }
 })
 
 const dragging = ref(false)
 const resizing = ref(false)
-type ResizeEdge = 'right' | 'top' | 'bottom' | 'corner'
+type ResizeEdge = 'right' | 'top' | 'bottom' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
 let stopResize: (() => void) | undefined
 function startResize(event: PointerEvent, edge: ResizeEdge): void {
   if (!floating.value || event.button !== 0) return
@@ -272,17 +274,23 @@ function startResize(event: PointerEvent, edge: ResizeEdge): void {
   const start = popupRect.value
   const startX = event.clientX
   const startY = event.clientY
+  const fromLeft = edge.endsWith('left')
+  const fromRight = edge.endsWith('right')
+  const fromTop = edge.startsWith('top')
+  const fromBottom = edge.startsWith('bottom')
+  const right = start.x + start.w
+  const bottom = start.y + start.h
   resizing.value = true
   const onMove = (move: PointerEvent): void => {
     if (move.pointerId !== event.pointerId) return
     const dx = move.clientX - startX
     const dy = move.clientY - startY
-    const maxW = viewport.value.w - start.x - 8
-    const maxH = edge === 'top' ? start.y + start.h - 8 : viewport.value.h - start.y - 8
-    const w = edge === 'right' || edge === 'corner' ? Math.min(maxW, Math.max(320, start.w + dx)) : start.w
-    const h = edge === 'right' ? start.h : Math.min(maxH, Math.max(260, start.h + (edge === 'top' ? -dy : dy)))
+    const maxW = fromLeft ? right - 8 : viewport.value.w - start.x - 8
+    const maxH = fromTop ? bottom - 8 : viewport.value.h - start.y - 8
+    const w = fromLeft || fromRight ? Math.min(maxW, Math.max(320, start.w + (fromLeft ? -dx : dx))) : start.w
+    const h = fromTop || fromBottom ? Math.min(maxH, Math.max(260, start.h + (fromTop ? -dy : dy))) : start.h
     size.value = { w, h }
-    pos.value = { x: start.x, y: edge === 'top' ? start.y + start.h - h : start.y }
+    pos.value = { x: fromLeft ? right - w : start.x, y: fromTop ? bottom - h : start.y }
   }
   const onEnd = (end: PointerEvent): void => {
     if (end.pointerId === event.pointerId) stopResize?.()
@@ -1314,7 +1322,12 @@ function onConversationLink(event: MouseEvent): void {
       <span class="rs rs-top" title="拖拽上沿调整高度" @pointerdown.stop.prevent="startResize($event, 'top')" />
       <span class="rs rs-right" title="拖拽拉伸宽度" @pointerdown.stop.prevent="startResize($event, 'right')" />
       <span class="rs rs-bottom" title="拖拽拉伸高度" @pointerdown.stop.prevent="startResize($event, 'bottom')" />
-      <span class="rs rs-corner" title="拖拽拉伸" @pointerdown.stop.prevent="startResize($event, 'corner')" />
+      <span class="rs rs-corner" title="拖拽右下角调整尺寸" @pointerdown.stop.prevent="startResize($event, 'bottom-right')" />
+      <template v-if="!isGlobalPanel">
+        <span class="rs rs-corner rs-top-left" title="拖拽左上角调整尺寸" @pointerdown.stop.prevent="startResize($event, 'top-left')" />
+        <span class="rs rs-corner rs-top-right" title="拖拽右上角调整尺寸" @pointerdown.stop.prevent="startResize($event, 'top-right')" />
+        <span class="rs rs-corner rs-bottom-left" title="拖拽左下角调整尺寸" @pointerdown.stop.prevent="startResize($event, 'bottom-left')" />
+      </template>
     </template>
   </div>
 </template>
