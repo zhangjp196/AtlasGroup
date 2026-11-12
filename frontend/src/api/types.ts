@@ -137,6 +137,7 @@ export interface Role {
   avatar?: string
   tools?: string[]
   model_code?: string
+  chat_model_code?: string
   scope?: 'persistent' | 'temporary'
   source?: string
   session_id?: string
@@ -158,6 +159,8 @@ export interface TeamMember {
 
 export interface Team {
   id: string
+  /** group = 用户可管理的群组；participants = 会话私有参与角色 */
+  kind?: 'group' | 'participants' | string
   name: string
   description?: string
   avatar?: string

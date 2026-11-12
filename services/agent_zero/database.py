@@ -299,6 +299,12 @@ def init_database() -> None:
                 "UPDATE conversations SET last_read_at = updated_at "
                 "WHERE last_read_at IS NULL"))
         _migrate_legacy_queue(conn)
+        # 旧库把「会话私有参与角色」也存成团队：按 id 前缀补成 participants，
+        # 群组页 / /teams 默认列表只展示真正的群组（kind=group）。
+        conn.execute(text(
+            "UPDATE agent_teams SET kind = 'participants' "
+            "WHERE id LIKE 'participants-%' AND kind <> 'participants'"
+        ))
         for stmt in ENSURE_INDEXES:
             conn.execute(text(stmt))
         version = _guard_old_database(conn)

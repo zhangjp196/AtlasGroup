@@ -403,14 +403,14 @@ void data.loadSchedules()
 </template>
 
 <style scoped>
-.sched-filters { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.sched-filters { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin-bottom: 14px; }
 .sched-count { color: var(--dim); font-size: 12px; margin-left: auto; }
 .sched-card { cursor: default; }
 .sched-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: var(--bg-2); color: var(--dim); font-size: 17px; flex: none; }
-.sched-icon.smart { color: #d97706; background: #d9770614; }
+.sched-icon.smart { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
 .sched-status { margin-left: auto; padding: 2px 8px; border-radius: 999px; font-size: 11px; color: var(--dim); background: var(--bg-2); }
-.sched-status.active { color: #15803d; background: #15803d14; }
-.sched-status.paused { color: #b45309; background: #b4530914; }
+.sched-status.active { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, var(--panel)); }
+.sched-status.paused { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
 .sched-status.done { color: var(--faint); }
 .sched-condition { margin: 6px 0 0; padding: 7px 9px; border-radius: 8px; background: var(--bg-2); color: var(--dim); font-size: 12px; }
 .sched-meta { display: flex; justify-content: space-between; gap: 10px; color: var(--faint); font-size: 11px; margin-top: 8px; }

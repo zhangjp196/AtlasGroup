@@ -1561,8 +1561,8 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
         <div class="detail-section">
           <h3>主题</h3>
           <div class="theme-grid">
-            <button v-for="theme in THEMES" :key="theme.id" class="theme-swatch" :class="{ on: app.theme === theme.id }" @click="setTheme(theme.id)">
-              <i />
+            <button v-for="theme in THEMES" :key="theme.id" class="theme-swatch" :class="{ on: app.theme === theme.id }" :aria-pressed="app.theme === theme.id" @click="setTheme(theme.id)">
+              <i :data-theme="theme.id" aria-hidden="true" />
               <b>{{ theme.label }}</b>
             </button>
           </div>

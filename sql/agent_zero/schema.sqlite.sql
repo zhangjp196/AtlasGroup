@@ -3,7 +3,7 @@
 
 CREATE TABLE workspaces (
 	id TEXT NOT NULL, 
-	kind TEXT DEFAULT 'group' NOT NULL, 
+	kind TEXT DEFAULT 'group' NOT NULL,
 	name TEXT NOT NULL, 
 	member_role_ids JSON, 
 	zones JSON, 
@@ -23,7 +23,7 @@ CREATE TABLE roles (
 	name TEXT, 
 	persona TEXT, 
 	expertise TEXT, 
-	avatar TEXT, 
+	avatar TEXT,
 	envelope JSON NOT NULL, 
 	created_at DATETIME DEFAULT (datetime('now','localtime')), 
 	PRIMARY KEY (id)
@@ -75,13 +75,19 @@ CREATE TABLE agent_teams (
 	id TEXT NOT NULL, 
 	workspace_id TEXT NOT NULL, 
 	name TEXT NOT NULL, 
+	avatar TEXT,
 	description TEXT, 
+	kind TEXT DEFAULT 'group' NOT NULL,
+	mode TEXT DEFAULT 'orchestrate' NOT NULL,
+	max_speakers INTEGER DEFAULT 4 NOT NULL,
 	leader_role_id TEXT, 
 	member_role_ids JSON, 
 	created_at DATETIME DEFAULT (datetime('now','localtime')) NOT NULL, 
 	updated_at DATETIME DEFAULT (datetime('now','localtime')) NOT NULL, 
 	PRIMARY KEY (id), 
-	FOREIGN KEY(workspace_id) REFERENCES workspaces (id) ON DELETE CASCADE
+	FOREIGN KEY(workspace_id) REFERENCES workspaces (id) ON DELETE CASCADE,
+	CONSTRAINT ck_agent_teams_kind CHECK (kind IN ('group', 'participants')),
+	CONSTRAINT ck_agent_teams_mode CHECK (mode IN ('orchestrate', 'roundtable', 'single'))
 );
 
 CREATE TABLE conversations (

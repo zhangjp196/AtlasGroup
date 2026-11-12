@@ -30,6 +30,7 @@ export const useDataStore = defineStore('data', () => {
   const workItems = ref<WorkItemsResponse['items']>([])
   const workStats = ref<WorkItemsResponse['stats']>({})
   const workPolicy = ref<Record<string, unknown>>({})
+  const workError = ref('')
   const schedules = ref<ScheduledTask[]>([])
   const scheduleStats = ref<ScheduleListResponse['stats']>({})
   const loading = ref(false)
@@ -41,6 +42,10 @@ export const useDataStore = defineStore('data', () => {
   ))
   const activeWorkspaces = computed(() => workspaces.value.filter((workspace) => !workspace.archived))
   const archivedWorkspaces = computed(() => workspaces.value.filter((workspace) => workspace.archived))
+  // 群组页只展示用户可管理的群组；participants-* 是会话私有参与角色，内部解析用。
+  const groups = computed(() => teams.value.filter(
+    (team) => String(team.kind || 'group') !== 'participants',
+  ))
 
   // 角色头像的「实时」来源：持久角色 + 群组里的主持 / 成员（含临时角色）。
   // 群聊消息里存的是回复那一刻的头像快照；角色换头像后历史消息不能一直用旧图，
@@ -78,7 +83,7 @@ export const useDataStore = defineStore('data', () => {
         api<ListResponse<Workspace>>('/workspaces?include_archived=true').catch(() => ({ items: [] })),
         api<ListResponse<Conversation>>('/conversations?limit=80').catch(() => ({ items: [] })),
         api<ListResponse<Role>>('/roles').catch(() => ({ items: [] })),
-        api<ListResponse<Team>>('/teams').catch(() => ({ items: [] })),
+        api<ListResponse<Team>>('/teams?kind=all').catch(() => ({ items: [] })),
         api<ListResponse<Department>>('/departments').catch(() => ({ items: [] })),
         api<ModelsResponse>('/app/models').catch(() => ({ items: [], active: '', subscriptions: [] })),
       ])
@@ -108,6 +113,7 @@ export const useDataStore = defineStore('data', () => {
   async function loadWork(): Promise<void> {
     try {
       const next = await api<WorkItemsResponse>('/work-items?limit=120')
+      workError.value = ''
       const items = next.items || []
       const stats = next.stats || {}
       const policy = next.policy || {}
@@ -116,7 +122,8 @@ export const useDataStore = defineStore('data', () => {
       if (JSON.stringify(stats) !== JSON.stringify(workStats.value)) workStats.value = stats
       if (JSON.stringify(policy) !== JSON.stringify(workPolicy.value)) workPolicy.value = policy
     } catch (error) {
-      lastError.value = error instanceof Error ? error.message : String(error)
+      workError.value = error instanceof Error ? error.message : String(error)
+      lastError.value = workError.value
     }
   }
 
@@ -185,11 +192,13 @@ export const useDataStore = defineStore('data', () => {
     workItems,
     workStats,
     workPolicy,
+    workError,
     loading,
     lastError,
     schedules,
     scheduleStats,
     persistentRoles,
+    groups,
     activeWorkspaces,
     archivedWorkspaces,
     roleAvatarMap,

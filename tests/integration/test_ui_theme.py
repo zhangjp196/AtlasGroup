@@ -6,19 +6,22 @@ def test_theme_prefs_roundtrip_keeps_layout(client):
     first = client.put("/api/agent-zero/app/theme", json={
         "theme": "ocean",
         "themeSchedule": {
-            "mode": "daynight", "day": "light", "night": "dark",
+            "mode": "daynight", "day": "ocean", "night": "midnight",
             "interval": 15, "dayStart": "07:30", "nightStart": "21:00",
         },
     }).json()["data"]
-    assert first["theme"] == "ocean"
+    assert first["theme"] == "light"
+    assert first["themeSchedule"]["day"] == "light"
+    assert first["themeSchedule"]["night"] == "dark"
     assert first["themeSchedule"]["dayStart"] == "07:30"
 
     got = client.get("/api/agent-zero/app/theme").json()["data"]
-    assert got["theme"] == "ocean"
+    assert got["theme"] == "light"
     assert got["themeSchedule"]["nightStart"] == "21:00"
 
     # 主题写入不能把同一份 ui 偏好里的布局字段冲掉。
     client.put("/api/agent-zero/app/ui", json={"prefs": {"theme": "ocean", "sidebarW": 320, "viewerWrap": True}})
+    assert client.get("/api/agent-zero/app/theme").json()["data"]["theme"] == "light"
     client.put("/api/agent-zero/app/theme", json={"theme": "sepia", "themeSchedule": {}})
     ui = client.get("/api/agent-zero/app/ui").json()["data"]
     assert ui["theme"] == "sepia"

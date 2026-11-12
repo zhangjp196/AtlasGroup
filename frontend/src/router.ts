@@ -5,6 +5,7 @@ const ConversationsView = () => import('@/views/ConversationsView.vue')
 const SchedulesView = () => import('@/views/SchedulesView.vue')
 const WorkspacesView = () => import('@/views/WorkspacesView.vue')
 const RolesView = () => import('@/views/RolesView.vue')
+const GroupsView = () => import('@/views/GroupsView.vue')
 const SettingsView = () => import('@/views/SettingsView.vue')
 const AboutView = () => import('@/views/AboutView.vue')
 
@@ -21,7 +22,8 @@ const router = createRouter({
     { path: '/ws/:id', component: WorkspacesView, meta: { section: 'ws', title: '工作区' } },
     { path: '/role', component: RolesView, meta: { section: 'role', title: '组织与角色' } },
     { path: '/role/:id', component: RolesView, meta: { section: 'role', title: '角色' } },
-    // 群组功能已移除：旧书签落到会话页，由会话内的参与角色承担多角色协作。
+    { path: '/group', component: GroupsView, meta: { section: 'group', title: '群组' } },
+    { path: '/group/:id', component: GroupsView, meta: { section: 'group', title: '群组' } },
     { path: '/settings', component: SettingsView, meta: { section: 'settings', title: '设置', flat: true } },
     { path: '/about', component: AboutView, meta: { section: 'about', title: '关于', flat: true } },
     { path: '/:pathMatch(.*)*', redirect: '/work' },

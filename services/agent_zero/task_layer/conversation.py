@@ -219,6 +219,21 @@ def create_conversation(workspace_id: str, user: str,
         # 普通会话不能绑定全局角色。
         role_id = None
 
+    # 群组 = 用户可管理的共享花名册；participants-* 是会话私有参与角色，
+    # 只能由 participants 接口内部绑定，不能作为普通会话的 team_id 传进来。
+    if team_id:
+        from services.agent_zero.services import team_service
+
+        team = team_service.get_team(str(team_id)) or {}
+        if not team:
+            raise ValueError(f"群组不存在: {team_id}")
+        if str(team.get("kind") or "group") == "participants":
+            raise ValueError("会话私有参与角色不能作为群组绑定")
+        # 群聊的主持由群组决定：调用方没显式指定角色时，跟随群主。
+        if not role_id:
+            leader = team.get("leader") or {}
+            role_id = str(leader.get("id") or "").strip() or None
+
     # 工作区由角色 / 群组决定；旧版 bound_workspace_id 作为兼容入口提升为归属。
     bound_workspace_id = str(bound_workspace_id or "").strip() or None
     requested_ws = bound_workspace_id or str(workspace_id or "").strip()
@@ -236,16 +251,6 @@ def create_conversation(workspace_id: str, user: str,
     if role_id:
         # 角色入口 = 独立工作区（P0：记录 role_id，空间锚定到角色）
         pass
-    # 角色固定模型：新建会话没有显式模型时，继承角色自己的 model_code；
-    # 角色未指定（空）则继续走会话 / 全局默认。
-    if model_code is None and role_id:
-        try:
-            _role = zero_store.get_role(str(role_id)) or {}
-            _model = str(_role.get("model_code") or "").strip()
-            if _model:
-                model_code = _model
-        except Exception:
-            pass
     conv_id = zero_store.new_id("conv")
     from services.agent_zero.database import get_session_local
 
@@ -671,11 +676,18 @@ def fork_conversation(conv_id: str, *, message_id: Optional[str] = None,
     if not items:
         raise ValueError("该对话没有可复制的消息")
 
+    from services.agent_zero.services import team_service as _tsvc
+
+    src_team = _tsvc.get_team(str(src.get("team_id") or "")) or {}
+    src_is_shared_group = str(src_team.get("kind") or "group") == "group"
     new = create_conversation(
         str(src.get("workspace_id") or ""), user,
         role_id=src.get("role_id"),
         zone=None if src.get("zone") == GLOBAL_CHAT_ZONE else src.get("zone"),
-        source="fork", team_id=src.get("team_id"),
+        source="fork",
+        # 共享群组是长期实体，分支继续留在群里；会话私有参与角色要复制一份，
+        # 不能把两条会话绑到同一个 participants-* 团队上。
+        team_id=src.get("team_id") if src_is_shared_group else None,
         model_code=src.get("model_code"),
         thinking_level=src.get("thinking_level"),
         permission_mode=src.get("permission_mode"),
@@ -683,6 +695,25 @@ def fork_conversation(conv_id: str, *, message_id: Optional[str] = None,
         workspace_custom=bool(src.get("workspace_custom")),
     )
     new_id = str(new["id"])
+    if src_team and not src_is_shared_group:
+        try:
+            leader = src_team.get("leader") or {}
+            members = [
+                {"id": m.get("id"), "name": m.get("name"), "expertise": m.get("expertise")}
+                for m in (src_team.get("members") or []) if m.get("id")
+            ]
+            tid = f"participants-{new_id}-{zero_store.new_id('set')}"
+            _tsvc.create_team(
+                str(new.get("workspace_id") or src.get("workspace_id") or ""),
+                str(src_team.get("name") or "会话参与角色"),
+                leader={"id": leader.get("id"), "name": leader.get("name") or "主持"},
+                members=members,
+                mode=src_team.get("mode"), max_speakers=src_team.get("max_speakers"),
+                team_id=tid, kind="participants",
+            )
+            _tsvc.bind_team(new_id, tid, allow_participants=True)
+        except Exception:
+            logger.debug("分支复制会话参与角色失败（忽略）", exc_info=True)
     store = GdagStore()
     copied = 0
     copied_attachments: List[Dict[str, Any]] = []
@@ -1400,27 +1431,40 @@ def _chat_models(role: Dict[str, Any]) -> Optional[Dict[str, str]]:
     return models
 
 
-def chat_vision_for(conv: Dict[str, Any]) -> bool:
-    """该会话本轮实际使用的 loop 模型是否支持图片。
+def role_chat_model_code(role: Dict[str, Any]) -> str:
+    """角色显式模型优先，其次是角色运行配置中的模型。"""
+    fixed = str(role.get("model_code") or "").strip()
+    if fixed:
+        return fixed
+    loop = (_chat_models(role) or {}).get("loop") or ""
+    return loop if loop != "default" else ""
 
-    上传校验必须和真正跑对话时选模型的口径一致：会话级 ``model_code`` 优先，
-    其次角色固定模型，最后才是全局激活模型；否则「会话用视觉模型、全局不是」
-    会把图片挡在门外，反过来又会把图片塞给不支持视觉的模型。
-    """
+
+def _resolved_chat_models(conv: Dict[str, Any], role: Dict[str, Any]) -> Dict[str, str]:
+    from services.agent_zero.runtime.zero import llm as llm_mod
+
+    selected = str(conv.get("model_code") or "").strip()
+    fixed = str(role.get("model_code") or "").strip()
+    default = llm_mod.get_active_model_code()
+    base = fixed or selected or default
+    models = _chat_models(role) or {"loop": "default", "fallback": "default"}
+    if fixed:
+        models["loop"] = fixed
+    return {key: (base if code == "default" else code) for key, code in models.items()}
+
+
+def chat_model_code(conv: Dict[str, Any]) -> str:
+    """主持角色、会话模型与默认模型按实际运行的优先级解析。"""
+    role = zero_store.get_role(str(conv.get("role_id") or "")) or {}
+    return _resolved_chat_models(conv, role).get("loop") or "default"
+
+
+def chat_vision_for(conv: Dict[str, Any]) -> bool:
+    """使用实际对话模型校验图片支持。"""
     from services.agent_zero.runtime.zero import llm as llm_mod
 
     try:
-        role = zero_store.get_role(str((conv or {}).get("role_id") or "")) or {}
-    except Exception:
-        role = {}
-    models = _chat_models(role) or {"loop": "default", "fallback": "default"}
-    active_code = str((conv or {}).get("model_code") or "").strip() \
-        or llm_mod.get_active_model_code()
-    loop_code = str(models.get("loop") or "default")
-    if loop_code == "default":
-        loop_code = active_code or "default"
-    try:
-        return bool(llm_mod.model_supports_vision(loop_code or "default"))
+        return bool(llm_mod.model_supports_vision(chat_model_code(conv)))
     except Exception:
         return False
 
@@ -2758,7 +2802,9 @@ def _exec_team_manage(conv: Dict[str, Any], ws_id: str,
     is_global = str(conv.get("zone") or "") == GLOBAL_AGENT_ZONE
     try:
         if action == "list":
-            return json.dumps({"teams": _tsvc.list_teams(ws_id)}, ensure_ascii=False)
+            # 只列真正的群组；participants-* 是会话私有参与角色，不属于用户群组。
+            return json.dumps({"teams": _tsvc.list_teams(ws_id, kind="group")},
+                              ensure_ascii=False)
         if action == "create":
             team = _tsvc.create_team(
                 ws_id, str(args.get("name") or ""),
@@ -2780,7 +2826,12 @@ def _exec_team_manage(conv: Dict[str, Any], ws_id: str,
                                    "请在「群组」页打开群聊")
             return json.dumps(payload, ensure_ascii=False)
         if action == "update":
-            team = _tsvc.update_team(str(args.get("team_id") or ""),
+            tid = str(args.get("team_id") or "")
+            target = _tsvc.get_team(tid) or {}
+            if str(target.get("kind") or "group") == "participants":
+                return json.dumps({"error": "会话私有参与角色不是群组，不能在这里修改"},
+                                  ensure_ascii=False)
+            team = _tsvc.update_team(tid,
                                      name=args.get("name"),
                                      description=args.get("description"),
                                      leader=args.get("leader"),
@@ -2790,6 +2841,10 @@ def _exec_team_manage(conv: Dict[str, Any], ws_id: str,
             return json.dumps({"ok": True, "team": team}, ensure_ascii=False)
         if action == "delete":
             tid = str(args.get("team_id") or "")
+            target = _tsvc.get_team(tid) or {}
+            if str(target.get("kind") or "group") == "participants":
+                return json.dumps({"error": "会话私有参与角色不是群组，不能在这里删除"},
+                                  ensure_ascii=False)
             ok = _tsvc.delete_team(tid)
             if ok and str(conv.get("team_id") or "") == tid:
                 conv["team_id"] = None
@@ -2801,8 +2856,14 @@ def _exec_team_manage(conv: Dict[str, Any], ws_id: str,
                 return json.dumps(
                     {"error": "全局 Agent 不能加入群组；请在「群组」页打开群聊"},
                     ensure_ascii=False)
-            if tid and not _tsvc.get_team(tid):
-                return json.dumps({"error": f"团队不存在: {tid}"}, ensure_ascii=False)
+            if tid:
+                target = _tsvc.get_team(tid) or {}
+                if not target:
+                    return json.dumps({"error": f"团队不存在: {tid}"}, ensure_ascii=False)
+                if str(target.get("kind") or "group") == "participants":
+                    return json.dumps(
+                        {"error": "会话私有参与角色不是群组，不能用 team_manage 绑定"},
+                        ensure_ascii=False)
             _tsvc.bind_team(
                 conv["id"], tid,
                 notice=(None if tid else "你已退出群聊"))
@@ -4720,7 +4781,7 @@ def persist_interrupted_run(run_id: str, *, outcome: str = "failed",
     try:
         from services.agent_zero.runtime.zero import llm as llm_mod
 
-        code = str(conv.get("model_code") or "").strip() or llm_mod.get_active_model_code()
+        code = _resolved_chat_models(conv, role).get("loop") or "default"
         model = llm_mod.get_model_name(code)
     except Exception:
         model = ""
@@ -4928,16 +4989,7 @@ async def _prepare_role_run(
     from services.agent_zero.runtime.zero import llm as llm_mod
     from services.agent_zero.runtime.zero.dispatch import ToolDispatcher
 
-    models = _chat_models(role) or {"loop": "default", "fallback": "default"}
-    # 会话级模型优先；子代理 / 团队成员隔离运行时优先用它自己的角色模型。
-    active_code = str((conv or {}).get("model_code") or "").strip()
-    if isolated:
-        active_code = str((role or {}).get("model_code") or "").strip() or active_code
-    active_code = active_code or llm_mod.get_active_model_code()
-    models = {
-        key: (active_code if code == "default" else code)
-        for key, code in models.items()
-    }
+    models = _resolved_chat_models(conv, role)
     display_model = llm_mod.get_model_name(models.get("loop") or "default")
     try:
         _run_cfg = await llm_mod.get_llm_config(models.get("loop") or "default")
@@ -6673,6 +6725,7 @@ def _page_message_stats(db: Any, items: list) -> None:
 
 def list_conversations(workspace_id: Optional[str] = None,
                        role_id: Optional[str] = None,
+                       team_id: Optional[str] = None,
                        limit: int = 50, offset: int = 0,
                        keyword: Optional[str] = None,
                        source: Optional[str] = None,
@@ -6736,6 +6789,9 @@ def list_conversations(workspace_id: Optional[str] = None,
     if role_id:
         base += " AND c.role_id = :rid"
         params["rid"] = role_id
+    if team_id:
+        base += " AND c.team_id = :tid"
+        params["tid"] = team_id
     if source:
         base += " AND c.source = :src"
         params["src"] = source
@@ -6826,6 +6882,7 @@ def mark_all_conversations_read() -> int:
 
 def count_conversations(workspace_id: Optional[str] = None,
                         role_id: Optional[str] = None,
+                        team_id: Optional[str] = None,
                         keyword: Optional[str] = None,
                         source: Optional[str] = None,
                         include_archived: bool = False) -> int:
@@ -6844,6 +6901,9 @@ def count_conversations(workspace_id: Optional[str] = None,
     if role_id:
         sql += " AND role_id = :rid"
         params["rid"] = role_id
+    if team_id:
+        sql += " AND team_id = :tid"
+        params["tid"] = team_id
     if keyword:
         sql += (f" AND EXISTS (SELECT 1 FROM {_q('gdag_nodes')} g "
                 f"WHERE g.type = 'fact' "
@@ -7406,6 +7466,11 @@ def delete_conversation(conv_id: str) -> bool:
     from services.agent_zero.database import get_session_local
     from services.agent_zero.stores.zero_store import _q
 
+    old_team_id = ""
+    try:
+        old_team_id = str((get_conversation(conv_id) or {}).get("team_id") or "")
+    except Exception:
+        old_team_id = ""
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         # 会话内的临时角色：会话没了就销毁（持久角色不受影响）
@@ -7435,4 +7500,11 @@ def delete_conversation(conv_id: str) -> bool:
         )
         db.commit()
         attachment_service.remove_conversation(conv_id)
+        if old_team_id:
+            try:
+                from services.agent_zero.services import team_service
+
+                team_service.cleanup_orphan_participants(old_team_id)
+            except Exception:
+                logger.debug("清理会话私有参与角色失败（忽略）", exc_info=True)
         return bool(res.rowcount)

@@ -99,16 +99,24 @@ def test_default_role_cannot_be_deleted(client):
     assert client.delete(f"{API}/roles/default").status_code == 400
 
 
-def test_conversation_inherits_fixed_role_model(client):
+def test_fixed_role_model_overrides_without_replacing_conversation_preference(client):
+    from services.agent_zero.task_layer.conversation import chat_model_code
+
     role = client.post(f"{API}/roles", json={
         "name": "固定模型角色", "model_code": "fast",
         "tools": ["read_file"],
     }).json()["data"]
     conv = client.post(f"{API}/conversations", json={"role_id": role["id"]}).json()["data"]
-    assert conv["model_code"] == "fast"
+    assert not conv["model_code"]
+    assert chat_model_code(conv) == "fast"
 
-    # 会话显式选择的模型优先，不被角色模型覆盖。
-    forced = client.post(f"{API}/conversations", json={
-        "role_id": role["id"], "model_code": "another",
-    }).json()["data"]
-    assert forced["model_code"] == "another"
+    response = client.put(f"{API}/conversations/{conv['id']}/preferences",
+                          json={"model_code": "another"})
+    assert response.status_code == 200
+    selected = client.get(f"{API}/conversations/{conv['id']}").json()["data"]
+    assert selected["model_code"] == "another"
+    assert chat_model_code(selected) == "fast"
+
+    response = client.patch(f"{API}/roles/{role['id']}", json={"model_code": ""})
+    assert response.status_code == 200
+    assert chat_model_code(selected) == "another"

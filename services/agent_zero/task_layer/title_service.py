@@ -152,19 +152,19 @@ def _regenerate_prompt(messages: List[Dict[str, str]]) -> str:
 
 
 def _model_code(conv: Dict[str, Any]) -> str:
-    """标题模型：优先角色的 summary / loop，其次会话模型 / 全局默认。"""
+    """使用角色指定的摘要模型，其他情况沿用对话实际模型。"""
     role_id = str(conv.get("role_id") or "")
     if role_id:
         try:
             from services.agent_zero.stores import zero_store as _zs
 
             role = _zs.get_role(role_id) or {}
-            env = role.get("envelope") or {}
-            models = env.get("models") or {}
-            for key in ("summary", "loop", "plan", "general", "fallback"):
-                code = str(models.get(key) or "").strip()
-                if code:
-                    return code
+            from services.agent_zero.task_layer.conversation import role_chat_model_code
+
+            summary = str(((role.get("envelope") or {}).get("models") or {}).get("summary") or "").strip()
+            code = summary or role_chat_model_code(role)
+            if code:
+                return code
         except Exception:
             logger.debug("读取标题模型失败（忽略）", exc_info=True)
     code = str(conv.get("model_code") or "").strip()

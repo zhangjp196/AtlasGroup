@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ArrowRight, Check, Clock, Document, MoreFilled, Plus, Search, Setting, Warning } from '@element-plus/icons-vue'
 import { ElButton, ElInput } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -28,6 +29,19 @@ const router = useRouter()
 
 const createOpen = ref(false)
 const filter = ref('open')
+const sort = ref<'recent' | 'priority'>('recent')
+const listHeading = ref<HTMLHeadingElement>()
+const metrics = [
+  { key: 'open', label: '待办工单', icon: Document, tone: 'neutral' },
+  { key: 'working', label: '正在执行', icon: Clock, tone: 'accent' },
+  { key: 'attention', label: '需要处理', icon: Warning, tone: 'warning' },
+  { key: 'done', label: '已完成', icon: Check, tone: 'success' },
+]
+
+function focusFilter(key: string): void {
+  filter.value = key
+  listHeading.value?.focus()
+}
 const policyOpen = ref(false)
 const policySaving = ref(false)
 const roleOptions = computed(() => data.persistentRoles.map((role) => ({
@@ -62,8 +76,9 @@ const workMenuItems = computed<ContextMenuItem[]>(() => {
 
 function openWorkMenu(event: MouseEvent, item: WorkItem): void {
   workMenu.item = item
-  workMenu.x = event.clientX
-  workMenu.y = event.clientY
+  const anchor = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  workMenu.x = event.detail || event.type === 'contextmenu' ? event.clientX : anchor.left
+  workMenu.y = event.detail || event.type === 'contextmenu' ? event.clientY : anchor.bottom
   workMenu.open = true
 }
 
@@ -119,6 +134,7 @@ const statusLabels: Record<string, string> = {
 
 const stats = computed(() => data.workStats || {})
 // 工单页头部的 token 汇总（与列表卡片同一口径：按任务 / 会话归集后求和）。
+const workReady = computed(() => stats.value.total !== undefined)
 const workUsage = computed(() => usageFromCounts(stats.value))
 const hasWorkUsage = computed(() => Number(stats.value.tokens || 0) > 0)
 const policy = computed(() => data.workPolicy || {})
@@ -134,36 +150,62 @@ const defaultWorkspace = computed(() => data.workspaces.find((ws) => ws.id === p
 const defaultWorkspaceText = computed(() => defaultWorkspace.value?.name || String(policy.value.default_workspace_id || '默认'))
 
 const keyword = ref('')
+const teamFilter = ref(String(route.query.team_id || ''))
 const page = ref(1)
 const PAGE_SIZE = DEFAULT_PAGE_SIZE
 
-const statusItems = computed(() => {
-  const key = filter.value
-  if (key === 'all') return data.workItems
-  if (key === 'open') return data.workItems.filter((item) => ['inbox', 'working', 'needs_attention'].includes(String(item.status || '')))
-  if (key === 'attention') return data.workItems.filter((item) => item.status === 'needs_attention')
-  return data.workItems.filter((item) => item.status === key)
+watch(() => route.query.team_id, (value) => {
+  teamFilter.value = String(value || '')
+  page.value = 1
 })
 
+const teamFilterName = computed(() => data.groups.find(
+  (team) => team.id === teamFilter.value,
+)?.name || teamFilter.value)
+
+const scopedItems = computed(() => teamFilter.value
+  ? data.workItems.filter((item) => String(item.team_id || '') === teamFilter.value)
+  : data.workItems)
+
+function matchesStatus(item: WorkItem, key: string): boolean {
+  if (key === 'all') return true
+  if (key === 'open') return ['inbox', 'working', 'needs_attention'].includes(String(item.status || ''))
+  return item.status === (key === 'attention' ? 'needs_attention' : key)
+}
 const filteredItems = computed(() => {
   const q = keyword.value.trim().toLowerCase()
-  if (!q) return statusItems.value
-  return statusItems.value.filter((item) => [
-    item.title, item.body, item.attention_reason, item.source,
-    item.source_ref, item.role_name, item.team_name, item.workspace_name,
-  ].map((value) => String(value || '')).join(' ').toLowerCase().includes(q))
+  const items = scopedItems.value.filter((item) => matchesStatus(item, filter.value)
+    && (!q || [
+      item.title, item.body, item.attention_reason, item.source,
+      item.source_ref, item.role_name, item.team_name, item.workspace_name,
+    ].map((value) => String(value || '')).join(' ').toLowerCase().includes(q)))
+  return items.sort((a, b) => {
+    const priority = sort.value === 'priority' ? Number(b.priority || 0) - Number(a.priority || 0) : 0
+    return priority || (Date.parse((b.updated_at || '').replace(' ', 'T')) || 0) - (Date.parse((a.updated_at || '').replace(' ', 'T')) || 0)
+  })
 })
 
 const pagedItems = computed(() => pageSlice(filteredItems.value, page.value, PAGE_SIZE))
 const pages = computed(() => pageCount(filteredItems.value.length, PAGE_SIZE))
-const filtersActive = computed(() => filter.value !== 'open' || Boolean(keyword.value.trim()))
+const filtersActive = computed(() => filter.value !== 'open'
+  || Boolean(keyword.value.trim()) || Boolean(teamFilter.value))
 
-watch([filter, keyword], () => { page.value = 1 })
+watch([filter, keyword, teamFilter, sort], () => { page.value = 1 })
 watch(pages, (total) => { page.value = clampPage(page.value, total) })
+
+function clearTeamFilter(): void {
+  teamFilter.value = ''
+  if (route.query.team_id) {
+    const query = { ...route.query }
+    delete query.team_id
+    void router.replace({ query })
+  }
+}
 
 function clearFilters(): void {
   filter.value = 'open'
   keyword.value = ''
+  clearTeamFilter()
 }
 
 const filterCounts = computed<Record<string, number>>(() => ({
@@ -176,6 +218,7 @@ const filterCounts = computed<Record<string, number>>(() => ({
 }))
 
 function countFor(key: string): number {
+  if (teamFilter.value) return scopedItems.value.filter((item) => matchesStatus(item, key)).length
   return filterCounts.value[key] || 0
 }
 
@@ -266,79 +309,71 @@ function openAttentionConversation(conversationId?: string): void {
 </script>
 
 <template>
-  <PageHeader section="工单" title="注意力与工单" :chip="`${stats.open || 0} 个待办`">
-    <el-button type="primary" @click="createOpen = true">新建工单</el-button>
-    <el-button @click="openPolicy">策略</el-button>
+  <PageHeader section="工单" title="工单总览">
+    <el-button :icon="Setting" @click="openPolicy">工单策略</el-button>
+    <el-button type="primary" :icon="Plus" @click="createOpen = true">新建工单</el-button>
   </PageHeader>
 
-  <div class="canvas-body">
+  <div class="canvas-body operations-body">
     <div class="sa-dashboard">
-      <section class="sa-hero">
-        <div class="sa-orb">
-          <svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="4" /><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6" /></svg>
+      <section class="operations-hero" aria-labelledby="operations-title">
+        <div class="orbital-field" aria-hidden="true">
+          <i class="orbit orbit-outer" /><i class="orbit orbit-middle" /><i class="orbit orbit-inner" />
+          <i class="orbital-core" /><i class="orbital-point" />
         </div>
-        <div class="sa-hero-main">
-          <div class="sa-eyebrow">工单 · 主动执行层</div>
-          <div class="sa-pills">
-            <span class="sa-pill"><i class="sa-dot" :class="{ on: mode === 'auto' }" />{{ modeText }}</span>
-            <span class="sa-pill"><i class="sa-dot" :class="{ on: Number(stats.working || 0) > 0 }" />{{ stats.working || 0 }} 个运行中</span>
-            <span class="sa-pill" :class="{ danger: Number(stats.attention || 0) > 0 }">
-              <i class="sa-dot" :class="{ danger: Number(stats.attention || 0) > 0 }" />{{ stats.attention || 0 }} 个需要你
-            </span>
-          </div>
-        </div>
-        <div v-if="hasWorkUsage" class="sa-hero-usage">
-          <TokenMeter :usage="workUsage" variant="hero" />
+        <div class="operations-copy">
+          <span class="sa-pill"><i class="sa-dot" :class="{ on: mode === 'auto' }" />{{ modeText }}</span>
+          <h2 id="operations-title">Agent 任务中心</h2>
+          <p>跟踪工单执行、处理授权与提问。</p>
+          <TokenMeter v-if="hasWorkUsage" :usage="workUsage" variant="hero" />
         </div>
       </section>
 
-      <section v-if="!attentionItems.length" class="sa-attention sa-attention-empty">
-        <span class="sa-attention-ico">
-          <svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg>
-        </span>
-        <div><b>现在没有需要你处理的事</b><span>工单会在需要授权或回答时回来。</span></div>
-      </section>
-      <section v-else class="sa-attention">
-        <div class="sa-section-head">
-          <div><h2>需要你处理</h2><p>这些事停下来等你决定，其余工作继续在后台推进。</p></div>
-          <span class="sa-count danger">{{ attentionItems.length }}</span>
-        </div>
-        <div class="sa-attention-list">
-          <div v-for="item in attentionItems" :key="`${item.kind}-${item.id}`" class="sa-attention-row">
-            <span class="sa-attention-type" :class="item.kind">{{ item.kind === 'approval' ? '授权' : '提问' }}</span>
-            <span class="sa-attention-main"><b>{{ item.title }}</b><span>{{ item.sub }}</span></span>
-            <button v-if="item.conversation_id" class="btn small" type="button" @click="openAttentionConversation(item.conversation_id)">打开会话</button>
-          </div>
-        </div>
-      </section>
-
-      <div class="work-stats sa-stats">
-        <div class="work-stat sa-stat">
-          <span class="sa-stat-ico"><svg viewBox="0 0 24 24"><path d="M5 4h14v17H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></svg></span>
-          <div><b>{{ stats.open || 0 }}</b><span>待办（含进行中）</span></div>
-        </div>
-        <div class="work-stat sa-stat">
-          <span class="sa-stat-ico accent"><svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3" /><circle cx="12" cy="12" r="5" /></svg></span>
-          <div><b>{{ stats.working || 0 }}</b><span>正在执行</span></div>
-        </div>
-        <div class="work-stat attention sa-stat">
-          <span class="sa-stat-ico danger"><svg viewBox="0 0 24 24"><path d="M12 4 3 20h18Z" /><path d="M12 10v4M12 17h.01" /></svg></span>
-          <div><b>{{ stats.attention || 0 }}</b><span>需要你</span></div>
-        </div>
-        <div class="work-stat sa-stat">
-          <span class="sa-stat-ico ok"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg></span>
-          <div><b>{{ stats.done || 0 }}</b><span>已完成</span></div>
-        </div>
+      <div class="operations-metrics" aria-label="按工单状态筛选">
+        <button v-for="metric in metrics" :key="metric.key" class="operations-metric" type="button"
+          :data-tone="metric.tone" :aria-pressed="filter === metric.key" @click="focusFilter(metric.key)">
+          <span class="metric-icon"><component :is="metric.icon" aria-hidden="true" /></span>
+          <ArrowRight class="metric-arrow" aria-hidden="true" />
+          <strong>{{ workReady ? countFor(metric.key) : '—' }}</strong>
+          <span>{{ metric.label }}</span>
+        </button>
       </div>
+
+      <section class="sa-attention" :class="{ 'sa-attention-empty': !attentionItems.length }">
+        <span v-if="!attentionItems.length" class="sa-attention-ico"><component :is="attention.data.counts ? Check : Clock" aria-hidden="true" /></span>
+        <div v-if="!attentionItems.length">
+          <b>{{ attention.data.counts ? '没有待处理的授权或提问' : '暂未获取授权与提问状态' }}</b>
+        </div>
+        <template v-else>
+          <div class="sa-section-head">
+            <h2>待处理的授权与提问</h2>
+            <span class="sa-count danger">{{ attentionItems.length }}</span>
+          </div>
+          <div class="sa-attention-list">
+            <div v-for="item in attentionItems" :key="`${item.kind}-${item.id}`" class="sa-attention-row">
+              <span class="sa-attention-type" :class="item.kind">{{ item.kind === 'approval' ? '授权' : '提问' }}</span>
+              <span class="sa-attention-main"><b>{{ item.title }}</b><span>{{ item.sub }}</span></span>
+              <button v-if="item.conversation_id" class="btn small" type="button" @click="openAttentionConversation(item.conversation_id)">打开会话</button>
+            </div>
+          </div>
+        </template>
+      </section>
 
       <div class="sa-columns">
         <section class="sa-section">
           <div class="sa-section-head">
-            <div><h2>全部工单</h2><p>点开工单查看详情或派活；按状态筛选。</p></div>
-            <span class="sa-count">{{ stats.total || data.workItems.length }}</span>
+            <h2 ref="listHeading" tabindex="-1">工单列表</h2>
+            <span class="sa-count" aria-live="polite">{{ filteredItems.length }} 条结果</span>
           </div>
           <div class="list-toolbar">
-            <el-input v-model="keyword" placeholder="搜索标题 / 说明 / 来源" clearable />
+            <el-input v-model="keyword" :prefix-icon="Search" aria-label="搜索工单" placeholder="搜索工单" clearable />
+            <select v-model="sort" class="input work-sort" aria-label="工单排序">
+              <option value="recent">最近更新</option>
+              <option value="priority">优先级优先</option>
+            </select>
+            <button v-if="teamFilter" class="work-filter on" type="button" title="清除群组筛选" @click="clearTeamFilter">
+              群组：{{ teamFilterName }} ×
+            </button>
             <button v-if="filtersActive" class="mini-link" type="button" @click="clearFilters">清除筛选</button>
           </div>
           <div class="work-filters">
@@ -347,6 +382,7 @@ function openAttentionConversation(conversationId?: string): void {
               :key="item.key"
               class="work-filter"
               :class="{ on: filter === item.key }"
+              :aria-pressed="filter === item.key"
               type="button"
               @click="filter = item.key"
             >
@@ -354,26 +390,33 @@ function openAttentionConversation(conversationId?: string): void {
             </button>
           </div>
 
-          <div v-if="filteredItems.length" class="tile-grid work-grid">
+          <div v-if="data.workError" class="work-load-error" role="status">
+            <span>{{ workReady ? '工单刷新失败，正在显示上次结果' : '工单加载失败' }}</span>
+            <button class="btn small" type="button" @click="data.loadWork()">重试</button>
+          </div>
+          <div v-if="filteredItems.length" class="work-queue">
             <article
               v-for="item in pagedItems"
               :key="item.id"
-              class="tile-card work-tile"
+              class="tile-card work-tile work-queue-item"
               :class="{ attention: item.status === 'needs_attention' }"
-              @click="openItem(item)"
               @contextmenu.prevent.stop="openWorkMenu($event, item)"
             >
               <div class="tile-head">
                 <span class="work-status" :class="item.status" />
                 <div class="tile-title">
-                  <b>{{ item.title || '未命名工单' }}</b>
+                  <router-link class="work-queue-link" :to="`/work/${encodeURIComponent(item.id)}`">
+                    {{ item.title || '未命名工单' }}
+                  </router-link>
                   <span>{{ statusLabels[String(item.status || '')] || item.status || '待分派' }} · {{ item.source || 'manual' }}{{ item.source_ref ? ` · ${item.source_ref}` : '' }}</span>
                 </div>
-                <span v-if="item.priority" class="tag">高</span>
+                <span v-if="Number(item.priority || 0) > 0" class="tag">高优先级</span>
+                <button class="iconbtn work-queue-menu" type="button" :aria-label="`工单操作：${item.title || item.id}`"
+                  @click="openWorkMenu($event, item)"><MoreFilled aria-hidden="true" /></button>
               </div>
               <p class="tile-preview">{{ item.body || item.attention_reason || '没有补充说明' }}</p>
               <TokenMeter :usage="item.usage" variant="tile" />
-              <div class="tile-foot"><span>{{ shortTime(item.updated_at) }}</span><span>{{ statusLabels[String(item.status || '')] || item.status }}</span></div>
+              <div class="tile-foot"><span>{{ shortTime(item.updated_at) }}</span></div>
             </article>
           </div>
           <div v-else-if="data.workItems.length" class="empty">
@@ -381,21 +424,19 @@ function openAttentionConversation(conversationId?: string): void {
             <br />
             <button class="mini-link" type="button" @click="clearFilters">清除筛选</button>
           </div>
-          <div v-else class="sa-onboard">
-            <div class="sa-onboard-step"><b>1</b><span>新建一个工单，写清要做什么</span></div>
-            <div class="sa-onboard-step"><b>2</b><span>派活后工单在隔离会话里执行</span></div>
-            <div class="sa-onboard-step"><b>3</b><span>只有需要授权 / 回答 / 失败时才回来</span></div>
-            <button class="btn primary" type="button" @click="createOpen = true">创建第一个工单</button>
+          <div v-else-if="workReady" class="work-empty">
+            <Document aria-hidden="true" />
+            <b>还没有工单</b>
+            <button class="btn primary" type="button" @click="createOpen = true">创建工单</button>
           </div>
           <ListPager :page="page" :pages="pages" :total="filteredItems.length" :page-size="PAGE_SIZE" @update:page="page = $event" />
         </section>
 
         <section class="sa-section sa-policy-card">
-          <div class="sa-section-head"><div><h2>工作方式</h2><p>决定工单何时自动推进。</p></div></div>
+          <div class="sa-section-head"><h2>执行策略</h2><Setting aria-hidden="true" /></div>
           <div class="sa-policy-row"><span>模式</span><b>{{ modeText }}</b></div>
           <div class="sa-policy-row"><span>新会话权限</span><b>{{ permissionText }}</b></div>
           <div class="sa-policy-row"><span>默认工作区</span><b>{{ defaultWorkspaceText }}</b></div>
-          <p class="sa-policy-note">会话、角色、工作区都可以「新建工单」；工单完成后结果会回写到这里。</p>
           <button class="btn" type="button" @click="openPolicy">调整策略</button>
         </section>
       </div>

@@ -19,7 +19,7 @@ import Avatar from '@/components/Avatar.vue'
 import TokenMeter from '@/components/TokenMeter.vue'
 import ProcessList from './ProcessList.vue'
 
-const props = defineProps<{ conversationId: string; open: boolean }>()
+const props = defineProps<{ conversationId: string; open: boolean; embedded?: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const app = useAppStore()
@@ -65,20 +65,22 @@ const selectedNodeData = computed<Record<string, any> | null>(() => {
 })
 const stats = computed(() => data.value?.stats || {})
 const runStatus = computed(() => activeTask.value?.status || data.value?.root?.status || data.value?.run?.status || 'idle')
-const activeAgentNames = computed(() => {
+const visibleAgentNames = computed(() => {
   const names = new Set<string>()
   for (const task of activeTasks.value) {
     for (const member of task.members || []) {
-      if (ACTIVE_STATUSES.has(memberStatus(member))) names.add(String(member.role_name || member.role_id || ''))
+      names.add(String(member.role_name || member.role_id || ''))
     }
   }
-  for (const node of data.value?.nodes || []) {
-    if (isActiveStatus(node.status)) names.add(String(node.name || ''))
+  const graph = data.value
+  if (graph?.root && isExecutionNode(graph.root.status)) names.add(String(graph.root.name || ''))
+  for (const node of graph?.nodes || []) {
+    if (isExecutionNode(node.status)) names.add(String(node.name || ''))
   }
   return names
 })
 const activity = computed(() => (data.value?.activity || [])
-  .filter((item) => activeAgentNames.value.has(String(item.agent || '')))
+  .filter((item) => visibleAgentNames.value.has(String(item.agent || '')))
   .slice()
   .sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
   .slice(0, 60))
@@ -100,15 +102,16 @@ function tokensOf(usage?: TokenUsage | null): string {
 }
 
 const visibleTaskMembers = computed<TeamTaskMember[]>(() =>
-  (activeTask.value?.members || []).filter((member) => ACTIVE_STATUSES.has(memberStatus(member))),
+  activeTask.value?.members || [],
 )
 
 function memberStatus(member: TeamTaskMember): string {
   return String(member.status || member.run_status || 'queued')
 }
 
-function isActiveStatus(status?: string): boolean {
-  return ACTIVE_STATUSES.has(String(status || ''))
+function isExecutionNode(status?: string): boolean {
+  const state = String(status || '')
+  return ACTIVE_STATUSES.has(state) || ['done', 'failed', 'stopped'].includes(state)
 }
 
 function statusLabel(status?: string): string {
@@ -266,9 +269,9 @@ function buildTaskFlow(task: TeamTask): { nodes: any[]; edges: any[] } {
 
 function buildConversationFlow(): { nodes: any[]; edges: any[] } {
   const root = data.value?.root
-  const children = (data.value?.nodes || []).filter((node) => isActiveStatus(node.status))
+  const children = (data.value?.nodes || []).filter((node) => isExecutionNode(node.status))
   if (!root) return { nodes: [], edges: [] }
-  if (!children.length && !isActiveStatus(root.status)) return { nodes: [], edges: [] }
+  if (!children.length && !isExecutionNode(root.status)) return { nodes: [], edges: [] }
   const nodes: any[] = [{
     id: 'root',
     type: 'agent',
@@ -392,14 +395,14 @@ async function taskAction(task: TeamTask, action: 'pause' | 'resume' | 'stop' | 
 
 function syncSelectedRun(): void {
   if (!selectedRoleId.value) return
-  const member = visibleTaskMembers.value.find((item) => item.role_id === selectedRoleId.value)
-  if (!member) {
+  const node = selectedNodeData.value
+  if (!node) {
     selectedRoleId.value = ''
     selectedRunId.value = ''
     closeStream()
     return
   }
-  const runId = String(member.run_id || '')
+  const runId = String(node.runId || '')
   if (!runId) {
     selectedRunId.value = ''
     closeStream()
@@ -483,8 +486,8 @@ onBeforeUnmount(stop)
 </script>
 
 <template>
-  <div v-if="open" class="agent-canvas">
-    <header class="agent-canvas-head">
+  <div v-if="open" class="agent-canvas" :class="{ embedded }">
+    <header v-if="!embedded" class="agent-canvas-head">
       <div>
         <h2>执行画布</h2>
         <p>
@@ -494,7 +497,7 @@ onBeforeUnmount(stop)
             {{ activeTask.active_runs || 0 }} 个成员并行
           </template>
           <template v-else>
-            {{ flowNodes.length }} 个运行中节点 · {{ activeToolCount }} 个工具
+            {{ flowNodes.length }} 个节点 · {{ activeToolCount }} 个工具
           </template>
           <span v-if="runningTasks" class="agent-parallel">后台任务 {{ runningTasks }}</span>
         </p>
@@ -567,7 +570,7 @@ onBeforeUnmount(stop)
 
       <div class="agent-flow-wrap">
         <div v-if="loading" class="empty">加载中…</div>
-        <div v-else-if="!flowNodes.length" class="empty agent-flow-empty">当前没有运行中的代理</div>
+        <div v-else-if="!flowNodes.length" class="empty agent-flow-empty">当前没有代理执行记录</div>
         <VueFlow
           v-else
           :key="flowKey"
@@ -602,7 +605,7 @@ onBeforeUnmount(stop)
               <div class="flow-agent-meta">
                 <span v-if="nodeProps.data.tools?.length">{{ nodeProps.data.tools.length }} 工具</span>
                 <span v-if="nodeProps.data.elapsed_ms">{{ durationText(nodeProps.data.elapsed_ms) }}</span>
-                <span v-if="nodeProps.data.runId">可看实时</span>
+                <span v-if="nodeProps.data.runId">查看执行过程</span>
                 <span v-if="nodeProps.data.error" class="fail">{{ firstLine(nodeProps.data.error, 30) }}</span>
               </div>
               <Handle type="source" :position="Position.Right" />
@@ -615,10 +618,10 @@ onBeforeUnmount(stop)
         <template v-if="selectedRoleId">
           <div class="agent-stream-head">
             <div>
-              <b>{{ selectedMember?.role_name || streamRun?.role_id || '成员执行过程' }}</b>
-              <span>{{ selectedMember?.goal || '' }}</span>
+              <b>{{ selectedNodeData?.name || selectedMember?.role_name || '成员执行过程' }}</b>
+              <span>{{ selectedNodeData?.goal || selectedMember?.goal || '' }}</span>
             </div>
-            <span class="agent-status" :class="statusTone(streamRun?.status || selectedMember?.status)">{{ statusLabel(streamRun?.status || selectedMember?.status) }}</span>
+            <span class="agent-status" :class="statusTone(streamRun?.status || selectedNodeData?.status || selectedMember?.status)">{{ statusLabel(streamRun?.status || selectedNodeData?.status || selectedMember?.status) }}</span>
           </div>
           <div class="agent-stream-body">
             <ProcessList v-if="streamEntries.length" :entries="streamEntries" :live="streamStreaming" />
@@ -635,7 +638,7 @@ onBeforeUnmount(stop)
             <div class="agent-task-members">
               <button
                 v-for="member in visibleTaskMembers"
-                :key="member.role_id"
+                :key="member.run_id || member.role_id"
                 class="agent-task-member"
                 type="button"
                 @click="selectMember(member)"
@@ -650,7 +653,7 @@ onBeforeUnmount(stop)
                 </span>
                 <span class="agent-status" :class="statusTone(memberStatus(member))">{{ statusLabel(memberStatus(member)) }}</span>
               </button>
-              <div v-if="!visibleTaskMembers.length" class="agent-feed-empty">当前没有运行中的成员。</div>
+              <div v-if="!visibleTaskMembers.length" class="agent-feed-empty">当前任务没有成员执行记录。</div>
             </div>
           </section>
 

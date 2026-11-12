@@ -132,6 +132,10 @@ class AgentTeam(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     avatar: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # group = 用户可管理的群组；participants = 会话私有参与角色（内部使用，不出现在群组页）
+    kind: Mapped[str] = mapped_column(
+        Text, nullable=False, default="group", server_default=text("'group'")
+    )
     # 协作模式：orchestrate（主持编排）/ roundtable（多角色圆桌）/ single（单角）
     mode: Mapped[str] = mapped_column(
         Text, nullable=False, default="orchestrate",
@@ -151,6 +155,9 @@ class AgentTeam(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "kind IN ('group','participants')", name="ck_agent_teams_kind"
+        ),
         CheckConstraint(
             "mode IN ('orchestrate','roundtable','single')", name="ck_agent_teams_mode"
         ),
@@ -729,6 +736,7 @@ class ScheduledTask(Base):
 
 
 ENSURE_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_agent_teams_kind ON agent_teams(kind)",
     "CREATE INDEX IF NOT EXISTS idx_gdag_camp ON gdag_nodes(camp)",
     "CREATE INDEX IF NOT EXISTS idx_gdag_type ON gdag_nodes(type, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_gdag_created ON gdag_nodes(created_at)",

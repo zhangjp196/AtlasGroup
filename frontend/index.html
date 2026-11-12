@@ -4,16 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
-    <meta name="theme-color" content="#0c0e12" />
+    <meta name="theme-color" content="#0a111a" />
     <link rel="icon" href="/favicon.svg" />
     <title>AtlasX</title>
     <script>
       // 尽早应用主题，避免首屏闪烁；键名与旧前端保持一致。
       (() => {
         try {
-          const t = localStorage.getItem('az-theme');
-          if (t) {
-            const mode = ['light', 'ocean', 'sepia'].includes(t) ? 'light' : 'dark';
+          const saved = localStorage.getItem('az-theme');
+          const legacy = new Map([['midnight', 'dark'], ['slate', 'dark'], ['forest', 'dark'], ['ocean', 'light']]);
+          const t = legacy.get(saved) ?? saved;
+          if (['dark', 'light', 'violet', 'sepia'].includes(t)) {
+            const mode = ['light', 'sepia'].includes(t) ? 'light' : 'dark';
             document.documentElement.dataset.theme = t;
             document.documentElement.dataset.themeMode = mode;
             document.documentElement.classList.toggle('dark', mode === 'dark');

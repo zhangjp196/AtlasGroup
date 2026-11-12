@@ -14,6 +14,7 @@ export interface WorkSeed {
   body?: string
   workspace_id?: string
   role_id?: string
+  team_id?: string
 }
 
 const props = defineProps<{
@@ -42,6 +43,7 @@ const form = reactive({
   status: 'inbox',
   workspace_id: '',
   role_id: '',
+  team_id: '',
   priority: false,
 })
 
@@ -65,6 +67,7 @@ watch(() => [props.open, props.item?.id], () => {
   form.status = item?.status || 'inbox'
   form.workspace_id = item?.workspace_id || seed.workspace_id || ''
   form.role_id = item?.role_id || seed.role_id || ''
+  form.team_id = item?.team_id || seed.team_id || ''
   form.priority = Number(item?.priority || 0) > 0
 }, { immediate: true })
 
@@ -82,6 +85,7 @@ async function save(): Promise<void> {
       body: form.body.trim(),
       workspace_id: form.workspace_id || null,
       role_id: form.role_id || null,
+      team_id: form.team_id || null,
       priority: form.priority ? 1 : 0,
     }
     if (!isNew.value) body.status = form.status
@@ -135,6 +139,13 @@ async function save(): Promise<void> {
           empty-label="默认角色"
           empty-hint="使用工单策略里的默认角色"
         />
+      </div>
+      <div class="field">
+        <label>群组（可选）</label>
+        <select v-model="form.team_id" class="input">
+          <option value="">不属于群组</option>
+          <option v-for="group in data.groups" :key="group.id" :value="group.id">{{ group.name }}</option>
+        </select>
       </div>
       <div class="field">
         <label>优先级</label>

@@ -5,25 +5,25 @@ import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import AppRail from '@/components/AppRail.vue'
 import NoticeStack from '@/components/NoticeStack.vue'
+import QuickSearch from '@/components/QuickSearch.vue'
+import WorkspaceTabs from '@/components/WorkspaceTabs.vue'
 import OnlineRoles from '@/components/OnlineRoles.vue'
 import StartupSplash from '@/components/StartupSplash.vue'
-import TaskWindow from '@/components/TaskWindow.vue'
 import { api } from '@/api/client'
 import type { Conversation } from '@/api/types'
 import { playSound } from '@/lib/sound'
 import { useAppStore } from '@/stores/app'
 import { useAttentionStore } from '@/stores/attention'
-import { useChatWindowsStore } from '@/stores/chatWindows'
+import { conversationTitle } from '@/lib/derive'
+import { useChatWindowsStore, type ChatPresentation } from '@/stores/chatWindows'
 import { useDataStore } from '@/stores/data'
 import { useNoticeStore } from '@/stores/notice'
-import { useWindowsStore } from '@/stores/windows'
 
 const app = useAppStore()
 const data = useDataStore()
 const attention = useAttentionStore()
 const chatWindows = useChatWindowsStore()
 const notice = useNoticeStore()
-const windows = useWindowsStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -34,15 +34,83 @@ const ensuringGlobalChat = ref(false)
 const globalAgentTab = ref<'chat' | 'inbox'>('chat')
 const ensuringGlobalAgent = ref(false)
 
-// 右侧会话 / 角色栏：默认 480px，可拖拽、可收起；状态跨刷新保留。
+const routeTabs = ref<Array<{ key: string; label: string; path: string }>>([])
+const routeTabKey = computed(() => `page:${route.meta.section || 'work'}`)
+const globalPanels = computed(() => [
+  { key: 'global-agent', id: globalAgentId.value, label: '全局管理', agent: true },
+  { key: 'global-chat', id: globalChatId.value, label: '全局对话', agent: false },
+].filter((panel) => panel.id))
+const globalModes = ref<Record<string, ChatPresentation>>({})
+const workspaceTabs = computed(() => [
+  ...routeTabs.value.map((tab) => ({ ...tab, closable: routeTabs.value.length > 1 })),
+  ...chatWindows.windows.filter((item) => item.presentation === 'tab').map((item) => {
+    const conv = data.conversations.find((entry) => entry.id === item.conversationId)
+    const group = data.groups.find((entry) => entry.id === item.teamId)
+    const role = data.roles.find((entry) => entry.id === item.roleId)
+    return { key: item.key, label: conv ? conversationTitle(conv, data.teams, data.roles)
+      : group?.name || role?.name || item.title || '会话', closable: true }
+  }),
+  ...globalPanels.value.filter((panel) => globalModes.value[panel.key] === 'tab')
+    .map((panel) => ({ ...panel, closable: true })),
+])
+const activeWorkspaceTab = computed(() => chatWindows.activeTab || routeTabKey.value)
+
+watch(() => route.fullPath, (path) => {
+  if (!route.meta.section) return
+  chatWindows.activeTab = ''
+  const key = routeTabKey.value
+  const hit = routeTabs.value.find((tab) => tab.key === key)
+  if (hit) hit.path = path
+  else routeTabs.value.push({ key, label: String(route.meta.title), path })
+}, { immediate: true, flush: 'sync' })
+
+function selectWorkspaceTab(key: string): void {
+  const tab = routeTabs.value.find((item) => item.key === key)
+  if (tab) {
+    chatWindows.activeTab = ''
+    if (route.fullPath !== tab.path) void router.push(tab.path)
+  } else chatWindows.activeTab = key
+}
+
+function closeGlobalPanel(key: string): void {
+  if (chatWindows.activeTab === key) chatWindows.activeTab = ''
+  if (key === 'global-agent') {
+    globalAgentId.value = ''
+    globalAgentTab.value = 'chat'
+  } else globalChatId.value = ''
+}
+
+function setGlobalPresentation(key: string, id: string, mode: ChatPresentation): void {
+  globalModes.value[key] = mode
+  chatWindows.rememberPresentation(id, mode)
+  if (mode === 'tab') chatWindows.activeTab = key
+  else if (chatWindows.activeTab === key) chatWindows.activeTab = ''
+}
+
+function closeWorkspaceTab(key: string): void {
+  const index = routeTabs.value.findIndex((item) => item.key === key)
+  if (index >= 0) {
+    if (routeTabs.value.length < 2) return
+    const wasCurrent = routeTabKey.value === key
+    routeTabs.value.splice(index, 1)
+    const replacement = routeTabs.value[Math.max(0, index - 1)]
+    if (wasCurrent && replacement) void router.push(replacement.path)
+  } else if (globalPanels.value.some((item) => item.key === key)) closeGlobalPanel(key)
+  else chatWindows.close(key)
+}
+
+
+// 右侧会话 / 角色栏：默认 320px，可拖拽、可收起；状态跨刷新保留。
 const DOCK_KEY = 'atlasx.dock.v1'
 const dockCollapsed = ref(false)
-const dockWidth = ref(480)
+const dockWidth = ref(320)
 try {
   const saved = JSON.parse(localStorage.getItem(DOCK_KEY) || '{}')
   if (typeof saved.collapsed === 'boolean') dockCollapsed.value = saved.collapsed
   if (Number.isFinite(saved.width)) dockWidth.value = Math.min(720, Math.max(320, Number(saved.width)))
 } catch { /* ignore */ }
+const mobileDockOpen = ref(false)
+watch(() => route.fullPath, () => { mobileDockOpen.value = false })
 const dockStyleWidth = computed(() => (dockCollapsed.value ? '64px' : `${dockWidth.value}px`))
 
 function saveDockState(): void {
@@ -88,17 +156,24 @@ const chatId = computed(() => {
 watch(chatId, (id) => {
   if (!id) return
   chatWindows.openConversation(id)
-  void router.replace('/conv')
+  const active = chatWindows.activeTab
+  void router.replace('/conv').then(() => {
+    if (active && chatWindows.windows.some((item) => item.key === active && item.presentation === 'tab')) {
+      chatWindows.focus(active)
+    }
+  })
 }, { immediate: true })
 
-// 当前正在看的会话不显示未读、也不弹提示：窗口开着就自动记为已读。
+// 隐藏的标签继续接收消息，切回标签时再记为已读。
 function openConversationIds(): Set<string> {
+  const active = chatWindows.activeTab
   const ids = new Set<string>()
   for (const item of chatWindows.windows) {
-    if (item.conversationId) ids.add(item.conversationId)
+    if (item.conversationId && (item.presentation !== 'tab' || item.key === active)) ids.add(item.conversationId)
   }
-  if (globalAgentId.value) ids.add(globalAgentId.value)
-  if (globalChatId.value) ids.add(globalChatId.value)
+  for (const panel of globalPanels.value) {
+    if (globalModes.value[panel.key] !== 'tab' || panel.key === active) ids.add(panel.id)
+  }
   return ids
 }
 
@@ -117,7 +192,7 @@ async function markOpenRead(id: string): Promise<void> {
 }
 
 watch(
-  [() => chatWindows.windows.map((item) => item.conversationId).join(','), globalAgentId, globalChatId],
+  () => [...openConversationIds()].sort().join(','),
   () => {
     for (const id of openConversationIds()) void markOpenRead(id)
   },
@@ -141,7 +216,11 @@ function pushApprovalNotice(count: number): void {
 }
 
 async function openGlobalAgent(): Promise<void> {
-  if (globalAgentId.value || ensuringGlobalAgent.value) return
+  if (globalAgentId.value) {
+    if (globalModes.value['global-agent'] === 'tab') chatWindows.activeTab = 'global-agent'
+    return
+  }
+  if (ensuringGlobalAgent.value) return
   ensuringGlobalAgent.value = true
   try {
     // 后端负责唯一性：不存在就创建，归档就恢复，重复就收敛。
@@ -149,6 +228,8 @@ async function openGlobalAgent(): Promise<void> {
     const conv = await api<Conversation>('/app/global-agent', { method: 'POST' })
     await data.loadAll()
     globalAgentId.value = conv.id
+    globalModes.value['global-agent'] = chatWindows.presentationFor(conv.id)
+    if (globalModes.value['global-agent'] === 'tab') chatWindows.activeTab = 'global-agent'
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
   } finally {
@@ -157,12 +238,18 @@ async function openGlobalAgent(): Promise<void> {
 }
 
 async function openGlobalChat(): Promise<void> {
-  if (globalChatId.value || ensuringGlobalChat.value) return
+  if (globalChatId.value) {
+    if (globalModes.value['global-chat'] === 'tab') chatWindows.activeTab = 'global-chat'
+    return
+  }
+  if (ensuringGlobalChat.value) return
   ensuringGlobalChat.value = true
   try {
     const conv = await api<Conversation>('/app/global-chat', { method: 'POST' })
     await data.loadAll()
     globalChatId.value = conv.id
+    globalModes.value['global-chat'] = chatWindows.presentationFor(conv.id)
+    if (globalModes.value['global-chat'] === 'tab') chatWindows.activeTab = 'global-chat'
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
   } finally { ensuringGlobalChat.value = false }
@@ -299,58 +386,80 @@ onMounted(async () => {
   <StartupSplash v-if="booting" :duration="bootDuration" :ready="bootReady" @done="booting = false" />
 
   <el-config-provider :locale="zhCn">
-  <div class="app flat" :style="{ '--dock-width': dockStyleWidth }">
+  <div class="app flat" :class="{ 'mobile-dock-open': mobileDockOpen }" :style="{ '--dock-width': dockStyleWidth }">
     <AppRail :pending-count="pendingCount" :global-agent-open="Boolean(globalAgentId)"
-      :global-chat-open="Boolean(globalChatId)" @global-agent="openGlobalAgent" @global-chat="openGlobalChat" />
+      :global-chat-open="Boolean(globalChatId)" @global-agent="openGlobalAgent" @global-chat="openGlobalChat"
+      @navigate="chatWindows.activeTab = ''" />
     <main class="canvas">
-      <router-view />
+      <div class="workspace-header">
+        <WorkspaceTabs :tabs="workspaceTabs" :active="activeWorkspaceTab"
+          @select="selectWorkspaceTab" @close="closeWorkspaceTab" />
+        <div class="workspace-actions">
+          <QuickSearch />
+          <button class="mobile-dock-trigger btn" type="button" :aria-expanded="mobileDockOpen"
+            aria-controls="activity-dock" @click="mobileDockOpen = !mobileDockOpen">
+            {{ mobileDockOpen ? '关闭侧栏' : '协作中心' }}
+          </button>
+        </div>
+      </div>
+      <div id="workspace-content" class="workspace-content" role="tabpanel"
+        :aria-labelledby="`workspace-tab-${activeWorkspaceTab}`">
+        <div v-show="!chatWindows.activeTab" class="workspace-view"><router-view /></div>
+        <div id="workspace-chat" v-show="chatWindows.activeTab" class="workspace-view" />
+      </div>
     </main>
-    <OnlineRoles :collapsed="dockCollapsed" @toggle="toggleDock" @resize="resizeDock" />
+    <button v-if="mobileDockOpen" class="mobile-dock-backdrop" type="button" aria-label="关闭协作中心"
+      @click="mobileDockOpen = false" />
+    <OnlineRoles id="activity-dock" :collapsed="dockCollapsed && !mobileDockOpen"
+      @toggle="toggleDock" @resize="resizeDock" @open-chat="mobileDockOpen = false" />
   </div>
 
-  <ChatPanel
-    v-for="(win, index) in chatWindows.windows"
-    :key="win.key"
-    :conversation-id="win.conversationId"
-    :draft-role-id="win.roleId || ''"
-    :draft-participants="win.participantIds || []"
-    :draft-workspace-id="win.workspaceId || ''"
-    :window-index="index"
-    floating
-    @close="chatWindows.close(win.key)"
-    @focus="chatWindows.focus(win.key)"
-    @promoted="(id) => chatWindows.promote(win.key, id)"
-  />
+  <Teleport v-for="win in chatWindows.windows" :key="win.key"
+    :to="win.presentation === 'tab' ? '#workspace-chat' : 'body'">
+    <ChatPanel v-show="win.presentation !== 'tab' || chatWindows.activeTab === win.key"
+      :conversation-id="win.conversationId"
+      :draft-role-id="win.roleId || ''"
+      :draft-participants="win.participantIds || []"
+      :draft-workspace-id="win.workspaceId || ''"
+      :draft-team-id="win.teamId || ''"
+      :presentation="win.presentation"
+      @title="(title) => chatWindows.setTitle(win.key, title)"
+      @update:presentation="(mode) => chatWindows.setPresentation(win.key, mode)"
+      @close="chatWindows.close(win.key)"
+      @promoted="(id) => chatWindows.promote(win.key, id)"
+    />
+  </Teleport>
 
-  <ChatPanel
-    v-if="globalAgentId"
-    :conversation-id="globalAgentId"
-    :initial-tab="globalAgentTab"
-    floating
-    global-agent
-    @close="globalAgentId = ''; globalAgentTab = 'chat'"
-  />
-
-  <ChatPanel v-if="globalChatId" :conversation-id="globalChatId" floating global-conversation
-    @close="globalChatId = ''" />
-
-  <TaskWindow
-    v-for="(win, index) in windows.tasks"
-    :key="win.id"
-    :id="win.id"
-    :conversation-id="win.conversationId"
-    :title="win.title"
-    :x="win.x"
-    :y="win.y"
-    :order="index"
-  />
+  <Teleport v-for="panel in globalPanels" :key="panel.key"
+    :to="globalModes[panel.key] === 'tab' ? '#workspace-chat' : 'body'">
+    <ChatPanel v-show="globalModes[panel.key] !== 'tab' || chatWindows.activeTab === panel.key"
+      :conversation-id="panel.id" :initial-tab="panel.agent ? globalAgentTab : 'chat'"
+      :global-agent="panel.agent" :global-conversation="!panel.agent"
+      :presentation="globalModes[panel.key]"
+      @update:presentation="(mode) => setGlobalPresentation(panel.key, panel.id, mode)"
+      @close="closeGlobalPanel(panel.key)"
+    />
+  </Teleport>
 
   <NoticeStack @action="onNoticeAction" />
   </el-config-provider>
 </template>
 
 <style scoped>
-.app.flat { grid-template-columns: 64px minmax(0, 1fr) var(--dock-width, 480px); }
-@media (max-width: 1200px) { .app.flat { grid-template-columns: 64px minmax(0, 1fr) clamp(320px, 30vw, 440px); } .app.flat { --dock-width: clamp(320px, 30vw, 440px); } }
-@media (max-width: 800px) { .app.flat { grid-template-columns: 52px minmax(0, 1fr); } .side-dock { display: none; } }
+.app.flat { grid-template-columns: 196px minmax(0, 1fr) min(var(--dock-width), 36vw); }
+@media (max-width: 1210px) {
+  .app.flat { grid-template-columns: 64px minmax(0, 1fr) min(var(--dock-width), 33vw); }
+}
+@media (max-width: 840px) {
+  .app.flat { grid-template-columns: 52px minmax(0, 1fr); }
+  #activity-dock { display: none; }
+  .mobile-dock-open #activity-dock {
+    display: flex;
+    position: fixed;
+    inset: var(--workspace-header-height) 0 0 auto;
+    width: min(360px, calc(100vw - 52px));
+    height: auto;
+    z-index: 9;
+  }
+}
 </style>

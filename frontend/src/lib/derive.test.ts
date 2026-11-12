@@ -21,6 +21,19 @@ describe('conversation derivation', () => {
     expect(conversationMeta(conv, teams, roles).kind).toBe('多角色')
   })
 
+  it('marks shared group chats with the group mode', () => {
+    const groupTeams: Team[] = [{
+      id: 'g1',
+      kind: 'group',
+      name: '研发群',
+      mode: 'roundtable',
+      members: [{ id: 'r1', name: '后端' }],
+    }]
+    const conv: Conversation = { id: 'c-group', team_id: 'g1' }
+    expect(conversationMeta(conv, groupTeams, roles).kind).toBe('群聊')
+    expect(conversationMeta(conv, groupTeams, roles).sub).toContain('圆桌')
+  })
+
   it('uses role name for single-role chats', () => {
     const conv: Conversation = { id: 'c2', role_id: 'r1' }
     expect(conversationTitle(conv, teams, roles)).toBe('后端')

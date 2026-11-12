@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 export interface ContextMenuItem {
   label: string
@@ -20,6 +20,33 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'select', action: string): void
 }>()
+
+const menu = ref<HTMLElement>()
+let previousFocus: HTMLElement | null = null
+
+watch(() => props.open, (open) => {
+  if (open) {
+    previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    menu.value?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true })
+  } else if (previousFocus?.isConnected) {
+    previousFocus.focus({ preventScroll: true })
+  }
+}, { flush: 'post' })
+
+function onMenuKey(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    emit('close')
+    return
+  }
+  if (!menu.value || !['ArrowDown', 'ArrowUp'].includes(event.key)) return
+  const buttons = Array.from(menu.value.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+  if (!buttons.length) return
+  event.preventDefault()
+  const index = buttons.indexOf(document.activeElement as HTMLButtonElement)
+  const offset = event.key === 'ArrowDown' ? 1 : -1
+  buttons[(index + offset + buttons.length) % buttons.length]?.focus({ preventScroll: true })
+}
 
 const style = computed(() => {
   const width = 210
@@ -42,7 +69,7 @@ function pick(item: ContextMenuItem): void {
 <template>
   <Teleport to="body">
     <div v-if="open" class="ctx-scrim" @click="emit('close')" @contextmenu.prevent="emit('close')" />
-    <div v-if="open" class="ctx-menu" :style="style" role="menu" @click.stop>
+    <div v-if="open" ref="menu" class="ctx-menu" :style="style" role="menu" @click.stop @keydown="onMenuKey">
       <template v-for="(item, index) in items" :key="`${item.action}-${index}`">
         <div v-if="item.separator" class="ctx-sep" />
         <button

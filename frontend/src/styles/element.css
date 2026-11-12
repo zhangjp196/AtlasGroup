@@ -1,5 +1,5 @@
 /* Element Plus 主题变量映射到 AtlasX 现有设计 token。
-   这样 8 套主题、暗亮切换和自定义聊天卡片能共用一套颜色。 */
+   这样 4 套主题、暗亮切换和自定义聊天卡片能共用一套颜色。 */
 :root,
 html.dark {
   --el-color-primary: var(--accent);

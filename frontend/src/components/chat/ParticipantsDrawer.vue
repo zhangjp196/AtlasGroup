@@ -18,6 +18,10 @@ const leaderId = computed(() => {
   const team = data.teams.find((item) => item.id === props.conversation?.team_id)
   return String(team?.leader?.id || props.conversation?.role_id || 'default')
 })
+// 共享群组的成员由群组统一维护；在这里保存会退出群组、改成会话私有参与角色。
+const sharedGroup = computed(() => data.teams.find(
+  (item) => item.id === props.conversation?.team_id && item.kind === 'group',
+) || null)
 const options = computed(() => [...data.persistentRoles, ...temporary.value]
   .filter((role) => role.id !== leaderId.value))
 
@@ -53,6 +57,13 @@ async function createTemporary(): Promise<void> {
 
 async function save(): Promise<void> {
   if (!props.conversation || saving.value) return
+  if (sharedGroup.value) {
+    const ok = window.confirm(
+      `当前会话属于群聊「${sharedGroup.value.name}」。\n`
+      + '保存后会退出群组，改成只属于本会话的参与角色；群组本身和其他群聊会话不受影响。继续？',
+    )
+    if (!ok) return
+  }
   saving.value = true
   try {
     const result = await api<{ conversation: Conversation; team: Team }>(
@@ -70,6 +81,10 @@ async function save(): Promise<void> {
 
 <template>
   <SideDrawer :open="open" title="参与角色" subtitle="角色仅加入当前会话" width="480px" @close="emit('close')">
+    <div v-if="sharedGroup" class="group-mode-hint" style="margin:0 0 10px">
+      当前会话属于群聊「{{ sharedGroup.name }}」，成员在群组资料里统一维护。
+      在这里保存会退出群组并转为会话私有参与角色。
+    </div>
     <div class="field">
       <label>参与角色（最多 12 个）</label>
       <el-select v-model="selected" multiple filterable collapse-tags collapse-tags-tooltip

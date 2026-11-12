@@ -58,6 +58,8 @@ class RoleUpdateBody(BaseModel):
 
 def _public(role: Dict[str, Any],
             paths: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    from services.agent_zero.task_layer.conversation import role_chat_model_code
+
     envelope = role.get("envelope") if isinstance(role.get("envelope"), dict) else {}
     tools = [str(t) for t in (envelope.get("tools") or [])]
     dept_id = str(role.get("department_id") or "")
@@ -75,6 +77,7 @@ def _public(role: Dict[str, Any],
         "tools": tools,
         "status": str(envelope.get("status") or "online"),
         "model_code": str(role.get("model_code") or ""),
+        "chat_model_code": role_chat_model_code(role),
         "scope": str(role.get("scope") or "persistent"),
         "source": str(role.get("source") or "user"),
         "session_id": str(role.get("session_id") or ""),

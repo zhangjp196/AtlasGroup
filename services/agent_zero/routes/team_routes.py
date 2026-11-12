@@ -74,16 +74,30 @@ def _spec(spec: Optional[RoleSpecBody]) -> Optional[Dict[str, Any]]:
 
 
 @router.get("/teams")
-def list_teams(workspace_id: Optional[str] = Query(None, max_length=80)):
-    """群组列表。V3.3 起群组独立：不再按工作区旧群组列自动造「默认群聊」。"""
-    if workspace_id:
-        ws_id = str(workspace_id).strip()
-        if not zero_store.get_workspace(ws_id):
-            raise HTTPException(status_code=404, detail=f"工作区不存在: {ws_id}")
-        items = team_service.list_teams(ws_id)
-    else:
-        items = team_service.list_teams(None)
+def list_teams(
+    workspace_id: Optional[str] = Query(None, max_length=80),
+    kind: Optional[str] = Query(None, pattern="^(group|participants|all)$"),
+):
+    """群组列表。
+
+    - 默认只返回用户可管理的群组（``kind=group``）；
+    - ``kind=all`` 供前端会话侧解析私有参与角色（``participants-*``）；
+    - ``kind=participants`` 只返回会话私有参与角色（调试 / 兼容用）。
+    """
+    ws_id = str(workspace_id).strip() if workspace_id else None
+    if ws_id and not zero_store.get_workspace(ws_id):
+        raise HTTPException(status_code=404, detail=f"工作区不存在: {ws_id}")
+    target = "" if str(kind or "") == "all" else str(kind or "group")
+    items = team_service.list_teams(ws_id, kind=target or None)
     return {"code": 0, "data": {"items": items}}
+
+
+def _group_or_404(team_id: str) -> Dict[str, Any]:
+    """群组路由只接受 kind=group；私有参与角色走会话接口。"""
+    team = team_service.get_team(team_id)
+    if not team or str(team.get("kind") or "group") == "participants":
+        raise HTTPException(status_code=404, detail=f"群组不存在: {team_id}")
+    return team
 
 
 @router.post("/teams")
@@ -106,16 +120,12 @@ def create_team(body: TeamCreateBody):
 
 @router.get("/teams/{team_id}")
 def get_team(team_id: str):
-    team = team_service.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail=f"团队不存在: {team_id}")
-    return {"code": 0, "data": team}
+    return {"code": 0, "data": _group_or_404(team_id)}
 
 
 @router.patch("/teams/{team_id}")
 def update_team(team_id: str, body: TeamUpdateBody):
-    if not team_service.get_team(team_id):
-        raise HTTPException(status_code=404, detail=f"团队不存在: {team_id}")
+    _group_or_404(team_id)
     try:
         team = team_service.update_team(
             team_id,
@@ -136,23 +146,21 @@ def update_team(team_id: str, body: TeamUpdateBody):
 
 @router.delete("/teams/{team_id}")
 def delete_team(team_id: str):
+    _group_or_404(team_id)
     if not team_service.delete_team(team_id):
-        raise HTTPException(status_code=404, detail=f"团队不存在: {team_id}")
+        raise HTTPException(status_code=404, detail=f"群组不存在: {team_id}")
     return {"code": 0, "data": {"deleted": True, "id": team_id}}
 
 
 @router.post("/teams/{team_id}/bind")
 def bind_team(team_id: str, body: BindBody):
-    team = team_service.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail=f"团队不存在: {team_id}")
+    _group_or_404(team_id)
     conv = conversation.get_conversation(body.conversation_id)
     if not conv:
         raise HTTPException(status_code=404,
                             detail=f"对话不存在: {body.conversation_id}")
-    if str(conv.get("workspace_id") or "") != str(team.get("workspace_id") or ""):
-        raise HTTPException(status_code=400,
-                            detail="团队与对话不属于同一个工作区")
+    # 群组独立于工作区：群聊可以绑定不同工作区的会话，绑定后会话会跟随
+    # 群组工作区（除非会话自己手动指定）。
     try:
         team_service.bind_team(body.conversation_id, team_id)
     except ValueError as e:
@@ -163,9 +171,7 @@ def bind_team(team_id: str, body: BindBody):
 
 @router.post("/teams/{team_id}/unbind")
 def unbind_team(team_id: str, body: BindBody):
-    team = team_service.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail=f"团队不存在: {team_id}")
+    team = _group_or_404(team_id)
     team_service.bind_team(
         body.conversation_id, None,
         notice=f"你已退出群聊「{team.get('name') or team_id}」")

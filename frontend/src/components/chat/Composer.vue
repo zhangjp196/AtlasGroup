@@ -12,6 +12,8 @@ const props = defineProps<{
   models: ModelProfile[]
   subscriptions: Subscription[]
   model: string
+  roleModel?: string
+  effectiveModel?: string
   perm: string
   thinking: string
   members: TeamMember[]
@@ -54,7 +56,7 @@ const COMPOSITION_GRACE_MS = 140
 const dragOver = ref(false)
 const popup = ref<Popup | null>(null)
 
-const activeModel = computed(() => props.models.find((item) => item.code === props.model))
+const activeModel = computed(() => props.models.find((item) => item.code === (props.effectiveModel || props.model)))
 const thinkingLevels = computed(() => activeModel.value?.thinking_levels || [])
 
 function grow(): void {
@@ -244,7 +246,7 @@ function focus(): void {
 defineExpose({ focus })
 
 watch(draft, () => nextTick(grow))
-watch(() => props.model, () => nextTick(grow))
+watch(() => [props.model, props.roleModel], () => nextTick(grow))
 </script>
 
 <template>
@@ -304,10 +306,15 @@ watch(() => props.model, () => nextTick(grow))
         :subscriptions="subscriptions"
         size="small"
         width="200px"
-        placeholder="跟随角色模型"
-        default-label="跟随角色模型"
+        placeholder="选择会话模型"
+        default-label="系统默认模型"
+        :hide-default="!models.some((item) => item.code === 'default')"
+        explicit-default
         @update:model-value="emit('update:model', $event)"
       />
+      <span v-if="roleModel" class="role-model-indicator" :title="'当前角色使用固定模型，选择器设置会话备用模型'">
+        角色模型 · {{ activeModel?.name || roleModel }}
+      </span>
       <el-select
         v-if="thinkingLevels.length"
         :model-value="thinking"

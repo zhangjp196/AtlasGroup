@@ -129,7 +129,7 @@ async function save(): Promise<void> {
       persona: form.persona.trim(),
       avatar: form.avatar || '',
       tools: form.tools,
-      model_code: form.model_code || undefined,
+      model_code: form.model_code,
     }
     const role = props.role
       ? await api<Role>(`/roles/${encodeURIComponent(props.role.id)}`, { method: 'PATCH', body })

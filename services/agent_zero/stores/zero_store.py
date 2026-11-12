@@ -349,7 +349,7 @@ def upsert_role(row: Dict[str, Any]) -> Dict[str, Any]:
                  f"avatar, envelope, model_code, scope, source, session_id) "
                  f"VALUES (:id, :gid, :name, :title, NULLIF(:department_id, ''), "
                  f":persona, :expertise, :avatar, :envelope, "
-                 f":model_code, COALESCE(:scope, 'persistent'), "
+                 f"NULLIF(:model_code, ''), COALESCE(:scope, 'persistent'), "
                  f"COALESCE(:source, 'user'), :session_id) "
                  f"ON CONFLICT (id) DO UPDATE SET "
                  f"group_id = :gid, name = :name, persona = :persona, "
@@ -360,7 +360,7 @@ def upsert_role(row: Dict[str, Any]) -> Dict[str, Any]:
                  f"avatar = CASE WHEN :avatar IS NULL THEN roles.avatar ELSE :avatar END, "
                  f"envelope = :envelope, "
                  f"model_code = CASE WHEN :model_code IS NULL THEN roles.model_code "
-                 f"ELSE :model_code END, "
+                 f"ELSE NULLIF(:model_code, '') END, "
                  f"scope = CASE WHEN :scope IS NULL THEN roles.scope ELSE :scope END, "
                  f"source = CASE WHEN :source IS NULL THEN roles.source ELSE :source END, "
                  f"session_id = CASE WHEN :session_id IS NULL THEN roles.session_id "
@@ -372,7 +372,7 @@ def upsert_role(row: Dict[str, Any]) -> Dict[str, Any]:
              "persona": row.get("persona"), "expertise": row.get("expertise"),
              "avatar": row.get("avatar") if row.get("avatar") is not None else None,
              "envelope": _json(row.get("envelope") or {}),
-             "model_code": (str(row.get("model_code") or "").strip() or None),
+             "model_code": (str(row["model_code"]).strip() if row.get("model_code") is not None else None),
              "scope": (str(row.get("scope") or "").strip() or None),
              "source": (str(row.get("source") or "").strip() or None),
              "session_id": row.get("session_id")},

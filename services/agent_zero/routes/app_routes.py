@@ -671,7 +671,25 @@ def put_ui_prefs(body: UiPrefsBody):
 
 # 主题单独一条：V3 每次启动的端口可能变，localStorage 按 origin 隔离，
 # 只靠 localStorage 会看起来「主题没保存」。服务器是跨端口 / 跨重启的持久源。
-_THEME_IDS = {"dark", "light", "midnight", "slate", "ocean", "forest", "sepia", "violet"}
+_THEME_IDS = {"dark", "light", "violet", "sepia"}
+_LEGACY_THEMES = {"midnight": "dark", "slate": "dark", "forest": "dark", "ocean": "light"}
+
+
+def _normalize_theme(value: Any, fallback: str = "dark") -> str:
+    if not isinstance(value, str):
+        return fallback
+    code = value.strip()
+    return code if code in _THEME_IDS else _LEGACY_THEMES.get(code, fallback)
+
+
+def _normalize_theme_schedule(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    schedule = dict(value)
+    for key, fallback in (("day", "light"), ("night", "dark")):
+        if key in schedule:
+            schedule[key] = _normalize_theme(schedule[key], fallback)
+    return schedule
 
 
 class ThemePrefsBody(BaseModel):
@@ -685,22 +703,19 @@ def get_theme_prefs():
     if not isinstance(prefs, dict):
         prefs = {}
     return {"code": 0, "data": {
-        "theme": prefs.get("theme") or "dark",
-        "themeSchedule": prefs.get("themeSchedule") or {},
+        "theme": _normalize_theme(prefs.get("theme")),
+        "themeSchedule": _normalize_theme_schedule(prefs.get("themeSchedule")),
     }}
 
 
 @router.put("/app/theme")
 def put_theme_prefs(body: ThemePrefsBody):
-    theme = str(body.theme or "").strip()
-    if theme not in _THEME_IDS:
-        theme = "dark"
     prefs = settings_store.get("ui", {})
     if not isinstance(prefs, dict):
         prefs = {}
     next_prefs = dict(prefs)
-    next_prefs["theme"] = theme
-    next_prefs["themeSchedule"] = body.themeSchedule or {}
+    next_prefs["theme"] = _normalize_theme(body.theme)
+    next_prefs["themeSchedule"] = _normalize_theme_schedule(body.themeSchedule)
     if len(json.dumps(next_prefs, ensure_ascii=False)) > 20000:
         raise HTTPException(status_code=400, detail="prefs too large")
     settings_store.put("ui", next_prefs)

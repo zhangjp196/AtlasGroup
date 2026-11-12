@@ -9,7 +9,7 @@ import TokenMeter from '@/components/TokenMeter.vue'
 import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
 import type { Conversation, Role, TokenUsage } from '@/api/types'
-import { GLOBAL_AGENT_ZONE } from '@/lib/derive'
+import { GLOBAL_AGENT_ZONE, modeLabel } from '@/lib/derive'
 import { DEFAULT_PAGE_SIZE, pageSlice } from '@/lib/paging'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
@@ -36,6 +36,7 @@ const usageLoading = ref(false)
 
 const draft = reactive({
   title: '',
+  team_id: '',
   role_id: '',
   participant_ids: [] as string[],
   workspace_id: '',
@@ -43,6 +44,14 @@ const draft = reactive({
 })
 
 const isGlobal = computed(() => String(props.conversation?.zone || '') === GLOBAL_AGENT_ZONE)
+const sharedGroup = computed(() => data.groups.find(
+  (team) => team.id === draft.team_id,
+) || null)
+const groupOptions = computed(() => data.groups.map((team) => ({
+  value: team.id,
+  label: `${team.name} · ${(team.members || []).length} 个角色`,
+  description: [team.mode, team.description].filter(Boolean).join(' · '),
+})))
 
 // 角色 / 临时角色同样每页 12 条，避免抽屉里一次铺满。
 const tempPage = ref(1)
@@ -78,8 +87,10 @@ const participantOptions = computed(() => availableRoles.value
     tag: role.scope === 'temporary' ? '临时' : '',
   })))
 
-// 「跟随角色」时实际会使用的工作区。
+// 「跟随」时实际会使用的工作区：群组优先于角色。
 const followWorkspace = computed(() => {
+  const groupWs = String(sharedGroup.value?.workspace_id || '')
+  if (groupWs) return data.workspaces.find((ws) => ws.id === groupWs) || null
   const roleId = draft.role_id || 'default'
   const role = data.roles.find((item) => item.id === roleId)
   return data.workspaces.find((ws) => ws.id === String(role?.workspace_id || '')) || null
@@ -97,6 +108,8 @@ function loadDraft(): void {
   const conv = props.conversation
   const team = data.teams.find((item) => item.id === conv?.team_id)
   draft.title = conv?.title || ''
+  // 只有共享群组走 team_id；participants-* 仍是本会话的参与角色。
+  draft.team_id = String(team?.kind || '') === 'group' ? String(team?.id || '') : ''
   draft.role_id = conv?.role_id || String(team?.leader?.id || '') || 'default'
   draft.participant_ids = (team?.members || [])
     .map((member) => String(member.id || ''))
@@ -107,6 +120,16 @@ function loadDraft(): void {
 
 function onFollowChange(): void {
   if (draft.workspace_follow) draft.workspace_id = followWorkspace.value?.id || draft.workspace_id
+}
+
+function onGroupChange(): void {
+  const group = sharedGroup.value
+  if (!group) return
+  draft.role_id = String(group.leader?.id || draft.role_id || '')
+  draft.participant_ids = (group.members || [])
+    .map((member) => String(member.id || ''))
+    .filter((id) => Boolean(id) && id !== draft.role_id)
+  if (draft.workspace_follow) draft.workspace_id = followWorkspace.value?.id || ''
 }
 
 function onWorkspaceChange(): void {
@@ -241,9 +264,10 @@ async function save(): Promise<void> {
   try {
     const body: Record<string, unknown> = { title }
     if (!isGlobal.value) {
+      body.team_id = draft.team_id || ''
       body.role_id = draft.role_id || ''
-      // 工作区默认跟随角色；用户手动选择后只作用于本会话，
-      // 同一角色的其他会话仍然可以各自使用不同工作区。
+      // 工作区默认跟随角色 / 群组；用户手动选择后只作用于本会话，
+      // 同一角色 / 群组的其他会话仍然可以各自使用不同工作区。
       body.workspace_follow = draft.workspace_follow
       if (!draft.workspace_follow) body.workspace_id = draft.workspace_id
     }
@@ -252,7 +276,8 @@ async function save(): Promise<void> {
       { method: 'PATCH', body },
     )
     let updated: Conversation = conv
-    if (!isGlobal.value) {
+    // 群聊的成员由群组统一维护；只有非群聊会话才写会话私有参与角色。
+    if (!isGlobal.value && !draft.team_id) {
       const result = await api<{ conversation: Conversation }>(
         `/conversations/${encodeURIComponent(conv.id)}/participants`,
         {
@@ -355,11 +380,34 @@ async function removeConversation(): Promise<void> {
           <TokenMeter :usage="usage || conversation?.usage" variant="panel" headless />
         </section>
 
+        <section v-if="!isGlobal" class="group-section">
+          <div class="group-section-head">
+            <h3>群组</h3>
+            <span>群聊成员由群组统一维护</span>
+          </div>
+          <div class="field">
+            <label>绑定群组</label>
+            <select v-model="draft.team_id" class="input" @change="onGroupChange">
+              <option value="">不使用群组（本会话私有参与角色）</option>
+              <option v-for="group in groupOptions" :key="group.value" :value="group.value">
+                {{ group.label }}
+              </option>
+            </select>
+            <small v-if="sharedGroup" class="role-line">
+              当前群：{{ modeLabel(sharedGroup.mode) }} · {{ (sharedGroup.members || []).length }} 个角色；
+              成员变更会同步到所有绑定该群的会话。
+            </small>
+            <small v-else class="role-line">
+              不使用群组时，下面的参与角色只属于本会话。
+            </small>
+          </div>
+        </section>
+
         <template v-if="!isGlobal">
-          <section class="group-section">
+          <section v-if="!draft.team_id" class="group-section">
             <div class="group-section-head">
               <h3>角色</h3>
-              <span>主持角色 + 参与角色</span>
+              <span>主持角色 + 本会话参与角色</span>
             </div>
             <div class="field">
               <label>主持角色</label>
@@ -396,7 +444,7 @@ async function removeConversation(): Promise<void> {
             </div>
           </section>
 
-          <section class="group-section">
+          <section v-if="!draft.team_id" class="group-section">
             <div class="group-section-head">
               <h3>临时角色</h3>
               <span>只属于本会话</span>
@@ -426,6 +474,30 @@ async function removeConversation(): Promise<void> {
               :page-size="DEFAULT_PAGE_SIZE"
               @update:page="tempPage = $event"
             />
+          </section>
+
+          <section v-if="draft.team_id" class="group-section">
+            <div class="group-section-head">
+              <h3>群成员</h3>
+              <span>由群组统一维护</span>
+            </div>
+            <div class="group-member-list">
+              <div v-if="sharedGroup?.leader?.id" class="group-member">
+                <Avatar :name="sharedGroup?.leader?.name || '群主'" :avatar="sharedGroup?.leader?.avatar" round />
+                <div class="group-member-main">
+                  <div class="group-member-name"><span>{{ sharedGroup?.leader?.name }}</span><span class="tag grp">群主</span></div>
+                  <div class="group-member-sub">{{ sharedGroup?.leader?.expertise || '负责接收消息与编排' }}</div>
+                </div>
+              </div>
+              <div v-for="member in (sharedGroup?.members || [])" :key="member.id || member.name" class="group-member">
+                <Avatar :name="member.name || '角色'" :avatar="member.avatar" round />
+                <div class="group-member-main">
+                  <div class="group-member-name"><span>{{ member.name }}</span></div>
+                  <div class="group-member-sub">{{ [member.title, member.expertise].filter(Boolean).join(' · ') || '群成员' }}</div>
+                </div>
+              </div>
+            </div>
+            <small class="role-line">改成员 / 群主 / 协作方式 / 发言上限请点聊天头部「群资料」；这里只切换本会话绑定的群。</small>
           </section>
         </template>
 

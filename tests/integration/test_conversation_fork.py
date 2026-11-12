@@ -116,3 +116,20 @@ def test_fork_rejects_empty_conversation(env):
     res = client.post(f"{API}/conversations/{conv_id}/fork", json={})
     assert res.status_code == 400
     assert "没有可复制" in res.text
+
+
+def test_fork_copies_private_participants(env):
+    """分支不能和原会话共用 participants-*：复制一份新的私有参与角色。"""
+    client, ws_id, conv_id = env["client"], env["ws_id"], env["conv_id"]
+    role = client.post(f"{API}/roles", json={"name": "分支成员"}).json()["data"]
+    updated = client.put(f"{API}/conversations/{conv_id}/participants", json={
+        "role_ids": [role["id"]],
+    }).json()["data"]
+    original_team = updated["team"]["id"]
+    _mk_message(conv_id, ws_id, "用户消息")
+
+    forked = client.post(f"{API}/conversations/{conv_id}/fork", json={}).json()["data"]
+    assert forked["team_id"] and forked["team_id"] != original_team
+    team = client.get(f"{API}/conversations/{forked['id']}/team").json()["data"]["team"]
+    assert team["kind"] == "participants"
+    assert [m["name"] for m in team["members"]] == ["分支成员"]

@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import { api } from '@/api/client'
-import type { Conversation, Role } from '@/api/types'
+import type { Conversation, Role, Team } from '@/api/types'
 import { conversationParts, conversationTitle, GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE } from '@/lib/derive'
 import { shortTime } from '@/lib/format'
 import { useAppStore } from '@/stores/app'
@@ -15,12 +15,12 @@ import { useDataStore } from '@/stores/data'
 const data = useDataStore()
 const app = useAppStore()
 const props = defineProps<{ collapsed?: boolean }>()
-const emit = defineEmits<{ (e: 'toggle'): void; (e: 'resize', width: number): void }>()
+const emit = defineEmits<{ (e: 'toggle'): void; (e: 'resize', width: number): void; (e: 'open-chat'): void }>()
 const attention = useAttentionStore()
 const chatWindows = useChatWindowsStore()
 const router = useRouter()
 
-type Tab = 'sessions' | 'roles'
+type Tab = 'sessions' | 'roles' | 'groups'
 const tab = ref<Tab>('sessions')
 const sessionQuery = ref('')
 
@@ -88,6 +88,16 @@ const filteredRoles = computed(() => {
   ].join(' ').toLowerCase().includes(q))
 })
 
+const groupQuery = ref('')
+const filteredGroups = computed(() => {
+  const q = groupQuery.value.trim().toLowerCase()
+  return data.groups.filter((group) => [group.name, group.description, group.leader?.name]
+    .join(' ').toLowerCase().includes(q))
+})
+
+async function openGroupChat(group: Team): Promise<void> {
+  if (await chatWindows.openGroup(group)) emit('open-chat')
+}
 function roleSessionCount(roleId: string): number {
   return sessions.value.filter((row) => row.role?.id === roleId).length
 }
@@ -99,16 +109,18 @@ function roleModel(role: Role): string {
 
 function openSession(conv: Conversation): void {
   chatWindows.openConversation(conv.id)
+  emit('open-chat')
 }
 
 async function openRoleChat(role: Role): Promise<void> {
   menu.open = false
   const existing = sessions.value.find((row) => row.role?.id === role.id)
   if (existing) {
-    chatWindows.openConversation(existing.conv.id)
+    openSession(existing.conv)
     return
   }
   chatWindows.openDraft(role.id)
+  emit('open-chat')
 }
 
 function openRoleDetail(role: Role): void {
@@ -243,8 +255,9 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
 </script>
 
 <template>
-  <aside class="side-dock" :class="{ mini: collapsed }" aria-label="会话与在线角色">
+  <aside class="side-dock" :class="{ mini: collapsed }" aria-label="协作中心">
     <span class="rs rs-left" title="拖拽调整宽度" @pointerdown.prevent="startResize" />
+    <div v-if="!collapsed" class="dock-title"><h2>协作中心</h2></div>
     <header class="dock-head">
       <button class="dock-toggle" type="button" :title="collapsed ? '展开侧栏' : '收起侧栏'"
         :aria-label="collapsed ? '展开侧栏' : '收起侧栏'" @click="emit('toggle')">
@@ -259,13 +272,18 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
           :aria-selected="tab === 'roles'" @click="tab = 'roles'">
           角色 <span>{{ roles.length }}</span>
         </button>
+        <button class="dock-tab" :class="{ on: tab === 'groups' }" type="button" role="tab"
+          :aria-selected="tab === 'groups'" @click="tab = 'groups'">
+          群组 <span>{{ data.groups.length }}</span>
+        </button>
       </div>
-      <button v-if="!collapsed" class="dock-manage" type="button" title="管理角色与状态" @click="router.push('/role')">管理</button>
+      <button v-if="!collapsed" class="dock-manage" type="button" title="打开管理页面" @click="router.push(tab === 'groups' ? '/group' : tab === 'roles' ? '/role' : '/conv')">管理</button>
     </header>
 
     <div v-if="!collapsed" class="dock-search">
-      <input v-if="tab === 'sessions'" v-model="sessionQuery" class="input" placeholder="搜索会话…" />
-      <input v-else v-model="roleQuery" class="input" placeholder="搜索在线角色…" />
+      <input v-if="tab === 'sessions'" v-model="sessionQuery" class="input" aria-label="搜索会话" placeholder="搜索会话…" />
+      <input v-else-if="tab === 'roles'" v-model="roleQuery" class="input" aria-label="搜索在线角色" placeholder="搜索在线角色…" />
+      <input v-else v-model="groupQuery" class="input" aria-label="搜索群组" placeholder="搜索群组…" />
     </div>
 
     <div v-if="tab === 'sessions'" class="dock-list">
@@ -301,7 +319,7 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
       </div>
     </div>
 
-    <div v-else class="dock-list">
+    <div v-else-if="tab === 'roles'" class="dock-list">
       <button v-for="role in filteredRoles" :key="role.id" class="dock-row role-row" type="button"
         :title="`${role.name} · 点击聊天，右键更多操作`" @click="openRoleChat(role)"
         @contextmenu.prevent.stop="openRoleMenu($event, role)">
@@ -330,6 +348,18 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
       </div>
     </div>
 
+    <div v-else class="dock-list">
+      <button v-for="group in filteredGroups" :key="group.id" class="dock-row" type="button"
+        :title="`打开群聊：${group.name}`" @click="openGroupChat(group)">
+        <Avatar :name="group.name" :avatar="group.avatar" :size="38" />
+        <span class="dock-main">
+          <span class="dock-line"><b>{{ group.name }}</b><span class="dock-count">{{ group.members?.length || 0 }} 位成员</span></span>
+          <span v-if="group.description" class="dock-preview">{{ group.description }}</span>
+        </span>
+      </button>
+      <div v-if="!filteredGroups.length" class="dock-empty">{{ data.groups.length ? '没有匹配的群组' : '还没有群组' }}</div>
+    </div>
+
     <ContextMenu
       :open="menu.open"
       :x="menu.x"
@@ -354,7 +384,7 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
 .dock-toggle:hover { color: var(--text); border-color: var(--line-strong); }
 .dock-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .dock-tabs { display: flex; gap: 4px; flex: 1; min-width: 0; background: var(--bg-2); border: 1px solid var(--line-soft); padding: 2px; border-radius: 10px; }
-.dock-tab { flex: 1; border: 0; border-radius: 8px; background: transparent; color: var(--dim); padding: 6px 6px; font-size: 12px; cursor: pointer; transition: background .15s, color .15s; }
+.dock-tab { flex: 1; white-space: nowrap; border: 0; border-radius: 8px; background: transparent; color: var(--dim); padding: 6px 6px; font-size: 12px; cursor: pointer; transition: background .15s, color .15s; }
 .dock-tab span { color: var(--faint); font-size: 10px; margin-left: 3px; }
 .dock-tab:hover { color: var(--text); }
 .dock-tab.on { background: var(--panel); color: var(--text); font-weight: 650; box-shadow: 0 1px 6px color-mix(in srgb, #000 12%, transparent); }
@@ -401,5 +431,26 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
   min-width: 15px; height: 15px; padding: 0 3px;
   border-radius: 8px; background: var(--danger); color: #fff;
   font-size: 9px; line-height: 1; box-shadow: 0 0 0 2px var(--panel);
+}
+</style>
+
+<style scoped>
+.side-dock { background: var(--bg-2); box-shadow: none; }
+.dock-title { height: 54px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--line-soft); }
+.dock-title h2 { margin: 0; font-size: 13px; letter-spacing: .025em; }
+.dock-head { padding: 14px 12px 9px; }
+.dock-search { padding-bottom: 12px; }
+.dock-search .input { height: 35px; background: var(--bg); }
+.dock-list { padding-inline: 12px; }
+.dock-row { padding: 11px 9px; border-color: var(--line-soft); margin-bottom: 7px; background: var(--panel); border-radius: 10px; }
+.dock-row:hover { transform: none; border-color: var(--line-strong); }
+.dock-tab.on { color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.dock-badge.run { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--panel)); }
+.dock-badge.open { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, var(--panel)); }
+.side-dock.mini .dock-head { justify-content: center; }
+@media (max-width: 840px) {
+  .dock-title { display: none; }
+  .rs, .dock-toggle { display: none; }
+  .dock-tab span { display: none; }
 }
 </style>

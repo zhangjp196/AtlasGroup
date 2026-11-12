@@ -6,6 +6,7 @@ import {
   applyTheme,
   DEFAULT_SCHEDULE,
   normalizeSchedule,
+  normalizeTheme,
   readSchedule,
   readTheme,
   scheduledTheme,
@@ -66,7 +67,7 @@ export const useAppStore = defineStore('app', () => {
         const data = await api<{ theme?: string; themeSchedule?: unknown }>('/app/theme')
         if (data?.theme) {
           schedule.value = normalizeSchedule(data.themeSchedule || DEFAULT_SCHEDULE)
-          theme.value = data.theme as ThemeId
+          theme.value = normalizeTheme(data.theme) ?? 'dark'
           writeThemePrefs(theme.value, schedule.value)
           applyTheme(theme.value)
         }
@@ -74,6 +75,7 @@ export const useAppStore = defineStore('app', () => {
         /* ignore */
       }
     }
+    writeThemePrefs(theme.value, schedule.value)
     startSchedule()
     serverSynced.value = true
   }

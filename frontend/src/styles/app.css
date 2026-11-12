@@ -1,9 +1,5 @@
 :root{
   color-scheme:dark;
-  --bg:#0c0e12;--bg-2:#11141a;--panel:#151922;--panel-2:#1a1f2a;--panel-3:#202634;
-  --line:#252c39;--line-soft:#1e2431;--text:#e7ebf2;--dim:#98a3b3;--faint:#6b7687;
-  --accent:#7aa2ff;--accent-2:#a78bfa;--ok:#3fb950;--warn:#d29922;--danger:#f85149;
-  --on-accent:#0a0c10;--code-bg:#0b0e13;
   --accent-ink:color-mix(in srgb,var(--accent) 55%,var(--text));
   --danger-ink:color-mix(in srgb,var(--danger) 62%,var(--text));
   --line-strong:color-mix(in srgb,var(--text) 20%,var(--line));
@@ -12,55 +8,6 @@
   --r:12px;--shadow:0 18px 50px rgba(0,0,0,.55);
   --font:ui-sans-serif,-apple-system,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-}
-html[data-theme="light"]{
-  color-scheme:light;
-  --bg:#fbfbfa;--bg-2:#f6f6f4;--panel:#f3f3f1;--panel-2:#ffffff;--panel-3:#ececea;
-  --line:#dcdcd7;--line-soft:#e6e6e1;--text:#1a1a1c;--dim:#54545b;--faint:#6e6e76;
-  --accent:#3d6fd6;--accent-2:#7c5cff;--ok:#1f9d67;--warn:#a7741d;--danger:#cf4e4e;
-  --on-accent:#ffffff;--code-bg:#f3f3f0;--shadow:0 18px 50px rgba(30,30,20,.18);
-}
-html[data-theme="midnight"]{
-  color-scheme:dark;
-  --bg:#0e1216;--bg-2:#12181f;--panel:#161e26;--panel-2:#1b2430;--panel-3:#222d39;
-  --line:#2e3a48;--line-soft:#242f3b;--text:#e7eef6;--dim:#98a7b8;--faint:#6a7887;
-  --accent:#7fb0ea;--accent-2:#a78bfa;--ok:#5fd0a2;--warn:#e8b76e;--danger:#e07a80;
-  --on-accent:#121820;--code-bg:#121921;--shadow:0 18px 50px rgba(0,0,0,.55);
-}
-html[data-theme="slate"]{
-  color-scheme:dark;
-  --bg:#121416;--bg-2:#16181b;--panel:#1a1d21;--panel-2:#1f2327;--panel-3:#262a30;
-  --line:#333840;--line-soft:#272c33;--text:#e9e9ea;--dim:#a5adb6;--faint:#717982;
-  --accent:#85a9d6;--accent-2:#b0a6e8;--ok:#59c39c;--warn:#e3b56c;--danger:#e0797d;
-  --on-accent:#16191c;--code-bg:#15181c;--shadow:0 18px 50px rgba(0,0,0,.5);
-}
-html[data-theme="ocean"]{
-  color-scheme:light;
-  --bg:#f4f8fb;--bg-2:#eef4f8;--panel:#e9f0f6;--panel-2:#f9fbfd;--panel-3:#dfe7ef;
-  --line:#c8d4e0;--line-soft:#d7e0ea;--text:#17212a;--dim:#4f5b67;--faint:#67727d;
-  --accent:#2c6bb5;--accent-2:#6b5ce0;--ok:#1d8f6b;--warn:#9a7020;--danger:#c85050;
-  --on-accent:#ffffff;--code-bg:#eef3f7;--shadow:0 18px 50px rgba(20,40,60,.16);
-}
-html[data-theme="forest"]{
-  color-scheme:dark;
-  --bg:#0e1310;--bg-2:#121713;--panel:#161c18;--panel-2:#1b221d;--panel-3:#232b26;
-  --line:#2f3933;--line-soft:#252e28;--text:#e5ece7;--dim:#97a49c;--faint:#6a766e;
-  --accent:#7fb8dd;--accent-2:#9cc7b0;--ok:#63c99b;--warn:#e6b56e;--danger:#e07a7c;
-  --on-accent:#121813;--code-bg:#121714;--shadow:0 18px 50px rgba(0,0,0,.55);
-}
-html[data-theme="sepia"]{
-  color-scheme:light;
-  --bg:#f6f1e7;--bg-2:#efe7db;--panel:#e9dfcf;--panel-2:#f9f4ec;--panel-3:#e2d6c2;
-  --line:#d4c6ac;--line-soft:#e1d5c3;--text:#2c2419;--dim:#5e5546;--faint:#776c5c;
-  --accent:#4b6f9f;--accent-2:#7a5b2f;--ok:#3f7d58;--warn:#9a7327;--danger:#b94c3c;
-  --on-accent:#ffffff;--code-bg:#efe7db;--shadow:0 18px 50px rgba(60,45,20,.18);
-}
-html[data-theme="violet"]{
-  color-scheme:dark;
-  --bg:#121016;--bg-2:#16131d;--panel:#191622;--panel-2:#1e1b28;--panel-3:#262233;
-  --line:#332f42;--line-soft:#282535;--text:#e9e6f0;--dim:#a4a3b3;--faint:#727382;
-  --accent:#9ab7ef;--accent-2:#b9b2d8;--ok:#6ecfa4;--warn:#eac177;--danger:#e77d84;
-  --on-accent:#17141d;--code-bg:#15121c;--shadow:0 18px 50px rgba(0,0,0,.55);
 }
 *{box-sizing:border-box}
 html,body{height:100%}
@@ -305,7 +252,7 @@ html[data-theme-mode="light"] .theme-toggle .theme-moon{display:block}
 .card h3{margin:0;font-size:12.5px;display:flex;align-items:center;gap:7px}
 .card p{margin:0;font-size:10.5px;color:var(--faint);line-height:1.6}
 .chips{display:flex;flex-wrap:wrap;gap:5px}
-.tile-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.tile-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,250px),1fr));gap:12px}
 .tile-card{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:14px;display:flex;flex-direction:column;gap:10px;cursor:pointer;min-width:0;transition:border-color .15s,transform .15s,box-shadow .15s}
 .tile-card:hover{border-color:var(--line-strong);transform:translateY(-2px);box-shadow:0 14px 32px rgba(0,0,0,.12)}
 .tile-card.unread{border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
@@ -336,7 +283,7 @@ html[data-theme-mode="light"] .theme-toggle .theme-moon{display:block}
 .ws-preview-head button{margin-left:auto}
 .ws-file-preview pre{margin:0;padding:12px;font:11px/1.65 var(--mono);color:var(--dim);overflow:auto;max-height:360px;white-space:pre-wrap}
 .ws-empty{padding:22px 10px;text-align:center;color:var(--faint);font-size:10.5px}
-.role-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.role-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));gap:12px}
 .role-card{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:14px;display:flex;flex-direction:column;gap:9px;cursor:pointer}
 .role-card:hover{border-color:var(--line-strong)}
 .role-top{display:flex;align-items:center;gap:9px;min-width:0}
@@ -803,7 +750,6 @@ textarea.input{resize:vertical;min-height:70px}
   .run-state{padding:4px 5px}
   .win-body{padding:14px 12px 8px}
   .composer{padding:8px 10px 10px}
-  .org-layout{grid-template-columns:1fr}
   .org-tree{position:static}
   .ws-browser{grid-template-columns:1fr}
   .chat-shell{width:100vw;border-left:0}
@@ -1128,7 +1074,7 @@ body.ga-open .ga-fab{display:none}
 .agent-activity h3{margin:0 0 8px;font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
 @media (max-width:900px){.agent-canvas-body{flex-direction:column}.agent-activity{width:auto;border-left:0;border-top:1px solid var(--line);max-height:240px}}
 .sa-kicker{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
-.conv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
+.conv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:10px}
 .conv-card{border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:9px;text-align:left;color:inherit;cursor:pointer}
 .conv-card:hover{border-color:var(--line-strong);background:var(--panel-2)}
 .conv-card-head{display:flex;align-items:center;gap:9px;min-width:0}
@@ -1172,7 +1118,7 @@ body.ga-open .ga-fab{display:none}
 /* 4 个统计卡在宽屏铺满，不留空轨道 */
 .stat-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
 /* 设置 → 工具：工具包 + 紧凑工具目录（描述只做悬停提示） */
-.tool-pack-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.tool-pack-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));gap:10px}
 .tool-pack{border:1px solid var(--line);border-radius:11px;background:var(--panel);padding:10px;display:flex;flex-direction:column;gap:8px}
 .tool-pack.off{opacity:.55}
 .tool-pack-head{display:flex;align-items:center;gap:7px;min-width:0}
@@ -1330,7 +1276,7 @@ body.ga-open .ga-fab{display:none}
 .settings-nav .el-menu-item{height:36px;line-height:36px;border-radius:8px;margin:1px 0;font-size:12px;color:var(--dim)}
 .settings-nav .el-menu-item:hover{background:var(--panel-2);color:var(--text)}
 .settings-nav .el-menu-item.is-active{background:color-mix(in srgb,var(--accent) 12%,var(--panel-2));color:var(--accent)}
-@media (max-width:900px){.settings-layout{grid-template-columns:1fr}.settings-nav{position:static}.settings-nav .el-menu{display:flex;flex-wrap:wrap}.settings-nav .el-menu-item{height:30px;line-height:30px;padding:0 9px}}
+
 /* 全局 Agent：对话 / 消息 tab */
 .ga-tabs{flex:none;display:flex;align-items:center;gap:4px;padding:7px 10px;border-bottom:1px solid var(--line-soft);background:var(--bg-2)}
 .ga-tab{flex:none;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--faint);font-size:11.5px;padding:5px 12px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:5px}
@@ -1390,7 +1336,7 @@ body.ga-open .ga-fab{display:none}
 .model-main small{font-size:9.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .model-actions{display:flex;gap:2px;flex:none}
 .models-pane-foot{padding:8px 12px;border-top:1px solid var(--line-soft);color:var(--faint);font-size:10px;line-height:1.5}
-@media (max-width:980px){.models-settings-layout{grid-template-columns:1fr;min-height:0}.sub-list,.model-list{max-height:360px}.models-pane-foot{display:none}}
+
 .discover-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .discover-toolbar .el-input{flex:1;min-width:180px}
 .discover-summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:-4px}
@@ -1424,7 +1370,7 @@ body.ga-open .ga-fab{display:none}
 .avatar-field .avatar.avatar-preview{width:54px;height:54px;font-size:19px;border-radius:16px}
 
 /* 群组画廊：对齐参考版的卡片结构 */
-.group-gallery{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+.group-gallery{grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr))}
 .group-hero{align-items:flex-start}
 .group-hero h1{margin:0 0 6px;font-size:30px;font-weight:750;letter-spacing:-.035em}
 .group-card{min-height:0;gap:8px;padding:16px;border-radius:14px;cursor:pointer;overflow:visible}
@@ -1527,7 +1473,7 @@ body.ga-open .ga-fab{display:none}
 .agent-metrics-parallel::before{background:var(--accent)!important;opacity:1!important}
 .agent-idle{margin-top:22px;max-width:1000px}
 .agent-idle h3{margin:0 0 8px;font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
-.agent-idle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
+.agent-idle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));gap:8px}
 .agent-idle-card{display:flex;align-items:center;gap:8px;border:1px solid var(--line-soft);border-radius:10px;background:color-mix(in srgb,var(--panel) 72%,transparent);padding:8px 10px;text-align:left;color:var(--text);cursor:pointer;min-width:0}
 .agent-idle-card:hover,.agent-idle-card.selected{border-color:color-mix(in srgb,var(--accent) 45%,var(--line));background:color-mix(in srgb,var(--accent) 7%,var(--panel))}
 .agent-idle-card .avatar{width:28px;height:28px;font-size:11px;flex:none}
@@ -1652,7 +1598,6 @@ select.input:disabled{opacity:.55;cursor:not-allowed}
 select.input option,
 select.input optgroup{background:var(--panel-2);color:var(--text)}
 html[data-theme="light"] select.input option,
-html[data-theme="ocean"] select.input option,
 html[data-theme="sepia"] select.input option{background:var(--panel-2);color:var(--text)}
 
 .input:hover,textarea.input:hover{border-color:var(--line-strong)}
@@ -1948,3 +1893,57 @@ html[data-theme="sepia"] select.input option{background:var(--panel-2);color:var
 .seg-btn{border-radius:8px;font-size:10.5px;padding:4px 9px}
 .seg-btn.on{background:var(--panel);color:var(--text);box-shadow:0 1px 4px color-mix(in srgb,#000 12%,transparent)}
 .gi-badge{font-variant-numeric:tabular-nums}
+
+/* 任务中心：左侧任务与画布，右侧详情独立滚动。 */
+.agent-canvas.embedded {
+  position: static;
+  inset: auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: transparent;
+  border-radius: 0;
+  container: execution-canvas / inline-size;
+}
+.agent-canvas.embedded .agent-canvas-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 29%);
+  grid-template-rows: fit-content(35%) minmax(0, 1fr);
+}
+.agent-canvas.embedded .agent-task-rail {
+  grid-area: 1 / 1;
+  width: auto;
+  max-height: 186px;
+  border-right: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-2);
+}
+.agent-canvas.embedded .agent-flow-wrap {
+  grid-area: 2 / 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.agent-canvas.embedded .agent-stream {
+  grid-area: 1 / 2 / 3;
+  width: auto;
+  min-width: 0;
+  max-height: none;
+  border-left: 1px solid var(--line-soft);
+  border-top: 0;
+}
+.agent-canvas.embedded .agent-task-all { display: none; }
+
+@container execution-canvas (max-width: 680px) {
+  .agent-canvas.embedded .agent-canvas-body {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .agent-canvas.embedded .agent-task-rail { max-height: 150px; }
+  .agent-canvas.embedded .agent-flow-wrap { flex: 1 0 220px; }
+  .agent-canvas.embedded .agent-stream {
+    overflow: visible;
+    border-left: 0;
+    border-top: 1px solid var(--line-soft);
+  }
+}

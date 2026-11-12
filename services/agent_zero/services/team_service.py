@@ -29,9 +29,15 @@ logger = logging.getLogger(__name__)
 _MAX_MEMBERS = 12
 # 团队协作模式与圆桌上限（1..12）；默认 4，与旧的 GROUP_MAX_SPEAKERS 对齐。
 MODES = ("orchestrate", "roundtable", "single")
+KINDS = ("group", "participants")
 DEFAULT_MODE = "orchestrate"
 DEFAULT_SPEAKERS = 4
 MAX_SPEAKERS_LIMIT = 12
+
+
+def normalize_kind(value: Any) -> str:
+    kind = str(value or "").strip().lower()
+    return kind if kind in KINDS else "group"
 
 
 def normalize_mode(value: Any) -> str:
@@ -185,6 +191,7 @@ def _team_public(team: Dict[str, Any]) -> Dict[str, Any]:
         members.append(b)
     return {
         "id": team.get("id"),
+        "kind": "participants" if str(team.get("kind") or "") == "participants" else "group",
         "workspace_id": team.get("workspace_id"),
         "name": team.get("name") or "",
         "avatar": str(team.get("avatar") or ""),
@@ -237,23 +244,31 @@ def _fetch_team(team_id: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
-def list_teams(ws_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_teams(ws_id: Optional[str] = None,
+               kind: Optional[str] = None) -> List[Dict[str, Any]]:
     """团队列表。``ws_id`` 为空 = 全部（V3：群组独立于工作区）。
 
+    ``kind`` 为空 = 全部（群组 + 会话私有参与角色）；前端群组页只看
+    ``kind="group"``，会话侧仍需要拿到私有参与角色来解析成员。
     workspace_id 列只保留为历史来源，不再参与可见性 / 权限判断。
     """
+    where: List[str] = []
+    params: Dict[str, Any] = {}
+    if ws_id:
+        where.append("workspace_id = :ws")
+        params["ws"] = ws_id
+    target_kind = "" if str(kind or "").strip().lower() in ("", "all") \
+        else normalize_kind(kind)
+    if target_kind:
+        where.append("kind = :kind")
+        params["kind"] = target_kind
+    sql = f"SELECT * FROM {_q('agent_teams')}"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC"
     SessionLocal = get_session_local()
     with SessionLocal() as db:
-        if ws_id:
-            rows = db.execute(
-                text(f"SELECT * FROM {_q('agent_teams')} WHERE workspace_id = :ws "
-                     f"ORDER BY created_at DESC"),
-                {"ws": ws_id},
-            ).mappings().all()
-        else:
-            rows = db.execute(
-                text(f"SELECT * FROM {_q('agent_teams')} ORDER BY created_at DESC"),
-            ).mappings().all()
+        rows = db.execute(text(sql), params).mappings().all()
     return [_team_public(dict(r)) for r in rows]
 
 
@@ -420,7 +435,8 @@ def create_team(ws_id: str, name: str, description: str = "",
                 mode: Any = None,
                 max_speakers: Any = None,
                 team_id: Optional[str] = None,
-                avatar: Optional[str] = None) -> Dict[str, Any]:
+                avatar: Optional[str] = None,
+                kind: Any = None) -> Dict[str, Any]:
     name = str(name or "").strip()[:120]
     if not name:
         raise ValueError("团队名称不能为空")
@@ -435,11 +451,11 @@ def create_team(ws_id: str, name: str, description: str = "",
     with SessionLocal() as db:
         db.execute(
             text(f"INSERT INTO {_q('agent_teams')} "
-                 f"(id, workspace_id, name, avatar, description, mode, max_speakers, "
+                 f"(id, kind, workspace_id, name, avatar, description, mode, max_speakers, "
                  f"leader_role_id, member_role_ids) "
-                 f"VALUES (:id, :ws, :name, :avatar, :desc, :mode, :speakers, "
+                 f"VALUES (:id, :kind, :ws, :name, :avatar, :desc, :mode, :speakers, "
                  f":leader, :members)"),
-            {"id": team_id, "ws": ws_id, "name": name,
+            {"id": team_id, "kind": normalize_kind(kind), "ws": ws_id, "name": name,
              "avatar": str(avatar or "").strip() or None,
              "desc": str(description or "").strip()[:1000],
              "mode": normalize_mode(mode), "speakers": normalize_speakers(max_speakers),
@@ -569,10 +585,19 @@ def delete_team(team_id: str) -> bool:
     if leader_id and leader_id not in zero_store.SYSTEM_ROLE_IDS:
         ids.append(leader_id)
     for rid in ids:
+        role = zero_store.get_role(rid) or {}
+        # 只清理团队自动创建的角色；从角色库选进群的角色必须保留。
+        if str(role.get("source") or "") != "team":
+            continue
         if (rid and rid not in zero_store.SYSTEM_ROLE_IDS
                 and not _role_referenced_elsewhere(rid, team_id)):
             zero_store.delete_role(rid)
     with SessionLocal() as db:
+        # 群级永久授权随群一起失效，避免留下指向已删除团队的孤儿记录。
+        db.execute(
+            text(f"DELETE FROM {_q('permission_scope_grants')} WHERE team_id = :id"),
+            {"id": team_id},
+        )
         db.execute(text(f"DELETE FROM {_q('agent_teams')} WHERE id = :id"),
                    {"id": team_id})
         db.commit()
@@ -580,9 +605,45 @@ def delete_team(team_id: str) -> bool:
     return True
 
 
+def cleanup_orphan_participants(team_id: str) -> bool:
+    """清理不再被任何会话绑定的 participants-* 团队（不删角色库角色）。"""
+    tid = str(team_id or "").strip()
+    if not tid:
+        return False
+    row = _fetch_team(tid)
+    if not row or str(row.get("kind") or "group") != "participants":
+        return False
+    if bound_conversation_ids(tid):
+        return False
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        db.execute(
+            text(f"DELETE FROM {_q('permission_scope_grants')} WHERE team_id = :id"),
+            {"id": tid},
+        )
+        db.execute(text(f"DELETE FROM {_q('agent_teams')} WHERE id = :id"), {"id": tid})
+        db.commit()
+    return True
+
+
 def bind_team(conv_id: str, team_id: Optional[str],
-              *, notice: Optional[str] = None) -> Dict[str, Any]:
+              *, notice: Optional[str] = None,
+              allow_participants: bool = False) -> Dict[str, Any]:
+    old_team_id = ""
+    try:
+        SessionLocal = get_session_local()
+        with SessionLocal() as db:
+            row = db.execute(
+                text(f"SELECT COALESCE(team_id, '') FROM {_q('conversations')} WHERE id = :id"),
+                {"id": conv_id},
+            ).first()
+        old_team_id = str(row[0] or "") if row else ""
+    except Exception:
+        old_team_id = ""
     if team_id:
+        team = get_team(team_id) or {}
+        if str(team.get("kind") or "group") == "participants" and not allow_participants:
+            raise ValueError("会话私有参与角色不能作为群组绑定")
         from services.agent_zero.task_layer.conversation import GLOBAL_AGENT_ZONE
 
         SessionLocal = get_session_local()
@@ -613,6 +674,8 @@ def bind_team(conv_id: str, team_id: Optional[str],
     elif team_id:
         team = get_team(team_id)
         _notice([conv_id], f"你已加入群聊「{(team or {}).get('name') or team_id}」")
+    if old_team_id and old_team_id != str(team_id or ""):
+        cleanup_orphan_participants(old_team_id)
     return {"bound": bool(team_id), "team_id": team_id}
 
 

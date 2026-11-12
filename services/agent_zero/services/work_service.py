@@ -743,6 +743,14 @@ async def dispatch_item(item_id: str, *, actor: str = "local") -> Dict[str, Any]
     workspace_id = str(item.get("workspace_id") or policy.get("default_workspace_id") or DEFAULT_WORKSPACE_ID)
     role_id = str(item.get("role_id") or policy.get("default_role_id") or DEFAULT_ROLE_ID)
     team_id = str(item.get("team_id") or policy.get("default_team_id") or "").strip() or None
+    if team_id:
+        # 工单只能挂到共享群组；旧工单可能带着 participants-*，不要把它们
+        # 当成群组去建执行会话。
+        from services.agent_zero.services import team_service
+
+        team = team_service.get_team(team_id) or {}
+        if str(team.get("kind") or "group") != "group":
+            team_id = None
     prompt = _prompt(item)
     conv = conversation.create_conversation(
         workspace_id, LOCAL_USER_ID, role_id=role_id, team_id=team_id,

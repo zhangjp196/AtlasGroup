@@ -11,7 +11,7 @@ import RoleEditorDialog from '@/components/RoleEditorDialog.vue'
 import RoleSettingsDrawer from '@/components/RoleSettingsDrawer.vue'
 import WorkEditorDialog, { type WorkSeed } from '@/components/WorkEditorDialog.vue'
 import { api } from '@/api/client'
-import type { Department, Role } from '@/api/types'
+import type { Conversation, Department, ListResponse, Role } from '@/api/types'
 import { departmentPath, departmentRoleCounts, departmentSubtree, orderedDepartments } from '@/lib/derive'
 import { clampPage, DEFAULT_PAGE_SIZE, pageCount, pageSlice } from '@/lib/paging'
 import { useAppStore } from '@/stores/app'
@@ -205,9 +205,10 @@ const headTitle = computed(() => {
   return departmentPath(selectedDept.value, data.departments)
 })
 const headHint = computed(() => {
-  if (selectedDept.value === 'all') return '按部门管理角色；角色也可以不安排部门，归入「未安排」。'
-  if (selectedDept.value === '') return '这些角色还没有安排部门，编辑角色即可归档到部门。'
-  return '包含该部门及其子部门的角色。'
+  const action = '点击角色卡直接开始聊天；右键查看更多操作。'
+  if (selectedDept.value === 'all') return `按部门管理角色；角色也可以不安排部门，归入「未安排」。${action}`
+  if (selectedDept.value === '') return `这些角色还没有安排部门，编辑角色即可归档到部门。${action}`
+  return `包含该部门及其子部门的角色。${action}`
 })
 
 const roleId = computed(() => String(route.params.id || ''))
@@ -246,13 +247,69 @@ function onRoleDeleted(): void {
   closeRole()
 }
 
+function isRoleChat(conv: Conversation): boolean {
+  if (conv.zone) return false
+  if (!conv.team_id) return true
+  const team = data.teams.find((item) => item.id === conv.team_id)
+  // 共享群聊的 role_id 是群主；点击群主角色不应该把它当成单聊打开。
+  // 团队信息缺失时也按「不是单聊」处理，宁可新建草稿也不误开群聊。
+  return String(team?.kind || '') === 'participants'
+}
+
+function hasMessages(conv: Conversation): boolean {
+  return Number(conv.message_count || 0) > 0 || Boolean(conv.last_message)
+}
+
+const openingRole = ref('')
+
 async function startRoleChat(id: string): Promise<void> {
-  const role = data.roles.find((item) => item.id === id)
-  if (!role) return
-  const existing = data.conversations.find((conv) => conv.role_id === role.id
-    && (Number(conv.message_count || 0) > 0 || conv.last_message))
-  if (existing) chatWindows.openConversation(existing.id)
-  else chatWindows.openDraft(role.id)
+  // 连点同一张角色卡只跑一次查询 / 打开；openDraft 本身也会去重。
+  if (openingRole.value === id) return
+  openingRole.value = id
+  try {
+    let role = data.roles.find((item) => item.id === id)
+    if (!role && !data.loading) {
+      // 数据可能刚被其他窗口刷新过：再拉一次，避免点了没反应。
+      await data.loadAll()
+      role = data.roles.find((item) => item.id === id)
+    }
+    if (!role) {
+      app.toast('角色不存在或已删除', 'bad')
+      return
+    }
+    if (role.scope === 'temporary') {
+      if (role.session_id) {
+        chatWindows.openConversation(role.session_id)
+        return
+      }
+      app.toast('临时角色属于某个会话，请在该会话里使用', 'bad')
+      return
+    }
+    const rid = role.id
+    const localChats = data.conversations.filter(
+      (conv) => conv.role_id === rid && isRoleChat(conv),
+    )
+    let existing = localChats.find(hasMessages) || localChats[0] || null
+    if (!existing) {
+      // 最近 80 条里没有时再按 role_id 查一次：避免重复建单聊。
+      try {
+        const out = await api<ListResponse<Conversation>>(
+          `/conversations?role_id=${encodeURIComponent(rid)}&limit=50`,
+        )
+        const chats = (out.items || []).filter(isRoleChat)
+        existing = chats.find(hasMessages) || chats[0] || null
+      } catch {
+        // 查询失败不阻塞：退回到草稿窗口，消息发出后仍可正常落库。
+      }
+    }
+    if (existing) {
+      chatWindows.openConversation(existing.id)
+      return
+    }
+    chatWindows.openDraft(rid)
+  } finally {
+    openingRole.value = ''
+  }
 }
 
 function startRoleWork(id: string): void {
@@ -381,7 +438,18 @@ function onWorkSaved(): void {
         </div>
 
         <div class="role-grid">
-          <article v-for="role in pagedRoles" :key="role.id" class="role-card" @click="openRole(role)" @contextmenu.prevent.stop="openMenu($event, role)">
+          <article
+            v-for="role in pagedRoles"
+            :key="role.id"
+            class="role-card"
+            role="button"
+            tabindex="0"
+            title="点击开始聊天；右键查看更多操作"
+            @click="startRoleChat(role.id)"
+            @keydown.enter.prevent="startRoleChat(role.id)"
+            @keydown.space.prevent="startRoleChat(role.id)"
+            @contextmenu.prevent.stop="openMenu($event, role)"
+          >
             <div class="role-top">
               <Avatar :name="role.name" :avatar="role.avatar" round />
               <span style="min-width:0">

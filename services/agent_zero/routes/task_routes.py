@@ -50,6 +50,9 @@ def create_conversation(body: CreateConvBody):
     # AtlasX 只服务全局 Agent；普通会话默认落到「通用助手」。
     if zone == conversation.GLOBAL_AGENT_ZONE:
         role_id = body.role_id or GLOBAL_ROLE_ID
+    elif body.team_id:
+        # 群聊的主持由群组决定；显式 role_id 仍然优先。
+        role_id = body.role_id or None
     else:
         role_id = body.role_id or DEFAULT_ROLE_ID
     # 工作区由角色 / 群组绑定决定；显式 workspace_id 优先（会话 / 后台任务等入口），
@@ -148,9 +151,18 @@ def set_conversation_participants(conv_id: str, body: ConversationParticipantsBo
             str(conv.get("title") or "会话参与角色"),
             leader={"id": leader["id"]}, members=members,
             mode=str(old_team.get("mode") or "orchestrate"), team_id=team_id,
+            kind="participants",
         )
     if current_team_id != team_id:
-        team_service.bind_team(conv_id, team_id)
+        # 从共享群组改成会话私有参与角色：同步一条 IM 提示，避免用户以为
+        # 自己还在群里（群组本身不受影响）。
+        if str(old_team.get("kind") or "") == "group" and old_team:
+            team_service._notice(
+                [conv_id],
+                f"本会话已从群聊「{old_team.get('name') or current_team_id}」"
+                f"改为会话私有参与角色",
+            )
+        team_service.bind_team(conv_id, team_id, allow_participants=True)
     conversation.sync_conversation_workspace(conv_id)
     return {"code": 0, "data": {"conversation": conversation.get_conversation(conv_id), "team": team}}
 
@@ -237,6 +249,9 @@ def update_conversation_settings(conv_id: str, body: ConversationSettingsBody):
             team = team_service.get_team(team_id)
             if not team:
                 raise HTTPException(status_code=400, detail=f"群组不存在: {team_id}")
+            if str(team.get("kind") or "group") == "participants":
+                raise HTTPException(status_code=400,
+                                    detail="会话私有参与角色不能作为群组绑定")
             if not (team.get("members") or []):
                 raise HTTPException(status_code=400,
                                     detail="这个群组还没有成员，先添加成员再绑定")
@@ -345,8 +360,7 @@ async def conv_message_run(conv_id: str, body: MessageBody):
     run_mode = "autonomous" if mode == "goal" else mode
     from services.agent_zero.runtime.zero import llm as llm_mod
 
-    conv_model = str(conv.get("model_code") or "").strip() \
-        or llm_mod.get_active_model_code()
+    conv_model = conversation.chat_model_code(conv)
     allowed_levels = llm_mod.get_thinking_levels_for(conv_model)
     raw_level = body.thinking_level
     if raw_level is None:
@@ -845,15 +859,18 @@ def cancel_queued_run(conv_id: str, run_id: str):
 
 @router.get("/conversations")
 def list_conversations(workspace_id: Optional[str] = None,
+                       role_id: Optional[str] = None,
+                       team_id: Optional[str] = None,
                        keyword: Optional[str] = None,
                        limit: int = 50, offset: int = 0,
                        include_archived: bool = False):
     items = conversation.list_conversations(
-        workspace_id=workspace_id, keyword=keyword, limit=limit, offset=offset,
+        workspace_id=workspace_id, role_id=role_id, team_id=team_id,
+        keyword=keyword, limit=limit, offset=offset,
         include_archived=include_archived)
     total = conversation.count_conversations(
-        workspace_id=workspace_id, keyword=keyword,
-        include_archived=include_archived)
+        workspace_id=workspace_id, role_id=role_id, team_id=team_id,
+        keyword=keyword, include_archived=include_archived)
     return {"code": 0, "data": {"items": items, "total": total,
                                 "limit": limit, "offset": offset}}
 
@@ -1050,7 +1067,7 @@ class ConvPrefsBody(BaseModel):
 
 @router.put("/conversations/{conv_id}/preferences")
 def set_conversation_preferences(conv_id: str, body: ConvPrefsBody):
-    """会话级模型 / 思考强度：切换后按会话记住，新会话沿用最近一次。"""
+    """按会话保存所选模型和思考级别。"""
     if not conversation.get_conversation(conv_id):
         raise HTTPException(status_code=404, detail="对话不存在")
     try:

@@ -215,7 +215,7 @@ export function useChat() {
   }
 
   /** 打开一条还没有后端记录的草稿会话：先只展示角色和空对话。 */
-  function beginDraft(roleId: string, workspaceId = ''): void {
+  function beginDraft(roleId: string, workspaceId = '', teamId = ''): void {
     closeStream()
     loading.value = false
     error.value = ''
@@ -223,6 +223,7 @@ export function useChat() {
       id: '',
       role_id: roleId,
       workspace_id: workspaceId || undefined,
+      team_id: teamId || undefined,
     }
     messages.value = []
     entries.value = []
@@ -259,7 +260,7 @@ export function useChat() {
   }
 
   async function resumeRunning(): Promise<void> {
-    if (!conversation.value) return
+    if (!conversation.value?.id) return
     try {
       const data = await api<QueueResponse>(
         `/conversations/${encodeURIComponent(conversation.value.id)}/queue`,
@@ -280,7 +281,7 @@ export function useChat() {
   }
 
   async function pollQueue(): Promise<void> {
-    if (!conversation.value) return
+    if (!conversation.value?.id) return
     try {
       const data = await api<QueueResponse>(
         `/conversations/${encodeURIComponent(conversation.value.id)}/queue`,
@@ -304,7 +305,7 @@ export function useChat() {
     questions.value = qs.items || []
   }
 
-  async function send(text: string, options: { perm?: string; thinking?: string; model?: string } = {}): Promise<boolean> {
+  async function send(text: string, options: { perm?: string; thinking?: string } = {}): Promise<boolean> {
     if (!conversation.value || sending.value) return false
     const content = text.trim()
     const files = pendingAttachments.value.slice()
@@ -407,19 +408,19 @@ export function useChat() {
     return String(file.type || '').startsWith('text/')
   }
 
-  function supportsVision(): boolean {
+  function supportsVision(effectiveModel?: string): boolean {
     const conv = conversation.value
-    const code = conv?.model_code || data.activeModel || ''
+    const code = effectiveModel || conv?.model_code || data.activeModel || ''
     const model = data.models.find((item) => item.code === code)
     if (!model) return true
     if (typeof model.effective_vision === 'boolean') return model.effective_vision
     return Boolean(model.vision)
   }
 
-  function addFiles(files: FileList | File[]): void {
+  function addFiles(files: FileList | File[], effectiveModel?: string): void {
     const incoming = Array.from(files || [])
     if (!incoming.length) return
-    const vision = supportsVision()
+    const vision = supportsVision(effectiveModel)
     let total = pendingAttachments.value.reduce((sum, item) => sum + Number(item.size || 0), 0)
     let added = 0
     for (const file of incoming) {

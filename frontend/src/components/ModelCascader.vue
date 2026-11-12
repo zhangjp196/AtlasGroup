@@ -11,6 +11,8 @@ const props = withDefaults(defineProps<{
   subscriptions?: Subscription[]
   placeholder?: string
   defaultLabel?: string
+  hideDefault?: boolean
+  explicitDefault?: boolean
   size?: 'small' | 'default' | 'large'
   width?: string
 }>(), {
@@ -33,11 +35,11 @@ const options = computed<CascaderOption[]>(() => buildModelOptions(
   props.subscriptions,
   props.defaultLabel,
   String(props.modelValue || ''),
-) as unknown as CascaderOption[])
+).filter((option) => !props.hideDefault || option.value !== '__default__') as unknown as CascaderOption[])
 
 const value = computed(() => {
   const code = String(props.modelValue || '')
-  return code === 'default' ? '__default__' : code || '__default__'
+  return code === 'default' ? '__default__' : code || (props.hideDefault ? '' : '__default__')
 })
 
 const cascaderProps = {
@@ -48,7 +50,7 @@ const cascaderProps = {
 function onChange(raw: unknown): void {
   const leaf = Array.isArray(raw) ? raw[raw.length - 1] : raw
   const code = leaf == null ? '' : String(leaf)
-  emit('update:modelValue', code === '__default__' ? '' : code)
+  emit('update:modelValue', code === '__default__' ? (props.explicitDefault ? 'default' : '') : code)
 }
 </script>
 

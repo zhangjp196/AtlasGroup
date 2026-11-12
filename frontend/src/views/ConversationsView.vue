@@ -12,7 +12,14 @@ import PageHeader from '@/components/PageHeader.vue'
 import TokenMeter from '@/components/TokenMeter.vue'
 import { api } from '@/api/client'
 import type { Conversation } from '@/api/types'
-import { conversationMeta, conversationParts, conversationTitle, GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE } from '@/lib/derive'
+import {
+  conversationIsSharedGroup,
+  conversationMeta,
+  conversationParts,
+  conversationTitle,
+  GLOBAL_AGENT_ZONE,
+  GLOBAL_CHAT_ZONE,
+} from '@/lib/derive'
 import { compactNumber, shortTime } from '@/lib/format'
 import { clampPage, DEFAULT_PAGE_SIZE, pageCount, pageSlice } from '@/lib/paging'
 import { usageSummary } from '@/lib/usage'
@@ -70,12 +77,21 @@ async function onMenu(action: string): Promise<void> {
     return
   }
   if (action === 'rename') {
-    const value = window.prompt('会话标题', conversationTitle(conv, data.teams, data.roles)) || ''
+    const isGroup = conversationIsSharedGroup(conv, data.teams)
+    const value = window.prompt(
+      isGroup ? '群名称' : '会话标题',
+      conversationTitle(conv, data.teams, data.roles),
+    ) || ''
     if (!value.trim()) return
     try {
-      await api(`/conversations/${encodeURIComponent(conv.id)}`, { method: 'PATCH', body: { title: value.trim() } })
+      if (isGroup && conv.team_id) {
+        await api(`/teams/${encodeURIComponent(conv.team_id)}`, { method: 'PATCH', body: { name: value.trim() } })
+        app.toast('群名称已更新')
+      } else {
+        await api(`/conversations/${encodeURIComponent(conv.id)}`, { method: 'PATCH', body: { title: value.trim() } })
+        app.toast('会话已重命名')
+      }
       await data.loadAll()
-      app.toast('会话已重命名')
     } catch (error) {
       app.toast(error instanceof Error ? error.message : String(error), 'bad')
     }
@@ -231,7 +247,8 @@ function avatarOf(conv: (typeof data.conversations)[number]): string {
 
 function chipsOf(conv: (typeof data.conversations)[number]): string[] {
   const { team, role, isGroup } = conversationParts(conv, data.teams, data.roles)
-  const chips = [isGroup ? '多角色' : '单角色']
+  const shared = conversationIsSharedGroup(conv, data.teams)
+  const chips = [shared ? '群聊' : isGroup ? '多角色' : '单角色']
   const lead = isGroup ? team?.leader : role
   if (lead?.title) chips.push(lead.title)
   if (lead?.department) chips.push(lead.department)

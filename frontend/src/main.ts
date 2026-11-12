@@ -35,6 +35,7 @@ import App from './App.vue'
 import router from './router'
 import './styles/app.css'
 import './styles/element.css'
+import './styles/console.css'
 
 // Element Plus 组件不再在入口全量注册：每个用到 <el-*> 的 SFC 自己 import，
 // 由 Rollup 按路由 chunk 拆分。全量注册会把 29 个组件（约 320KB JS）压进首屏

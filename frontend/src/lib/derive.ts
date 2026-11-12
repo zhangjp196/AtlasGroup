@@ -23,7 +23,9 @@ export function conversationParts(conv: Conversation, teams: Team[], roles: Role
   const team = teams.find((item) => item.id === conv.team_id) || null
   const members = team?.members || []
   const role = roles.find((item) => item.id === conv.role_id) || null
-  return { team, members, role, isGroup: Boolean(team && members.length) }
+  // 共享群组即使暂时没有成员也仍是群聊（只是空群）；私有参与团队没有成员则按单聊。
+  const isGroup = Boolean(team && (members.length || String(team.kind || '') === 'group'))
+  return { team, members, role, isGroup }
 }
 
 export function conversationTitle(conv: Conversation, teams: Team[], roles: Role[]): string {
@@ -46,14 +48,26 @@ export function conversationMeta(conv: Conversation, teams: Team[], roles: Role[
   }
   const { team, role, members, isGroup } = conversationParts(conv, teams, roles)
   if (isGroup && team) {
-    return { kind: '多角色', sub: `${members.length} 个角色` }
+    const shared = String(team.kind || '') === 'group'
+    return {
+      kind: shared ? '群聊' : '多角色',
+      sub: shared
+        ? `${members.length} 个角色 · ${modeLabel(team.mode)}`
+        : `${members.length} 个角色`,
+    }
   }
   return { kind: '单角色', sub: role ? `角色：${roleLabel(role)}` : '未指定角色' }
 }
 
 export function conversationIsGroup(conv: Conversation, teams: Team[]): boolean {
   const team = teams.find((item) => item.id === conv.team_id) || null
-  return Boolean(team && (team.members || []).length)
+  return Boolean(team && ((team.members || []).length || String(team.kind || '') === 'group'))
+}
+
+/** 是否绑定到用户可管理的共享群组（participants-* 只是会话私有参与角色）。 */
+export function conversationIsSharedGroup(conv: Conversation, teams: Team[]): boolean {
+  const team = teams.find((item) => item.id === conv.team_id) || null
+  return String(team?.kind || '') === 'group'
 }
 
 export function departmentPath(id: string | undefined, departments: Department[]): string {

@@ -1,12 +1,8 @@
 export const THEMES = [
-  { id: 'dark', label: '深色' },
-  { id: 'light', label: '浅色' },
-  { id: 'midnight', label: '午夜' },
-  { id: 'slate', label: '石板' },
-  { id: 'ocean', label: '海洋' },
-  { id: 'forest', label: '森林' },
-  { id: 'sepia', label: '复古' },
-  { id: 'violet', label: '紫罗兰' },
+  { id: 'dark', label: '深海', mode: 'dark', background: '#0a111a' },
+  { id: 'light', label: '霜白', mode: 'light', background: '#f2f6fa' },
+  { id: 'violet', label: '紫夜', mode: 'dark', background: '#15111d' },
+  { id: 'sepia', label: '暖砂', mode: 'light', background: '#f6f1e7' },
 ] as const
 
 export type ThemeId = (typeof THEMES)[number]['id']
@@ -32,30 +28,16 @@ export const DEFAULT_SCHEDULE: ThemeSchedule = {
 export const THEME_KEY = 'az-theme'
 export const SCHEDULE_KEY = 'az-theme-schedule'
 
-const THEME_IDS = new Set<string>(THEMES.map((t) => t.id))
-const THEME_MODE: Record<string, 'dark' | 'light'> = {
-  dark: 'dark',
-  light: 'light',
-  midnight: 'dark',
-  slate: 'dark',
-  ocean: 'light',
-  forest: 'dark',
-  sepia: 'light',
-  violet: 'dark',
-}
-const THEME_BG: Record<string, string> = {
-  dark: '#0d0d0e',
-  light: '#fbfbfa',
-  midnight: '#0e1216',
-  slate: '#121416',
-  ocean: '#f4f8fb',
-  forest: '#0e1310',
-  sepia: '#f6f1e7',
-  violet: '#121016',
-}
+const LEGACY_THEMES = new Map<string, ThemeId>([
+  ['midnight', 'dark'],
+  ['slate', 'dark'],
+  ['forest', 'dark'],
+  ['ocean', 'light'],
+])
 
-export function isThemeId(value: unknown): value is ThemeId {
-  return typeof value === 'string' && THEME_IDS.has(value)
+export function normalizeTheme(value: unknown): ThemeId | undefined {
+  if (typeof value !== 'string') return
+  return THEMES.find((theme) => theme.id === value)?.id ?? LEGACY_THEMES.get(value)
 }
 
 function readCookie(name: string): string | null {
@@ -77,13 +59,12 @@ function writeCookie(name: string, value: string): void {
 
 export function readTheme(): ThemeId {
   try {
-    const saved = localStorage.getItem(THEME_KEY)
-    if (isThemeId(saved)) return saved
+    const saved = normalizeTheme(localStorage.getItem(THEME_KEY))
+    if (saved) return saved
   } catch {
     /* ignore */
   }
-  const cookie = readCookie(THEME_KEY)
-  return isThemeId(cookie) ? cookie : 'dark'
+  return normalizeTheme(readCookie(THEME_KEY)) ?? 'dark'
 }
 
 function timeToMinutes(value: string): number | null {
@@ -107,8 +88,8 @@ export function normalizeSchedule(raw: unknown): ThemeSchedule {
     mode: ['manual', 'daynight', 'rotate'].includes(String(src.mode))
       ? (src.mode as ThemeSchedule['mode'])
       : DEFAULT_SCHEDULE.mode,
-    day: isThemeId(src.day) ? src.day : DEFAULT_SCHEDULE.day,
-    night: isThemeId(src.night) ? src.night : DEFAULT_SCHEDULE.night,
+    day: normalizeTheme(src.day) ?? DEFAULT_SCHEDULE.day,
+    night: normalizeTheme(src.night) ?? DEFAULT_SCHEDULE.night,
     interval: Math.max(5, Math.min(720, Number(src.interval) || DEFAULT_SCHEDULE.interval)),
     dayStart: dayStart == null ? DEFAULT_SCHEDULE.dayStart : clockText(dayStart),
     nightStart: nightStart == null ? DEFAULT_SCHEDULE.nightStart : clockText(nightStart),
@@ -158,8 +139,7 @@ export function scheduledTheme(schedule: ThemeSchedule, current: ThemeId, now = 
 }
 
 export function applyTheme(theme: ThemeId): void {
-  const id = isThemeId(theme) ? theme : 'dark'
-  const mode = THEME_MODE[id] || 'dark'
+  const { id, mode, background } = THEMES.find((item) => item.id === theme) ?? THEMES[0]
   const root = document.documentElement
   root.dataset.theme = id
   root.dataset.themeMode = mode
@@ -171,9 +151,9 @@ export function applyTheme(theme: ThemeId): void {
     /* ignore */
   }
   const meta = document.querySelector('meta[name="theme-color"]')
-  if (meta) meta.setAttribute('content', THEME_BG[id] || THEME_BG.dark)
+  if (meta) meta.setAttribute('content', background)
 }
 
 export function themeMode(theme: ThemeId): 'dark' | 'light' {
-  return THEME_MODE[theme] || 'dark'
+  return THEMES.find((item) => item.id === theme)?.mode ?? 'dark'
 }
