@@ -175,6 +175,7 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
   function makeDraftTab(hit: ChatWindowState, title = '新栏目'): ChatTabState {
     const root = hit.tabs.find((tab) => tab.conversationId === hit.sessionRootId)
       || hit.tabs.find((tab) => !tab.draft)
+    const now = new Date().toISOString()
     return {
       key: `draft:${++draftSequence}`,
       conversationId: '',
@@ -184,6 +185,8 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
       teamId: root?.teamId || hit.teamId || '',
       workspaceId: root?.workspaceId || hit.workspaceId || '',
       participantIds: hit.participantIds || [],
+      createdAt: now,
+      updatedAt: now,
       text: '',
     }
   }
@@ -283,7 +286,8 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
           || tab.conversationId === hit.conversationId)
         if (active) tabs.push(active)
       }
-      hit.tabs = [...tabs, ...draftTabs]
+      // 新建栏目草稿始终在列表首位，且保持在第一页。
+      hit.tabs = [...draftTabs, ...tabs]
       if (activateId) {
         const target = hit.tabs.find((tab) => tab.conversationId === activateId)
         if (target) hit.activeTabKey = target.key
@@ -412,9 +416,12 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     const tab = hit.tabs.find((item) => item.key === hit.activeTabKey && item.draft)
       || hit.tabs.find((item) => item.draft)
     if (tab) {
+      const now = new Date().toISOString()
       tab.conversationId = id
       tab.draft = false
       tab.key = tabKeyFor(id)
+      tab.createdAt ||= now
+      tab.updatedAt = now
       if (participantIds) tab.participantIds = participantIds
       hit.activeTabKey = tab.key
     } else {
@@ -446,9 +453,10 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     const existingDraft = hit.tabs.find((tab) => tab.draft)
     if (existingDraft) {
       hit.activeTabKey = existingDraft.key
+      hit.tabs = [existingDraft, ...hit.tabs.filter((tab) => tab !== existingDraft)]
     } else {
       const tab = makeDraftTab(hit)
-      hit.tabs.push(tab)
+      hit.tabs.unshift(tab)
       hit.activeTabKey = tab.key
     }
     sync(hit)
