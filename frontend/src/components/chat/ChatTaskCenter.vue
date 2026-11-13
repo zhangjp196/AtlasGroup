@@ -134,7 +134,7 @@ watch(() => [props.open, props.conversationId], ([open]) => {
     if (timer) window.clearInterval(timer)
     timer = window.setInterval(() => {
       if (props.open) void refreshWork()
-    }, 5000)
+    }, 3000)
   } else {
     window.clearInterval(timer)
     timer = 0

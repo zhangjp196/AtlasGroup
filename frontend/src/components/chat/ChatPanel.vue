@@ -13,7 +13,7 @@ import { api } from '@/api/client'
 import type { Conversation, SlashCommand, WorkItem } from '@/api/types'
 import { ACTION_COMMANDS } from '@/lib/commands'
 import { conversationIsSharedGroup, conversationMeta, conversationTitle, GLOBAL_AGENT_ZONE } from '@/lib/derive'
-import { compactNumber } from '@/lib/format'
+import { compactNumber, shortTime } from '@/lib/format'
 import { conversationImageSource, resolveConversationLink, type ConversationLink } from '@/lib/conversationLinks'
 import { cacheTone, mergeUsage, usageSummary } from '@/lib/usage'
 import { useChat } from '@/composables/useChat'
@@ -101,6 +101,20 @@ const lanes = computed(() => props.tabs || [])
 const activeLane = computed(() => lanes.value.find((tab) => tab.key === props.activeTabKey))
 const showLanes = computed(() => !isGlobalPanel.value)
 const canAddLane = computed(() => Boolean(props.sessionRootId) && !isGlobalPanel.value)
+// 栏目分页：左侧一屏放 10 个，按最近活动时间倒序（store 已排好）。
+const LANE_PAGE_SIZE = 10
+const lanePage = ref(1)
+const lanePages = computed(() => Math.max(1, Math.ceil(lanes.value.length / LANE_PAGE_SIZE)))
+const pagedLanes = computed(() => {
+  const start = (lanePage.value - 1) * LANE_PAGE_SIZE
+  return lanes.value.slice(start, start + LANE_PAGE_SIZE)
+})
+watch(lanePages, (total) => {
+  if (lanePage.value > total) lanePage.value = total
+})
+function laneTime(tab: ChatTabState): string {
+  return shortTime(tab.updatedAt || tab.createdAt)
+}
 const lanesRefreshing = ref(false)
 function switchLane(tab: ChatTabState): void {
   if (!tab.key || tab.key === props.activeTabKey) return
@@ -141,9 +155,12 @@ function lanesVisible(): boolean {
   if (props.presentation === 'tab' && chatWindows.activeTab !== props.windowKey) return false
   return true
 }
-watch(() => props.activeTabKey, () => {
+watch(() => props.activeTabKey, (key) => {
   const text = activeLane.value?.text || ''
   if (draft.value !== text) draft.value = text
+  // 打开 / 切到某个栏目时，把分页翻到它所在的那一页。
+  const index = lanes.value.findIndex((tab) => tab.key === key)
+  if (index >= 0) lanePage.value = Math.floor(index / LANE_PAGE_SIZE) + 1
 })
 watch(draft, (value) => emit('draft-text', value))
 // 从别的标签切回这个会话时，立即刷新一次栏目（不必等 5s 轮询）。
@@ -1349,16 +1366,28 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
             :disabled="!canAddLane" @click="addLane">＋</button>
         </div>
         <div class="lanes-list">
-          <button v-for="lane in lanes" :key="lane.key" class="lane"
+          <button v-for="lane in pagedLanes" :key="lane.key" class="lane"
             :class="{ on: lane.key === activeTabKey, draft: lane.draft }" type="button"
-            :title="lane.title || '新栏目'" @click="switchLane(lane)">
+            :title="lane.title || laneTime(lane) || '新栏目'" @click="switchLane(lane)">
             <span v-if="Number(lane.running || 0) > 0" class="lane-run" />
-            <span class="lane-name">{{ lane.title || (lane.draft ? '新栏目' : '未命名栏目') }}</span>
+            <span class="lane-body">
+              <span class="lane-name" :class="{ muted: !lane.title }">
+                {{ lane.title || laneTime(lane) || '新栏目' }}
+              </span>
+              <span v-if="lane.title && laneTime(lane)" class="lane-time">{{ laneTime(lane) }}</span>
+            </span>
             <span v-if="Number(lane.unread || 0) > 0" class="lane-badge">
               {{ Number(lane.unread) > 99 ? '99+' : lane.unread }}
             </span>
           </button>
           <div v-if="!lanes.length" class="lane-empty">还没有栏目</div>
+        </div>
+        <div v-if="lanePages > 1" class="lane-pager">
+          <button type="button" :disabled="lanePage <= 1" aria-label="上一页栏目"
+            @click="lanePage = Math.max(1, lanePage - 1)">‹</button>
+          <span>{{ lanePage }} / {{ lanePages }}</span>
+          <button type="button" :disabled="lanePage >= lanePages" aria-label="下一页栏目"
+            @click="lanePage = Math.min(lanePages, lanePage + 1)">›</button>
         </div>
         <button class="lane-new" type="button" :disabled="!canAddLane" @click="addLane">
           ＋ 新栏目

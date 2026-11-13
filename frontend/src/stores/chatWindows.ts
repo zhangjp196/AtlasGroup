@@ -2,7 +2,7 @@ import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { api } from '@/api/client'
 import type { Conversation, ListResponse, Team } from '@/api/types'
-import { conversationTitle, GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE } from '@/lib/derive'
+import { GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE } from '@/lib/derive'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -27,6 +27,7 @@ export interface ChatTabState {
   workspaceId?: string
   participantIds?: string[]
   createdAt?: string
+  updatedAt?: string
   archived?: boolean
   running?: number
   unread?: number
@@ -154,16 +155,17 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
   }
 
   function tabFromConversation(conv: Conversation): ChatTabState {
-    const data = useDataStore()
     return {
       key: tabKeyFor(conv.id),
       conversationId: conv.id,
       draft: false,
-      title: conversationTitle(conv, data.teams, data.roles),
+      // 栏目名只用会话自己的标题；没有标题时由界面显示时间，不再回落到角色名。
+      title: String(conv.title || ''),
       roleId: String(conv.role_id || ''),
       teamId: String(conv.team_id || ''),
       workspaceId: String(conv.workspace_id || ''),
       createdAt: String(conv.created_at || ''),
+      updatedAt: String(conv.updated_at || conv.created_at || ''),
       archived: Boolean(conv.archived),
       running: Number(conv.running_count || 0),
       unread: Number(conv.unread_count || 0),
@@ -272,7 +274,8 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
           }
           return tab
         })
-        .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+        .sort((a, b) => String(b.updatedAt || b.createdAt || '')
+          .localeCompare(String(a.updatedAt || a.createdAt || '')))
       if (!tabs.length) {
         const active = hit.tabs.find((tab) => tab.conversationId === activateId
           || tab.conversationId === hit.conversationId)

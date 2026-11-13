@@ -149,6 +149,21 @@ describe('chat windows', () => {
       .toBe('机器人栏目')
   })
 
+  it('sort lanes by latest activity time descending', async () => {
+    const key = '/conversations?session_id=c1&limit=200&include_archived=true'
+    backend.set(key, { items: [{ id: 'c1', session_id: 'c1', session_root_id: 'c1' }] })
+    const store = useChatWindowsStore()
+    await store.openConversation('c1')
+    backend.set(key, { items: [
+      { id: 'c1', session_id: 'c1', session_root_id: 'c1', updated_at: '2026-01-01 10:00:00' },
+      { id: 'c2', session_id: 'c1', session_root_id: 'c1', updated_at: '2026-03-01 10:00:00' },
+      { id: 'c3', session_id: 'c1', session_root_id: 'c1', updated_at: '2026-02-01 10:00:00' },
+    ] })
+    await store.refreshWindow('conv:c1')
+    expect(store.windows[0].tabs.map((tab) => tab.conversationId))
+      .toEqual(['c2', 'c3', 'c1'])
+  })
+
   it('closes the window when its session root was removed elsewhere', async () => {
     const key = '/conversations?session_id=c1&limit=200&include_archived=true'
     backend.set(key, { items: [{ id: 'c1', session_id: 'c1', session_root_id: 'c1' }] })

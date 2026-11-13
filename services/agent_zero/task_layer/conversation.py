@@ -5191,16 +5191,13 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                 (_rsvc0.get_run(run_id) or {}).get("team_task_id"))
         except Exception:
             _is_task_member = False
-    if not isolated and not user.startswith("bot:"):
+    if not isolated:
         if not _is_task_member:
             if not team:
                 _drop_team_tool(specs)
             _append_background_task_tool(specs)
             _append_proactive_tool(specs)
         _append_role_discussion_tool(specs)
-    if user.startswith("bot:"):
-        # 外部聊天参与者与本机用户身份不同。
-        specs = []
     if _is_task_member:
         # 后台任务在会话里单独跑，但界面动作属于用户当前这篇对话，任务成员不碰。
         specs = [s for s in specs
@@ -5306,6 +5303,10 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
         # 最终 text 为空，前端只剩「模型未单独给出结论」（2026-10-01 线上现象）。
         _round = -1
         _any_work_tool_called = False
+        # 「模型输出被截断 / 只思考不说话」时的续跑预算：第一次续跑自动把
+        # max_tokens 翻倍，避免长思考把工具调用挤掉后整轮直接失败。
+        _empty_retries = 0
+        _chat_max_tokens = CHAT_MAX_TOKENS
         # 已把任务派给团队成员：本轮不再自己动手做同一件事（避免「任务已分配、
         # 主持还在前台跑工具」的重复消耗）。派发后只允许一轮纯文字收尾。
         _team_delegated = False
@@ -5371,11 +5372,12 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                 logger.debug("对话干预读取跳过: %s", _ie)
             round_text: List[str] = []
             calls: List[Dict[str, Any]] = []
+            _round_finish = ""
             _llm_t0 = time.time()
             async for ev in _iter_stream_with_keepalive(
                 llm_mod.ZeroLlm(models).chat_stream_full(
                     "loop", messages, tools=specs,
-                    temperature=0.4, max_tokens=CHAT_MAX_TOKENS,
+                    temperature=0.4, max_tokens=_chat_max_tokens,
                 )
             ):
                 if ev.get("type") == "keepalive":
@@ -5468,6 +5470,7 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                            "role_id": rid, "role_name": rname}
                 elif ev.get("type") == "done":
                     calls = ev.get("tool_calls") or []
+                    _round_finish = str(ev.get("finish_reason") or "")
                     _u = ev.get("usage") or {}
                     if isinstance(_u, dict):
                         _pt = _u.get("prompt_tokens") or _u.get("input_tokens")
@@ -5518,6 +5521,31 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
             _llm_ms_total += int((time.time() - _llm_t0) * 1000)
             if not calls:
                 # 模型不再返回 tool_calls = 这一轮自然收尾。
+                # 但如果连正文都没有（只思考 / 被输出上限截断），不要直接失败：
+                # 扩大输出预算并请它继续，避免「模型未返回正文」把整轮判死。
+                if not "".join(round_text).strip() and _empty_retries < 2:
+                    _empty_retries += 1
+                    _chat_max_tokens = max(8192, int(_chat_max_tokens or 0) * 2)
+                    _why = ("输出达到上限被截断" if _round_finish == "length"
+                            else "没有返回正文")
+                    logger.warning(
+                        "对话空输出，扩大预算续跑（第 %d 次，max_tokens=%s，reason=%s，conv=%s）",
+                        _empty_retries, _chat_max_tokens, _round_finish or "stop",
+                        conv.get("id"))
+                    yield {"retry": {
+                        "kind": "truncated",
+                        "label": "输出被截断",
+                        "attempt": _empty_retries,
+                        "max_attempts": 2,
+                        "resume": False,
+                        "round": _round,
+                        "message": f"模型{_why}，正在扩大输出预算继续…",
+                    }, "round": _round, "role_id": rid, "role_name": rname}
+                    _nudge = ("（系统）上一条回复没有返回正文，也没有工具调用。"
+                              "请继续完成刚才的任务；需要工具时直接调用可用工具。")
+                    messages.append({"role": "user", "content": _nudge})
+                    _ctx_add(_nudge)
+                    continue
                 break
             # 记录「已经真正开工」：整轮收尾时会用它区分「只写了清单」与「真干过活」。
             _any_work_tool_called = _any_work_tool_called or any(
@@ -5552,7 +5580,7 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
             try:
                 from services.agent_zero.services import hooks_service as _hsvc
 
-                if not user.startswith("bot:") and _hsvc.has_hooks(ws_id):
+                if _hsvc.has_hooks(ws_id):
                     for _hi, _c in enumerate(calls):
                         _hn, _ha, _hpe = _resolved[_hi]
                         if _hpe:
@@ -5613,7 +5641,7 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                     }
             _pre_results: Optional[List[Any]] = None
             _pre_started: Optional[float] = None
-            if not user.startswith("bot:") and len(calls) >= 2 and all(
+            if len(calls) >= 2 and all(
                     _resolved[i][0] not in _SEQ_CALLS
                     and not _decisions[i].get("ask")
                     and not _resolved[i][2]
@@ -5747,9 +5775,7 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                     _tact = None
                     _act_id = ""
                 _hp = _hook_pre[_ci] if _ci < len(_hook_pre) else {}
-                if user.startswith("bot:"):
-                    result = json.dumps({"error": "请在 AtlasX 内发起工具或管理操作"}, ensure_ascii=False)
-                elif _hp.get("decision") == "deny":
+                if _hp.get("decision") == "deny":
                     # 钩子拒绝：不执行、不询问，把原因回给模型（它下一轮可换做法）
                     _reason = str(_hp.get("reason") or "被 PreToolUse 钩子拒绝")
                     result = json.dumps(

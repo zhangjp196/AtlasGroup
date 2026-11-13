@@ -114,6 +114,29 @@ def test_work_item_usage_and_stats(client, monkeypatch):
     assert detail["usage"]["total_tokens"] == 1500
 
 
+def test_team_task_usage_updates_from_live_run_events(client):
+    """后台任务运行中：还没落助手消息时，用最新 usage 事件实时显示 tokens。"""
+    from services.agent_zero.task_layer import run_service
+
+    conv = client.post(f"{API}/conversations", json={}).json()["data"]
+    task = client.post(f"{API}/conversations/{conv['id']}/team-tasks",
+                       json={"goal": "实时用量"}).json()["data"]
+    run_id = str(task["members"][0]["run_id"])
+    run_service.append_event(run_id, "usage", {
+        "usage": _usage(321, 45, 120, 1500),
+        "context_tokens": 321, "round": 0,
+    })
+
+    items = client.get(
+        f"{API}/conversations/{conv['id']}/team-tasks").json()["data"]["items"]
+    row = next(entry for entry in items if entry["id"] == task["id"])
+    assert row["members"][0]["usage"]["total_tokens"] == 366
+    assert row["usage"]["prompt_tokens"] == 321
+    assert row["usage"]["completion_tokens"] == 45
+    assert row["usage"]["cache_rate"] == 37.4
+    assert row["usage"]["speed"] == 30.0
+
+
 def test_team_task_usage_from_member_runs(client):
     conv = client.post(f"{API}/conversations", json={}).json()["data"]
     task = client.post(f"{API}/conversations/{conv['id']}/team-tasks",

@@ -1231,8 +1231,12 @@ def _model_settings(cfg: Dict[str, Any], temperature: float,
     _t = _request_timeout_setting(timeout, cfg)
     if _t is not None:
         settings["timeout"] = _t
-    if max_tokens:
-        settings["max_tokens"] = int(max_tokens)
+    # 调用方传 0 表示「不限」，但多数 OpenAI 兼容端点会套一个很低的默认值
+    # （实测 DeepSeek 网关默认 ~2048，思考还没写完就被截断，最终没有正文）。
+    # 不限时回落到模型档案的 max_tokens（设置 → 模型），把上限交给用户配置。
+    budget = int(max_tokens or 0) or int(cfg.get("max_tokens") or 0)
+    if budget:
+        settings["max_tokens"] = budget
     effort = get_reasoning_effort()
     if effort:
         if protocol == _PROTOCOL_ANTHROPIC:
@@ -1241,10 +1245,11 @@ def _model_settings(cfg: Dict[str, Any], temperature: float,
             level = _anthropic_thinking_level(effort)
             if level:
                 settings["thinking"] = level
-                budget = _ANTHROPIC_THINKING_BUDGETS.get(level, 0)
+                think_budget = _ANTHROPIC_THINKING_BUDGETS.get(level, 0)
                 # 显式 max_tokens 小于思考预算时，Anthropic 会直接 400。
-                if budget and max_tokens and int(max_tokens) <= budget:
-                    settings["max_tokens"] = budget + 1024
+                if (think_budget and settings.get("max_tokens")
+                        and int(settings["max_tokens"]) <= think_budget):
+                    settings["max_tokens"] = think_budget + 1024
             else:
                 logger.warning("忽略 Anthropic 不支持的思考级别: %s", effort)
         else:

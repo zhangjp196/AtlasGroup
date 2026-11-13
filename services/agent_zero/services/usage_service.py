@@ -244,8 +244,58 @@ def usage_by_conversation(conversation_ids: Optional[Any] = None,
 
 
 def usage_by_run(run_ids: Optional[Any] = None) -> Dict[str, Dict[str, Any]]:
-    """按 run 聚合 token 用量（后台任务成员 run 精确归因）。"""
-    return _aggregate("run_id", run_ids)
+    """按 run 聚合 token 用量（后台任务成员 run 精确归因）。
+
+    运行中的 run 还没落成助手消息，GDAG 里查不到用量；这里用该 run 最新的
+    `usage` 事件补上（事件是累计快照，按 run 取最新，再与已落库用量取较大值），
+    任务中心 / 工单的 tokens 才能在后台执行过程中实时变化。
+    """
+    ids = [str(item).strip() for item in (run_ids or []) if str(item or "").strip()]
+    usage = _aggregate("run_id", ids)
+    for run_id, live in _live_usage_by_run(ids).items():
+        current = usage.get(run_id)
+        if not current or int(live.get("total_tokens") or 0) > int(current.get("total_tokens") or 0):
+            usage[run_id] = live
+    return usage
+
+
+def _live_usage_by_run(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """每个 run 最新一条 usage 事件的累计快照（没有则跳过）。"""
+    ids = [str(item).strip() for item in (run_ids or []) if str(item or "").strip()]
+    if not ids:
+        return {}
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                f"SELECT e.run_id, e.data "
+                f"FROM {_q('conversation_run_events')} e "
+                f"JOIN (SELECT run_id, MAX(seq) AS seq "
+                f"      FROM {_q('conversation_run_events')} "
+                f"      WHERE kind = 'usage' "
+                f"        AND run_id IN (SELECT value FROM json_each(:ids)) "
+                f"      GROUP BY run_id) last "
+                f"  ON last.run_id = e.run_id AND last.seq = e.seq"
+            ),
+            {"ids": json.dumps(sorted(set(ids)))},
+        ).mappings().all()
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        data = _as_dict(row.get("data"))
+        usage = _as_dict(data.get("usage"))
+        prompt = _int(usage.get("prompt_tokens") or usage.get("input_tokens"))
+        completion = _int(usage.get("completion_tokens") or usage.get("output_tokens"))
+        if prompt <= 0 and completion <= 0:
+            continue
+        out[str(row["run_id"])] = _finish_usage({
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cached_tokens": _int(usage.get("cached_tokens")),
+            "llm_ms": _int(usage.get("llm_ms")),
+            "rounds": _int(usage.get("rounds")),
+            "turns": 1,
+        })
+    return out
 
 
 def task_run_map(task_ids: Optional[Any] = None) -> Dict[str, List[str]]:

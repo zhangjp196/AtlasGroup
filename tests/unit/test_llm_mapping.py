@@ -109,6 +109,22 @@ def test_consecutive_tool_results_are_grouped():
     assert [p.tool_call_id for p in out[-1].parts] == ["c1", "c2"]
 
 
+def test_model_settings_fall_back_to_profile_max_tokens(monkeypatch):
+    """调用方传 0（不限）时用档案 max_tokens，别让端点默认 2048 截断思考。"""
+    monkeypatch.setattr(llm, "_llm_section", lambda: {})
+    monkeypatch.setattr(llm, "_request_timeout_setting", lambda *a, **k: None)
+    monkeypatch.setattr(llm, "get_reasoning_effort", lambda: "")
+
+    settings = llm._model_settings({"max_tokens": 4096}, 0.2, 0, 300, False)
+    assert settings["max_tokens"] == 4096
+
+    settings = llm._model_settings({"max_tokens": 4096}, 0.2, 2048, 300, False)
+    assert settings["max_tokens"] == 2048
+
+    settings = llm._model_settings({"max_tokens": 0}, 0.2, 0, 300, False)
+    assert "max_tokens" not in settings
+
+
 def test_anthropic_model_settings_use_thinking_and_skip_temperature(monkeypatch):
     monkeypatch.setattr(llm, "_llm_section", lambda: {})
     monkeypatch.setattr(llm, "_request_timeout_setting", lambda *a, **k: None)

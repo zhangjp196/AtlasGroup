@@ -149,10 +149,6 @@ def _session_root(conversation_id: str) -> str:
     return str(conv.get("session_root_id") or conv.get("session_id") or conv.get("id") or "")
 
 
-def _lane_title(provider: str) -> str:
-    return {"feishu": "飞书机器人", "wecom": "企业微信机器人"}.get(provider, "机器人")
-
-
 def _set_lane(route_id: str, lane_id: str) -> None:
     with get_session_local()() as db:
         db.execute(update(BotRoute).where(BotRoute.id == route_id)
@@ -180,11 +176,14 @@ def _create_lane(session_id: str, provider: str, title: str = "") -> str:
     lane_id = str(created.get("id") or "")
     if not lane_id:
         return ""
-    name = (title or _lane_title(provider)).strip()[:200]
-    with get_session_local()() as db:
-        db.execute(update(Conversation).where(Conversation.id == lane_id)
-                   .values(title=name, title_source="user"))
-        db.commit()
+    # 不预置「飞书机器人」这类固定标题：首条消息会先写 fallback，再由
+    # title_service 用 LLM 生成正式标题；显式 /new <标题> 才直接写 user。
+    name = str(title or "").strip()[:200]
+    if name:
+        with get_session_local()() as db:
+            db.execute(update(Conversation).where(Conversation.id == lane_id)
+                       .values(title=name, title_source="user"))
+            db.commit()
     return lane_id
 
 
@@ -197,6 +196,26 @@ def _rename_lane(lane_id: str, title: str) -> bool:
                             .values(title=name, title_source="user"))
         db.commit()
         return bool(result.rowcount)
+
+
+_PLACEHOLDER_TITLES = {"新栏目", "飞书机器人", "企业微信机器人", "机器人"}
+
+
+def _repair_placeholder_title(lane: dict) -> None:
+    """清掉旧版机器人写死的占位标题，让下一轮由 LLM 生成正式标题。"""
+    lane_id = str(lane.get("id") or "")
+    if not lane_id or str(lane.get("source") or "") != "bot":
+        return
+    if str(lane.get("title_source") or "") != "user":
+        return
+    if str(lane.get("title") or "").strip() not in _PLACEHOLDER_TITLES:
+        return
+    with get_session_local()() as db:
+        db.execute(update(Conversation).where(Conversation.id == lane_id)
+                   .values(title=None, title_source="fallback"))
+        db.commit()
+    lane["title"] = ""
+    lane["title_source"] = "fallback"
 
 
 def _resolve_lane(route: Route, provider: str, *, create: bool = False) -> str:
@@ -220,10 +239,12 @@ def _resolve_lane(route: Route, provider: str, *, create: bool = False) -> str:
         lane = conversation.get_conversation(lane_id) or {}
         if lane and not lane.get("archived") \
                 and str(lane.get("session_root_id") or lane.get("id")) == root_id:
+            _repair_placeholder_title(lane)
             return lane_id
     # 绑定本身就是栏目：沿用用户指定的那一条。
     if str(conv.get("id") or "") != root_id:
         lane_id = str(conv.get("id") or "")
+        _repair_placeholder_title(conv)
     elif create:
         lane_id = _create_lane(root_id, provider)
     else:
@@ -327,7 +348,7 @@ class BotConnection:
                 if command and command.name == "new":
                     root_id = await asyncio.to_thread(_session_root, route.conversation_id)
                     lane_id = await asyncio.to_thread(
-                        _create_lane, root_id, provider, command.arg or "新栏目") if root_id else ""
+                        _create_lane, root_id, provider, command.arg) if root_id else ""
                     if not lane_id:
                         await message.reply("该会话不能新建栏目（全局面板或会话已归档）。")
                         return
@@ -448,7 +469,7 @@ class BotConnection:
             seen.add((name, arg))
             if name == "new":
                 new_id = await asyncio.to_thread(
-                    _create_lane, lane_id, self.binding.provider, arg or "新栏目")
+                    _create_lane, lane_id, self.binding.provider, arg or "")
                 if not new_id:
                     notes.append("新建栏目失败。")
                     continue
