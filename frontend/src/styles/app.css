@@ -1029,7 +1029,11 @@ body.ga-open .ga-fab{display:none}
 .lanes-add:hover:enabled{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
 .lanes-add:disabled{opacity:.4;cursor:not-allowed}
 .lane-filters{flex:none;display:flex;flex-direction:column;gap:4px;padding:0 7px 6px}
-.lane-search,.lane-filter{width:100%;min-width:0;height:25px;padding:3px 6px;font-size:10px}
+.lane-search{width:100%;min-width:0;height:25px;padding:3px 6px;font-size:10px}
+.lane-filter-group{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;min-width:0}
+.lane-filter-group button{min-width:0;height:25px;padding:2px 3px;border:1px solid var(--line-soft);border-radius:6px;background:var(--bg);color:var(--faint);font-size:9.5px;white-space:nowrap;cursor:pointer;transition:background .15s ease,border-color .15s ease,color .15s ease}
+.lane-filter-group button:hover{border-color:var(--line);color:var(--text)}
+.lane-filter-group button.active{border-color:color-mix(in srgb,var(--accent) 42%,var(--line));background:color-mix(in srgb,var(--accent) 12%,var(--panel));color:var(--accent-ink);font-weight:600}
 .lanes-list{flex:1;min-height:0;overflow-y:auto;padding:0 7px 4px;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
 .lane-date-group{display:flex;flex-direction:column;gap:2px}
 .lane-date{padding:7px 5px 2px;color:var(--faint);font:9px var(--mono);letter-spacing:.04em}

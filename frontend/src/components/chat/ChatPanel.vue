@@ -162,6 +162,12 @@ const LANE_PAGE_SIZE = 10
 const lanePage = ref(1)
 const laneQuery = ref('')
 const laneFilter = ref<'all' | 'running' | 'unread' | 'archived'>('all')
+const laneFilterOptions = [
+  { value: 'all', label: '全部', title: '显示全部栏目' },
+  { value: 'running', label: '运行', title: '只显示运行中的栏目' },
+  { value: 'unread', label: '未读', title: '只显示有未读消息的栏目' },
+  { value: 'archived', label: '归档', title: '只显示已归档栏目' },
+] as const
 type BoundSessionBot = {
   id: string
   bot_id: string
@@ -1578,12 +1584,11 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
         </div>
         <div class="lane-filters">
           <input v-model="laneQuery" class="input lane-search" type="search" placeholder="筛选栏目 / 机器人" aria-label="筛选栏目或机器人" />
-          <select v-model="laneFilter" class="input lane-filter" aria-label="栏目状态筛选">
-            <option value="all">全部栏目</option>
-            <option value="running">运行中</option>
-            <option value="unread">有未读</option>
-            <option value="archived">已归档</option>
-          </select>
+          <div class="lane-filter-group" role="group" aria-label="栏目状态筛选">
+            <button v-for="option in laneFilterOptions" :key="option.value" type="button"
+              :class="{ active: laneFilter === option.value }" :aria-pressed="laneFilter === option.value"
+              :title="option.title" @click="laneFilter = option.value">{{ option.label }}</button>
+          </div>
         </div>
         <div class="lanes-list">
           <section v-for="group in laneDateGroups" :key="group.key" class="lane-date-group">
