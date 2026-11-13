@@ -3,7 +3,6 @@ import { ElPopover } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
-import BackgroundJobs from '@/components/BackgroundJobs.vue'
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import SideDrawer from '@/components/SideDrawer.vue'
 import Modal from '@/components/Modal.vue'
@@ -104,18 +103,164 @@ const canAddLane = computed(() => Boolean(props.sessionRootId) && !isGlobalPanel
 // 栏目分页：左侧一屏放 10 个，按最近活动时间倒序（store 已排好）。
 const LANE_PAGE_SIZE = 10
 const lanePage = ref(1)
-const lanePages = computed(() => Math.max(1, Math.ceil(lanes.value.length / LANE_PAGE_SIZE)))
+const laneQuery = ref('')
+const laneFilter = ref<'all' | 'running' | 'unread' | 'archived'>('all')
+type BoundSessionBot = {
+  id: string
+  bot_id: string
+  conversation_id: string
+  session_root_id?: string
+  lane_id?: string
+  bound: boolean
+}
+const sessionBots = ref<BoundSessionBot[]>([])
+function laneBotLabels(lane: ChatTabState): string[] {
+  return sessionBots.value
+    .filter((bot) => bot.bound && (bot.session_root_id || bot.conversation_id) === props.sessionRootId
+      && (bot.lane_id || bot.conversation_id) === lane.conversationId)
+    .map((bot) => bot.bot_id).filter(Boolean)
+}
+async function loadSessionBots(): Promise<void> {
+  if (!props.sessionRootId) {
+    sessionBots.value = []
+    return
+  }
+  try {
+    const out = await api<{ items: BoundSessionBot[] }>('/bots')
+    sessionBots.value = out.items || []
+  } catch {
+    sessionBots.value = []
+  }
+}
+watch(() => props.sessionRootId, () => { void loadSessionBots() }, { immediate: true })
+function laneDateKey(tab: ChatTabState): string {
+  const raw = tab.updatedAt || tab.createdAt
+  if (!raw) return 'unknown'
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return 'unknown'
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+function laneDateLabel(key: string): string {
+  if (key === 'unknown') return '日期未知'
+  const now = new Date()
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const yesterdayDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+  const yesterday = `${yesterdayDate.getFullYear()}-${String(yesterdayDate.getMonth() + 1).padStart(2, '0')}-${String(yesterdayDate.getDate()).padStart(2, '0')}`
+  return key === today ? '今天' : key === yesterday ? '昨天' : key
+}
+const filteredLanes = computed(() => {
+  const query = laneQuery.value.trim().toLocaleLowerCase()
+  return lanes.value.filter((lane) => {
+    if (laneFilter.value === 'running' && Number(lane.running || 0) <= 0) return false
+    if (laneFilter.value === 'unread' && Number(lane.unread || 0) <= 0) return false
+    if (laneFilter.value === 'archived' && !lane.archived) return false
+    if (!query) return true
+    return `${lane.title || ''} ${laneBotLabels(lane).join(' ')}`.toLocaleLowerCase().includes(query)
+  })
+})
+const lanePages = computed(() => Math.max(1, Math.ceil(filteredLanes.value.length / LANE_PAGE_SIZE)))
 const pagedLanes = computed(() => {
   const start = (lanePage.value - 1) * LANE_PAGE_SIZE
-  return lanes.value.slice(start, start + LANE_PAGE_SIZE)
+  return filteredLanes.value.slice(start, start + LANE_PAGE_SIZE)
+})
+const laneDateGroups = computed(() => {
+  const groups: Array<{ key: string; label: string; items: ChatTabState[] }> = []
+  for (const lane of pagedLanes.value) {
+    const key = laneDateKey(lane)
+    let group = groups[groups.length - 1]
+    if (!group || group.key !== key) {
+      group = { key, label: laneDateLabel(key), items: [] }
+      groups.push(group)
+    }
+    group.items.push(lane)
+  }
+  return groups
 })
 watch(lanePages, (total) => {
   if (lanePage.value > total) lanePage.value = total
 })
+watch([laneQuery, laneFilter], () => { lanePage.value = 1 })
 function laneTime(tab: ChatTabState): string {
   return shortTime(tab.updatedAt || tab.createdAt)
 }
 const lanesRefreshing = ref(false)
+const laneMenu = reactive({ open: false, x: 0, y: 0, lane: null as ChatTabState | null })
+const laneMenuItems = computed<ContextMenuItem[]>(() => {
+  const lane = laneMenu.lane
+  if (!lane) return []
+  if (lane.draft) return [
+    { label: '发出第一条消息后才会创建栏目', action: 'noop', disabled: true },
+    { label: '', action: '', separator: true },
+    { label: '关闭栏目', action: 'close-lane' },
+  ]
+  return [
+    { label: '打开栏目', action: 'open-lane' },
+    { label: '重命名栏目', action: 'rename-lane' },
+    { label: lane.archived ? '取消归档栏目' : '归档栏目', action: 'archive-lane' },
+    { label: '', action: '', separator: true },
+    { label: '删除栏目', action: 'delete-lane', danger: true },
+  ]
+})
+function openLaneMenu(event: MouseEvent, lane: ChatTabState): void {
+  laneMenu.lane = lane
+  laneMenu.x = event.clientX
+  laneMenu.y = event.clientY
+  laneMenu.open = true
+}
+async function onLaneMenu(action: string): Promise<void> {
+  const lane = laneMenu.lane
+  laneMenu.open = false
+  if (!lane || !props.windowKey) return
+  if (action === 'noop') return
+  if (action === 'close-lane') {
+    chatWindows.closeTab(props.windowKey, lane.key)
+    return
+  }
+  if (action === 'open-lane') {
+    switchLane(lane)
+    return
+  }
+  if (!lane.conversationId) return
+  if (action === 'rename-lane') {
+    const next = window.prompt('栏目标题', lane.title || '')?.trim() || ''
+    if (!next || next === lane.title) return
+    try {
+      await api(`/conversations/${encodeURIComponent(lane.conversationId)}`, {
+        method: 'PATCH', body: { title: next },
+      })
+      await refreshLanes()
+      app.toast('栏目已重命名')
+    } catch (error) {
+      app.toast(error instanceof Error ? error.message : String(error), 'bad')
+    }
+    return
+  }
+  if (action === 'archive-lane') {
+    try {
+      await api(`/conversations/${encodeURIComponent(lane.conversationId)}/settings`, {
+        method: 'PATCH', body: { archived: !lane.archived },
+      })
+      await data.loadAll()
+      await refreshLanes()
+      app.toast(lane.archived ? '栏目已取消归档' : '栏目已归档')
+    } catch (error) {
+      app.toast(error instanceof Error ? error.message : String(error), 'bad')
+    }
+    return
+  }
+  if (action === 'delete-lane') {
+    if (!window.confirm(`删除栏目「${lane.title || '新栏目'}」？历史消息会一并删除。`)) return
+    try {
+      await api(`/conversations/${encodeURIComponent(lane.conversationId)}`, { method: 'DELETE' })
+      chatWindows.closeTab(props.windowKey, lane.key)
+      await data.loadAll()
+      await refreshLanes()
+      app.toast('栏目已删除')
+    } catch (error) {
+      app.toast(error instanceof Error ? error.message : String(error), 'bad')
+    }
+  }
+}
 function switchLane(tab: ChatTabState): void {
   if (!tab.key || tab.key === props.activeTabKey) return
   emit('switch-tab', tab.key)
@@ -196,7 +341,6 @@ function showEarlierMessages(): void {
 const tempOpen = ref(false)
 const tempForm = reactive({ name: '', expertise: '', persona: '' })
 const taskCenterOpen = ref(false)
-const backgroundJobsOpen = ref(false)
 const settingsOpen = ref(false)
 const participantsOpen = ref(false)
 const groupInfoOpen = ref(false)
@@ -443,7 +587,10 @@ onMounted(() => {
   }, 4000)
   // 栏目自动刷新：机器人在别处新建栏目、其他窗口改名 / 删除时，不用重开窗口。
   laneTimer = window.setInterval(() => {
-    if (lanesVisible()) void refreshLanes()
+    if (lanesVisible()) {
+      void refreshLanes()
+      void loadSessionBots()
+    }
   }, 5000)
   if (!msgsEl.value || typeof ResizeObserver === 'undefined') return
   resizeObserver = new ResizeObserver(() => {
@@ -1223,7 +1370,6 @@ async function openTerminal(): Promise<void> {
 }
 
 watch(() => props.conversationId, () => {
-  backgroundJobsOpen.value = false
   previewLink.value = null
 })
 
@@ -1344,8 +1490,6 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
         <button v-if="!isDraft" class="head-btn" title="会话管理（角色 / 参与角色）" @click="settingsOpen = true">⚙</button>
         <button v-if="terminalAvailable" class="head-btn" type="button" title="在工作区打开终端"
           aria-label="在工作区打开终端" :disabled="terminalOpening || workspaceSwitching" @click="openTerminal">›_</button>
-        <button v-if="!isDraft" class="head-btn" type="button" title="后台脚本与工具"
-          aria-label="后台脚本与工具" @click="backgroundJobsOpen = true">≡</button>
         <button v-if="!isDraft" class="head-btn task-btn" title="任务中心（执行 / 工单）" aria-label="任务中心" @click="openTaskCenter">
           ◎<span v-if="taskCenterCount" class="head-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span>
         </button>
@@ -1357,7 +1501,7 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
       <aside v-if="showLanes" class="lanes" aria-label="栏目">
         <div class="lanes-head">
           <span>栏目</span>
-          <span class="lanes-count">{{ lanes.length }}</span>
+          <span class="lanes-count">{{ filteredLanes.length }}</span>
           <button class="lanes-refresh" :class="{ spinning: lanesRefreshing }" type="button"
             title="刷新栏目" aria-label="刷新栏目" :disabled="lanesRefreshing" @click="refreshLanes(true)">
             <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3" /><path d="M20 4v7h-7" /></svg>
@@ -1365,22 +1509,41 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
           <button class="lanes-add" type="button" title="新增栏目" aria-label="新增栏目"
             :disabled="!canAddLane" @click="addLane">＋</button>
         </div>
+        <div class="lane-filters">
+          <input v-model="laneQuery" class="input lane-search" type="search" placeholder="筛选栏目 / 机器人" aria-label="筛选栏目或机器人" />
+          <select v-model="laneFilter" class="input lane-filter" aria-label="栏目状态筛选">
+            <option value="all">全部栏目</option>
+            <option value="running">运行中</option>
+            <option value="unread">有未读</option>
+            <option value="archived">已归档</option>
+          </select>
+        </div>
         <div class="lanes-list">
-          <button v-for="lane in pagedLanes" :key="lane.key" class="lane"
-            :class="{ on: lane.key === activeTabKey, draft: lane.draft }" type="button"
-            :title="lane.title || laneTime(lane) || '新栏目'" @click="switchLane(lane)">
-            <span v-if="Number(lane.running || 0) > 0" class="lane-run" />
-            <span class="lane-body">
-              <span class="lane-name" :class="{ muted: !lane.title }">
-                {{ lane.title || laneTime(lane) || '新栏目' }}
+          <section v-for="group in laneDateGroups" :key="group.key" class="lane-date-group">
+            <div class="lane-date">{{ group.label }}</div>
+            <button v-for="lane in group.items" :key="lane.key" class="lane"
+              :class="{ on: lane.key === activeTabKey, draft: lane.draft }" type="button"
+              :title="`${lane.title || laneTime(lane) || '新栏目'}${lane.archived ? ' · 已归档' : ''}；右键打开栏目菜单`"
+              @click="switchLane(lane)" @contextmenu.prevent.stop="openLaneMenu($event, lane)">
+              <span v-if="Number(lane.running || 0) > 0" class="lane-run" />
+              <span class="lane-body">
+                <span class="lane-name" :class="{ muted: !lane.title }">
+                  {{ lane.title || laneTime(lane) || '新栏目' }}
+                </span>
+                <span v-for="botId in laneBotLabels(lane)" :key="`${lane.key}:${botId}`" class="lane-robot-tag">
+                  机器人 · {{ botId }}
+                </span>
+                <span v-if="lane.archived" class="lane-archived">已归档</span>
+                <span v-if="lane.title && laneTime(lane)" class="lane-time">{{ laneTime(lane) }}</span>
               </span>
-              <span v-if="lane.title && laneTime(lane)" class="lane-time">{{ laneTime(lane) }}</span>
-            </span>
-            <span v-if="Number(lane.unread || 0) > 0" class="lane-badge">
-              {{ Number(lane.unread) > 99 ? '99+' : lane.unread }}
-            </span>
-          </button>
-          <div v-if="!lanes.length" class="lane-empty">还没有栏目</div>
+              <span v-if="Number(lane.unread || 0) > 0" class="lane-badge">
+                {{ Number(lane.unread) > 99 ? '99+' : lane.unread }}
+              </span>
+            </button>
+          </section>
+          <div v-if="!filteredLanes.length" class="lane-empty">
+            {{ lanes.length ? '没有符合条件的栏目' : '还没有栏目' }}
+          </div>
         </div>
         <div v-if="lanePages > 1" class="lane-pager">
           <button type="button" :disabled="lanePage <= 1" aria-label="上一页栏目"
@@ -1527,16 +1690,16 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
     />
 
     <LinkPreview :link="previewLink" @close="previewLink = null" @link-click="onConversationLink" />
-    <BackgroundJobs :open="backgroundJobsOpen" :conversation-id="conversationId"
-      :workspace-id="terminalAvailable && !workspaceSwitching ? terminalWorkspace : ''"
-      @close="backgroundJobsOpen = false" />
     <ConversationSettingsDrawer
       :open="settingsOpen"
       :conversation="conversation"
+      :bot-conversation-id="sessionRootId || conversation?.id || ''"
+      :bot-lane-id="conversation?.id || ''"
       @close="settingsOpen = false"
       @saved="onConversationSaved"
       @deleted="onConversationDeleted"
       @open="openBranchConversation"
+      @bots-changed="loadSessionBots"
     />
 
     <GroupSettingsDrawer
@@ -1573,6 +1736,14 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
       :items="avatarMenuItems"
       @close="avatarMenu.open = false"
       @select="onAvatarMenu"
+    />
+    <ContextMenu
+      :open="laneMenu.open"
+      :x="laneMenu.x"
+      :y="laneMenu.y"
+      :items="laneMenuItems"
+      @close="laneMenu.open = false"
+      @select="onLaneMenu"
     />
 
     <Modal :open="cleanOpen" title="清空会话" width="440px" @close="cleanOpen = false">

@@ -173,14 +173,16 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
   }
 
   function makeDraftTab(hit: ChatWindowState, title = '新栏目'): ChatTabState {
+    const root = hit.tabs.find((tab) => tab.conversationId === hit.sessionRootId)
+      || hit.tabs.find((tab) => !tab.draft)
     return {
       key: `draft:${++draftSequence}`,
       conversationId: '',
       draft: true,
       title,
-      roleId: hit.roleId || '',
-      teamId: hit.teamId || '',
-      workspaceId: hit.workspaceId || '',
+      roleId: root?.roleId || hit.roleId || '',
+      teamId: root?.teamId || hit.teamId || '',
+      workspaceId: root?.workspaceId || hit.workspaceId || '',
       participantIds: hit.participantIds || [],
       text: '',
     }

@@ -26,6 +26,24 @@ class IncomingMessage:
 Receiver = Callable[[IncomingMessage], None]
 
 
+def _utf8_chunks(text: str, max_bytes: int = 18_000) -> list[str]:
+    """Split long replies into transport-safe UTF-8 chunks without losing characters."""
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for char in text:
+        width = len(char.encode("utf-8"))
+        if current and size + width > max_bytes:
+            chunks.append("".join(current))
+            current = []
+            size = 0
+        current.append(char)
+        size += width
+    if current:
+        chunks.append("".join(current))
+    return chunks or [""]
+
+
 async def _feishu_post(client, path, data, *, token=""):
     headers = {"Authorization": f"Bearer {token}"} if token else {"locale": "zh"}
     response = await client.post(path, json=data, headers=headers)
@@ -217,18 +235,32 @@ def _wecom_message(body, request_id, receive, send) -> None:
         }}, request_id=request_id, wait_ack=False)
 
     async def reply(text: str) -> None:
-        clipped = text.encode()[:20_000].decode(errors="ignore")
-        # 必须用同一个 stream_id 发 finish=true，否则「正在处理…」会一直挂着。
-        # 流式消息 10 分钟内有效，而单轮 run 最多 9 分钟。
-        try:
-            await send("aibot_respond_msg", {"msgtype": "stream", "stream": {
-                "id": stream_id, "finish": True, "content": clipped,
-            }}, request_id=request_id, wait_ack=False)
-            return
-        except (RuntimeError, TimeoutError):
-            pass
-        await send("aibot_send_msg", {"chatid": peer,
-                                    "msgtype": "markdown", "markdown": {"content": clipped}},
-                   wait_ack=False)
+        chunks = _utf8_chunks(text)
+        if len(chunks) == 1:
+            try:
+                await send("aibot_respond_msg", {"msgtype": "stream", "stream": {
+                    "id": stream_id, "finish": True, "content": chunks[0],
+                }}, request_id=request_id, wait_ack=False)
+                return
+            except (RuntimeError, TimeoutError):
+                try:
+                    await send("aibot_respond_msg", {"msgtype": "stream", "stream": {
+                        "id": stream_id, "finish": True, "content": "回复改为普通消息发送。",
+                    }}, request_id=request_id, wait_ack=False)
+                except (RuntimeError, TimeoutError):
+                    pass
+        else:
+            # 先结束处理中的流式提示，再把完整回复拆成多条消息发送。
+            try:
+                await send("aibot_respond_msg", {"msgtype": "stream", "stream": {
+                    "id": stream_id, "finish": True,
+                    "content": f"回复较长，已分成 {len(chunks)} 条消息发送。",
+                }}, request_id=request_id, wait_ack=False)
+            except (RuntimeError, TimeoutError):
+                pass
+        for chunk in chunks:
+            await send("aibot_send_msg", {"chatid": peer,
+                                          "msgtype": "markdown", "markdown": {"content": chunk}},
+                       wait_ack=False)
 
     receive(IncomingMessage(body["msgid"], f"{chat_type}:{peer}", content.strip(), reply, acknowledge))

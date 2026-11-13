@@ -226,6 +226,7 @@ class ConversationSettingsBody(BaseModel):
     # 显式传空值解除工作区绑定。
     workspace_id: Optional[str] = Field(None, max_length=80)
     bound_workspace_id: Optional[str] = Field(None, max_length=80)
+    archived: Optional[bool] = None
 
 
 @router.patch("/conversations/{conv_id}/settings")
@@ -266,6 +267,14 @@ def update_conversation_settings(conv_id: str, body: ConversationSettingsBody):
         if not title:
             raise HTTPException(status_code=400, detail="标题不能为空")
         title_service.rename(conv_id, title)
+
+    if "archived" in fields:
+        with SessionLocal() as db:
+            db.execute(
+                text("UPDATE conversations SET archived = :archived WHERE id = :id"),
+                {"archived": int(bool(body.archived)), "id": conv_id},
+            )
+            db.commit()
 
     if "role_id" in fields:
         role_id = str(body.role_id or "").strip()

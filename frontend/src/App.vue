@@ -4,7 +4,6 @@ import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import AppRail from '@/components/AppRail.vue'
-import BackgroundJobs from '@/components/BackgroundJobs.vue'
 import NoticeStack from '@/components/NoticeStack.vue'
 import QuickSearch from '@/components/QuickSearch.vue'
 import WorkspaceTabs from '@/components/WorkspaceTabs.vue'
@@ -34,7 +33,6 @@ const globalChatId = ref('')
 const ensuringGlobalChat = ref(false)
 const globalAgentTab = ref<'chat' | 'inbox'>('chat')
 const ensuringGlobalAgent = ref(false)
-const backgroundJobsOpen = ref(false)
 
 const routeTabs = ref<Array<{ key: string; label: string; path: string }>>([])
 const routeTabKey = computed(() => `page:${route.meta.section || 'work'}`)
@@ -400,7 +398,6 @@ onMounted(async () => {
           @select="selectWorkspaceTab" @close="closeWorkspaceTab" />
         <div class="workspace-actions">
           <QuickSearch />
-          <button class="btn" type="button" @click="backgroundJobsOpen = true">后台任务</button>
           <button class="mobile-dock-trigger btn" type="button" :aria-expanded="mobileDockOpen"
             aria-controls="activity-dock" @click="mobileDockOpen = !mobileDockOpen">
             {{ mobileDockOpen ? '关闭侧栏' : '协作中心' }}
@@ -413,7 +410,6 @@ onMounted(async () => {
         <div id="workspace-chat" v-show="chatWindows.activeTab" class="workspace-view" />
       </div>
     </main>
-    <BackgroundJobs :open="backgroundJobsOpen" @close="backgroundJobsOpen = false" />
     <button v-if="mobileDockOpen" class="mobile-dock-backdrop" type="button" aria-label="关闭协作中心"
       @click="mobileDockOpen = false" />
     <OnlineRoles id="activity-dock" :collapsed="dockCollapsed && !mobileDockOpen"

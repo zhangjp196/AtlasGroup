@@ -22,6 +22,7 @@ class BotBody(BaseModel):
 
 class BindBody(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=160)
+    lane_id: str = Field("", max_length=160)
 
 
 def _manager(request: Request) -> BotManager:
@@ -47,10 +48,23 @@ async def add_bot(request: Request, body: BotBody):
 
 @router.post("/{bot_id}/bind")
 async def bind_bot(request: Request, bot_id: str, body: BindBody):
-    if not conversation.get_conversation(body.conversation_id):
+    conv = conversation.get_conversation(body.conversation_id)
+    if not conv:
         raise HTTPException(status_code=404, detail="会话不存在")
+    # 机器人绑定会话根，同时只路由到选中的一个栏目。
+    conversation_id = str(conv.get("session_root_id") or conv.get("session_id")
+                          or conv.get("id") or body.conversation_id)
+    target_lane_id = str(body.lane_id or body.conversation_id)
+    lane = conversation.get_conversation(target_lane_id)
+    if not lane:
+        raise HTTPException(status_code=404, detail="栏目不存在")
+    lane_root_id = str(lane.get("session_root_id") or lane.get("session_id") or lane.get("id") or "")
+    if lane_root_id != conversation_id:
+        raise HTTPException(status_code=400, detail="目标栏目不属于该会话")
+    if lane.get("archived"):
+        raise HTTPException(status_code=400, detail="不能绑定到已归档栏目")
     try:
-        binding = await _manager(request).bind(bot_id, body.conversation_id)
+        binding = await _manager(request).bind(bot_id, conversation_id, target_lane_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if binding is None:

@@ -3,8 +3,8 @@
 机器人连接和它对会话的绑定都放在全局设置里：
 
 - 一份 App ID / Secret 只建一条长连接；
-- 一个机器人同一时间只绑定一个会话，换绑时旧会话自动解绑；
-- 机器人收到的聊天消息都进入当前绑定的会话，回复发回原聊天。
+- 一个机器人同一时间只绑定一个会话，并路由到其中一个栏目；
+- 机器人收到的聊天消息进入当前栏目，回复发回原聊天。
 
 聊天身份（peer_id）只用于展示「最近活跃的聊天」，不参与路由，因此换绑会话
 不需要重新配对。
@@ -61,8 +61,8 @@ def _route_for(bot_id: str) -> Route | None:
                 if row else None)
 
 
-def _bind(bot_id: str, conversation_id: str) -> Route:
-    """把机器人绑定到会话；已有绑定直接改指向（旧会话自动解绑）。"""
+def _bind(bot_id: str, conversation_id: str, lane_id: str = "") -> Route:
+    """把机器人绑定到会话根及一个目标栏目；旧绑定自动切换到新目标。"""
     with get_session_local()() as db:
         bot = db.get(ConversationBot, bot_id)
         if bot is None:
@@ -70,18 +70,17 @@ def _bind(bot_id: str, conversation_id: str) -> Route:
         row = db.scalar(select(BotRoute).where(BotRoute.bot_id == bot_id))
         if row is not None:
             row.conversation_id = conversation_id
-            # 换绑会话后，机器人默认重新开一个栏目，不沿用旧会话的栏目。
-            row.lane_id = None
+            row.lane_id = lane_id or None
             db.commit()
-            return Route(row.id, row.bot_id, row.conversation_id, row.peer_id, "")
+            return Route(row.id, row.bot_id, row.conversation_id, row.peer_id, lane_id)
         identifier = zero_store.new_id("botr")
         try:
             db.add(BotRoute(id=identifier, bot_id=bot_id, conversation_id=conversation_id,
-                            peer_id=bot.peer_id or ""))
+                            peer_id=bot.peer_id or "", lane_id=lane_id or None))
             db.commit()
         except IntegrityError as exc:
             raise ValueError("机器人绑定失败，请重试") from exc
-        return Route(identifier, bot_id, conversation_id, bot.peer_id or "", "")
+        return Route(identifier, bot_id, conversation_id, bot.peer_id or "", lane_id)
 
 
 def _unbind(bot_id: str) -> bool:
@@ -287,6 +286,7 @@ class BotConnection:
         route = _route_for(self.binding.id)
         return {**binding, "status": self.status, "error": self.error,
                 "conversation_id": route.conversation_id if route else "",
+                "session_root_id": _session_root(route.conversation_id) if route else "",
                 "lane_id": route.lane_id if route else "",
                 "peer_id": route.peer_id if route else "",
                 "bound": route is not None}
@@ -371,7 +371,7 @@ class BotConnection:
                 except Exception as exc:
                     logger.info("机器人 %s 未能发送处理中提示 (%s)", self.binding.id, type(exc).__name__)
             run_id = await asyncio.to_thread(
-                _enqueue, lane_id, message.text[:20_000], provider)
+                _enqueue, lane_id, message.text, provider)
             if not run_id:
                 await message.reply("AtlasX 会话已归档或不可用。")
                 return
@@ -548,12 +548,12 @@ class BotManager:
         await self.sync()
         return self.connections[identifier].public()
 
-    async def bind(self, identifier: str, conversation_id: str) -> dict | None:
+    async def bind(self, identifier: str, conversation_id: str, lane_id: str = "") -> dict | None:
         await self.sync()
         conn = self.connections.get(identifier)
         if conn is None:
             return None
-        await asyncio.to_thread(_bind, identifier, conversation_id)
+        await asyncio.to_thread(_bind, identifier, conversation_id, lane_id)
         return conn.public()
 
     async def unbind(self, identifier: str) -> bool:
