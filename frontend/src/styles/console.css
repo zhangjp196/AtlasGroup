@@ -336,7 +336,9 @@
 .workspace-tab.active button[role="tab"] { color: var(--accent-ink); }
 .workspace-tab-close { padding: 2px 7px; margin-right: 2px; border-radius: 5px; }
 .workspace-tab-close:hover { background: var(--panel-3); color: var(--text); }
-.workspace-content, .workspace-view { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.workspace-content, .workspace-view { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; min-width: 0; overflow: hidden; }
+.workspace-view > .canvas-body { flex: 1 1 0; min-height: 0; }
+#workspace-chat > .chat-panel { flex: 1 1 0; min-height: 0; height: 100%; }
 .chat-panel.ga-win { bottom: auto; right: auto; max-height: none; }
 .chat-panel .rs-top { left: 0; right: 0; top: 0; height: 7px; cursor: ns-resize; }
 .chat-panel .rs-bottom { height: 10px; }

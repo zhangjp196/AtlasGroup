@@ -84,6 +84,7 @@ const commands = ref<SlashCommand[]>(BUILTIN_COMMANDS)
 let commandRequest = 0
 const scroller = ref<HTMLElement | null>(null)
 const msgsEl = ref<HTMLElement | null>(null)
+const chatPanelEl = ref<HTMLElement | null>(null)
 const stickToBottom = ref(true)
 const canScroll = ref(false)
 const atTop = ref(true)
@@ -100,6 +101,62 @@ const lanes = computed(() => props.tabs || [])
 const activeLane = computed(() => lanes.value.find((tab) => tab.key === props.activeTabKey))
 const showLanes = computed(() => !isGlobalPanel.value)
 const canAddLane = computed(() => Boolean(props.sessionRootId) && !isGlobalPanel.value)
+const LANE_WIDTH_KEY = 'atlasx.chat-lanes.width.v1'
+const DEFAULT_LANE_WIDTH = 224
+const MIN_LANE_WIDTH = 180
+const MAX_LANE_WIDTH = 480
+function initialLaneWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(LANE_WIDTH_KEY))
+    if (Number.isFinite(saved) && saved >= MIN_LANE_WIDTH && saved <= MAX_LANE_WIDTH) return saved
+  } catch { /* storage may be disabled */ }
+  return DEFAULT_LANE_WIDTH
+}
+const laneWidth = ref(initialLaneWidth())
+const laneResizing = ref(false)
+let laneResizeStart: { pointerId: number; x: number; width: number } | null = null
+function maxLaneWidth(): number {
+  const panelWidth = chatPanelEl.value?.clientWidth || window.innerWidth
+  return Math.max(120, Math.min(MAX_LANE_WIDTH, Math.floor(panelWidth * 0.45)))
+}
+function minLaneWidth(): number {
+  return Math.min(MIN_LANE_WIDTH, maxLaneWidth())
+}
+function saveLaneWidth(): void {
+  try { localStorage.setItem(LANE_WIDTH_KEY, String(Math.round(laneWidth.value))) } catch { /* storage may be disabled */ }
+}
+function setLaneWidth(width: number): void {
+  laneWidth.value = Math.min(maxLaneWidth(), Math.max(minLaneWidth(), width))
+  saveLaneWidth()
+}
+function startLaneResize(event: PointerEvent): void {
+  if (event.button !== 0) return
+  event.preventDefault()
+  laneResizeStart = { pointerId: event.pointerId, x: event.clientX, width: laneWidth.value }
+  laneResizing.value = true
+  window.addEventListener('pointermove', onLaneResize)
+  window.addEventListener('pointerup', endLaneResize)
+  window.addEventListener('pointercancel', endLaneResize)
+}
+function onLaneResize(event: PointerEvent): void {
+  if (!laneResizeStart || event.pointerId !== laneResizeStart.pointerId) return
+  laneWidth.value = Math.min(maxLaneWidth(), Math.max(minLaneWidth(),
+    laneResizeStart.width + event.clientX - laneResizeStart.x))
+}
+function endLaneResize(event: PointerEvent): void {
+  if (!laneResizeStart || event.pointerId !== laneResizeStart.pointerId) return
+  laneResizeStart = null
+  laneResizing.value = false
+  window.removeEventListener('pointermove', onLaneResize)
+  window.removeEventListener('pointerup', endLaneResize)
+  window.removeEventListener('pointercancel', endLaneResize)
+  saveLaneWidth()
+}
+function resizeLaneByKeyboard(event: KeyboardEvent): void {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+  event.preventDefault()
+  setLaneWidth(laneWidth.value + (event.key === 'ArrowRight' ? 16 : -16))
+}
 // 栏目分页：左侧一屏放 10 个，按最近活动时间倒序（store 已排好）。
 const LANE_PAGE_SIZE = 10
 const lanePage = ref(1)
@@ -576,6 +633,7 @@ function endDrag(): void {
 }
 
 onMounted(() => {
+  laneWidth.value = Math.min(laneWidth.value, maxLaneWidth())
   window.addEventListener('resize', updateViewport)
   document.addEventListener('visibilitychange', onVisibilityChange)
   if (chat.messages.value.length || chat.entries.value.length) settleBottom()
@@ -603,6 +661,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopResize?.()
   endDrag()
+  laneResizeStart = null
+  laneResizing.value = false
+  window.removeEventListener('pointermove', onLaneResize)
+  window.removeEventListener('pointerup', endLaneResize)
+  window.removeEventListener('pointercancel', endLaneResize)
   window.removeEventListener('resize', updateViewport)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.clearInterval(taskTimer)
@@ -1411,10 +1474,12 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
 
 <template>
   <div
+    ref="chatPanelEl"
     class="chat-panel"
     :class="floating ? 'ga-win' : presentation === 'drawer' ? 'chat-shell' : 'chat-tab-panel'"
-    :style="popupStyle"
-    :data-dragging="(dragging || resizing) || undefined"
+    :style="[popupStyle, { '--lanes-width': `${laneWidth}px` }]"
+    :data-dragging="(dragging || resizing || laneResizing) || undefined"
+    :data-lane-resizing="laneResizing || undefined"
     @click.capture="onConversationLink"
     @auxclick.capture="onConversationLink"
     @keydown.enter.capture="onConversationLink"
@@ -1502,12 +1567,14 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
         <div class="lanes-head">
           <span>栏目</span>
           <span class="lanes-count">{{ filteredLanes.length }}</span>
-          <button class="lanes-refresh" :class="{ spinning: lanesRefreshing }" type="button"
-            title="刷新栏目" aria-label="刷新栏目" :disabled="lanesRefreshing" @click="refreshLanes(true)">
-            <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3" /><path d="M20 4v7h-7" /></svg>
-          </button>
-          <button class="lanes-add" type="button" title="新增栏目" aria-label="新增栏目"
-            :disabled="!canAddLane" @click="addLane">＋</button>
+          <div class="lanes-actions">
+            <button class="lanes-refresh" :class="{ spinning: lanesRefreshing }" type="button"
+              title="刷新栏目" aria-label="刷新栏目" :disabled="lanesRefreshing" @click="refreshLanes(true)">
+              <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3" /><path d="M20 4v7h-7" /></svg>
+            </button>
+            <button class="lanes-add" type="button" title="新增栏目" aria-label="新增栏目"
+              :disabled="!canAddLane" @click="addLane">＋</button>
+          </div>
         </div>
         <div class="lane-filters">
           <input v-model="laneQuery" class="input lane-search" type="search" placeholder="筛选栏目 / 机器人" aria-label="筛选栏目或机器人" />
@@ -1556,6 +1623,10 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
           ＋ 新栏目
         </button>
       </aside>
+      <div v-if="showLanes" class="lanes-resizer" role="separator" aria-orientation="vertical"
+        aria-label="调整栏目栏宽度" :aria-valuemin="minLaneWidth()" :aria-valuemax="maxLaneWidth()"
+        :aria-valuenow="laneWidth" tabindex="0" @pointerdown.stop="startLaneResize"
+        @keydown="resizeLaneByKeyboard" />
 
       <div class="chat-main">
         <div v-if="globalAgent" class="ga-tabs">

@@ -1012,11 +1012,16 @@ body.ga-open .ga-fab{display:none}
 /* 栏目：会话窗口左侧的一列独立对话 */
 .chat-body{display:flex;flex:1;min-height:0;min-width:0}
 .chat-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0}
-.lanes{flex:none;width:156px;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line-soft);background:var(--bg-2)}
+.lanes{flex:0 0 min(var(--lanes-width,224px),45%);width:min(var(--lanes-width,224px),45%);display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line-soft);background:var(--bg-2)}
+.lanes-resizer{position:relative;z-index:2;flex:none;width:8px;margin-inline:-4px;cursor:col-resize;touch-action:none;outline:none}
+.lanes-resizer::after{content:"";position:absolute;top:0;bottom:0;left:3px;width:2px;background:transparent;transition:background .15s ease}
+.lanes-resizer:hover::after,.lanes-resizer:focus-visible::after{background:color-mix(in srgb,var(--accent) 55%,var(--line))}
+.chat-panel[data-lane-resizing],.chat-panel[data-lane-resizing] *{user-select:none;cursor:col-resize}
 .lanes-head{flex:none;display:flex;align-items:center;gap:5px;padding:9px 9px 7px;font:9.5px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+.lanes-actions{display:flex;align-items:center;gap:3px;margin-left:auto;flex:none}
 .lanes-count{min-width:16px;height:15px;padding:0 4px;border-radius:8px;background:var(--panel);border:1px solid var(--line);color:var(--faint);font:9px/13px var(--mono);text-align:center}
 .lanes-add{width:20px;height:20px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--dim);cursor:pointer;font-size:12px;line-height:1;display:grid;place-items:center}
-.lanes-refresh{margin-left:auto;width:20px;height:20px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--faint);cursor:pointer;display:grid;place-items:center;padding:0}
+.lanes-refresh{width:22px;height:22px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--faint);cursor:pointer;display:grid;place-items:center;padding:0}
 .lanes-refresh svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 .lanes-refresh:hover:enabled{color:var(--accent);background:var(--panel);border-color:var(--line)}
 .lanes-refresh:disabled{cursor:wait;opacity:.7}
@@ -1048,7 +1053,7 @@ body.ga-open .ga-fab{display:none}
 .lane-new{flex:none;margin:5px 7px 8px;border:1px dashed var(--line);border-radius:8px;background:transparent;color:var(--faint);padding:6px;font-size:10.5px;cursor:pointer}
 .lane-new:hover:enabled{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--line));background:color-mix(in srgb,var(--accent) 6%,transparent)}
 .lane-new:disabled{opacity:.45;cursor:not-allowed}
-@media (max-width:620px){.lanes{display:none}}
+@media (max-width:620px){.lanes,.lanes-resizer{display:none}}
 .work-emoji{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;background:var(--panel);border:1px solid var(--line);color:var(--dim);flex:none}
 .row-time{margin-left:auto;font:10px var(--mono);color:var(--faint);flex:none}
 .row-main{min-width:0;display:flex;flex-direction:column;gap:1px;flex:1}

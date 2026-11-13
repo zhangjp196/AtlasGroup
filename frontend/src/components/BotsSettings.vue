@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElButton, ElInput, ElOption, ElSelect } from 'element-plus'
+import { ElButton, ElDialog, ElInput, ElOption, ElSelect } from 'element-plus'
 import { api } from '@/api/client'
 import type { Conversation } from '@/api/types'
 import { useAppStore } from '@/stores/app'
@@ -68,7 +68,8 @@ const loading = ref(false)
 const refreshing = ref(false)
 const busy = ref('')
 const error = ref('')
-const addPanel = ref<HTMLElement | null>(null)
+const addDialogVisible = ref(false)
+const addError = ref('')
 const accountInput = ref<InstanceType<typeof ElInput> | null>(null)
 let timer = 0
 
@@ -115,8 +116,12 @@ async function manualRefresh(): Promise<void> {
 }
 
 function focusAdd(): void {
-  addPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  window.setTimeout(() => accountInput.value?.focus(), 260)
+  addError.value = ''
+  addDialogVisible.value = true
+}
+
+function focusAccount(): void {
+  accountInput.value?.focus()
 }
 
 function chooseProvider(next: Bot['provider']): void {
@@ -141,7 +146,7 @@ function optionsFor(bot: Bot): Conversation[] {
 async function add(): Promise<void> {
   if (busy.value) return
   busy.value = 'add'
-  error.value = ''
+  addError.value = ''
   try {
     await api('/bots', {
       method: 'POST',
@@ -149,10 +154,11 @@ async function add(): Promise<void> {
     })
     account.value = ''
     secret.value = ''
+    addDialogVisible.value = false
     app.toast('机器人已添加')
     await refresh()
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause)
+    addError.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     busy.value = ''
   }
@@ -316,79 +322,94 @@ onBeforeUnmount(() => { window.clearInterval(timer) })
       <button class="empty-cta" type="button" @click="focusAdd">＋ 添加第一个机器人</button>
     </div>
 
-    <section ref="addPanel" class="bot-add">
-      <header class="bot-add-head">
-        <div>
-          <div class="hero-eyebrow">连接向导</div>
-          <h3>添加机器人</h3>
-          <p>选择平台并填入应用凭据，保存后自动建立长连接。</p>
-        </div>
-        <span class="add-chip">凭证仅保存在本机</span>
-      </header>
+    <ElDialog
+      v-model="addDialogVisible"
+      class="bot-add-dialog"
+      width="min(640px, calc(100vw - 32px))"
+      :close-on-click-modal="false"
+      @opened="focusAccount"
+    >
+      <template #header>
+        <header class="bot-add-head">
+          <div>
+            <div class="hero-eyebrow">连接向导</div>
+            <h3>添加机器人</h3>
+            <p>选择平台并填入应用凭据，保存后自动建立长连接。</p>
+          </div>
+          <span class="add-chip">凭证仅保存在本机</span>
+        </header>
+      </template>
 
-      <div class="provider-cards" role="group" aria-label="机器人平台">
-        <button
-          v-for="item in providerList"
-          :key="item.id"
-          type="button"
-          class="provider-card"
-          :class="{ on: provider === item.id }"
-          :aria-pressed="provider === item.id"
-          @click="chooseProvider(item.id)"
-        >
-          <span class="bot-logo small" :class="item.id">{{ item.short }}</span>
-          <span class="provider-copy">
-            <b>{{ item.label }}机器人</b>
-            <small>{{ item.desc }}</small>
-          </span>
-          <span class="provider-check">✓</span>
-        </button>
+      <div class="bot-add">
+        <div class="provider-cards" role="group" aria-label="机器人平台">
+          <button
+            v-for="item in providerList"
+            :key="item.id"
+            type="button"
+            class="provider-card"
+            :class="{ on: provider === item.id }"
+            :aria-pressed="provider === item.id"
+            @click="chooseProvider(item.id)"
+          >
+            <span class="bot-logo small" :class="item.id">{{ item.short }}</span>
+            <span class="provider-copy">
+              <b>{{ item.label }}机器人</b>
+              <small>{{ item.desc }}</small>
+            </span>
+            <span class="provider-check">✓</span>
+          </button>
+        </div>
+
+        <form class="bot-form" @submit.prevent="add">
+          <label class="field">
+            <span>{{ providerMeta.accountLabel }}</span>
+            <ElInput
+              ref="accountInput"
+              v-model="account"
+              class="field-input"
+              spellcheck="false"
+              :placeholder="providerMeta.accountPlaceholder"
+            />
+          </label>
+          <label class="field">
+            <span>{{ providerMeta.secretLabel }}</span>
+            <ElInput
+              v-model="secret"
+              class="field-input"
+              type="password"
+              show-password
+              spellcheck="false"
+              :placeholder="providerMeta.secretPlaceholder"
+            />
+          </label>
+          <ElButton
+            class="connect-btn"
+            type="primary"
+            native-type="submit"
+            :loading="busy === 'add'"
+            :disabled="!account.trim() || !secret.trim()"
+          >
+            添加机器人
+          </ElButton>
+        </form>
+
+        <p v-if="addError" class="bots-alert add-alert" role="alert">
+          <span class="alert-mark">!</span>
+          <span>{{ addError }}</span>
+        </p>
+
+        <div class="help-grid">
+          <div class="help-card">
+            <b><span class="help-badge feishu">飞书</span>开放平台</b>
+            <p>启用机器人能力，长连接订阅 <code>im.message.receive_v1</code> 并开通发送消息权限，然后复制 App ID / App Secret。</p>
+          </div>
+          <div class="help-card">
+            <b><span class="help-badge wecom">企业微信</span>管理后台</b>
+            <p>创建 API 模式智能机器人，选择长连接方式，获取 Bot ID 与 Secret 后填到上方。</p>
+          </div>
+        </div>
       </div>
-
-      <form class="bot-form" @submit.prevent="add">
-        <label class="field">
-          <span>{{ providerMeta.accountLabel }}</span>
-          <ElInput
-            ref="accountInput"
-            v-model="account"
-            class="field-input"
-            spellcheck="false"
-            :placeholder="providerMeta.accountPlaceholder"
-          />
-        </label>
-        <label class="field">
-          <span>{{ providerMeta.secretLabel }}</span>
-          <ElInput
-            v-model="secret"
-            class="field-input"
-            type="password"
-            show-password
-            spellcheck="false"
-            :placeholder="providerMeta.secretPlaceholder"
-          />
-        </label>
-        <ElButton
-          class="connect-btn"
-          type="primary"
-          native-type="submit"
-          :loading="busy === 'add'"
-          :disabled="!account.trim() || !secret.trim()"
-        >
-          添加机器人
-        </ElButton>
-      </form>
-
-      <div class="help-grid">
-        <div class="help-card">
-          <b><span class="help-badge feishu">飞书</span>开放平台</b>
-          <p>启用机器人能力，长连接订阅 <code>im.message.receive_v1</code> 并开通发送消息权限，然后复制 App ID / App Secret。</p>
-        </div>
-        <div class="help-card">
-          <b><span class="help-badge wecom">企业微信</span>管理后台</b>
-          <p>创建 API 模式智能机器人，选择长连接方式，获取 Bot ID 与 Secret 后填到上方。</p>
-        </div>
-      </div>
-    </section>
+    </ElDialog>
   </section>
 </template>
 
@@ -481,7 +502,7 @@ onBeforeUnmount(() => { window.clearInterval(timer) })
 .empty-cta:hover{border-color:color-mix(in srgb,var(--accent) 45%,var(--line));color:var(--accent-ink)}
 
 /* 添加机器人 */
-.bot-add{display:flex;flex-direction:column;gap:14px;padding:17px 18px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 12px 30px color-mix(in srgb,#000 4%,transparent);scroll-margin-top:14px}
+.bot-add{display:flex;flex-direction:column;gap:14px}
 .bot-add-head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
 .bot-add-head > div{display:flex;flex-direction:column;gap:3px;min-width:0}
 .bot-add-head h3{margin:0;font-size:15px;font-weight:650}
@@ -508,6 +529,11 @@ onBeforeUnmount(() => { window.clearInterval(timer) })
 .help-badge{padding:1px 6px;border:1px solid color-mix(in srgb,#3370ff 32%,var(--line));border-radius:5px;background:color-mix(in srgb,#3370ff 8%,var(--panel-2));color:color-mix(in srgb,#3370ff 42%,var(--text));font-size:9px;font-weight:600}
 .help-badge.wecom{border-color:color-mix(in srgb,#07c160 32%,var(--line));background:color-mix(in srgb,#07c160 8%,var(--panel-2));color:color-mix(in srgb,#07c160 42%,var(--text))}
 .help-card code{padding:0 4px;border:1px solid var(--line-soft);border-radius:4px;background:var(--bg);color:var(--dim);font:9.5px var(--mono);overflow-wrap:anywhere}
+
+:deep(.bot-add-dialog){max-width:calc(100vw - 32px);border:1px solid var(--line);border-radius:16px;background:var(--panel)}
+:deep(.bot-add-dialog .el-dialog__header){margin:0;padding:18px 20px 14px;border-bottom:1px solid var(--line-soft)}
+:deep(.bot-add-dialog .el-dialog__body){padding:16px 20px 20px}
+.add-alert{margin:0}
 
 @media (max-width:760px){
   .bots-hero{flex-direction:column;gap:14px;padding:18px}
