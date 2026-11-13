@@ -94,4 +94,71 @@ describe('chat windows', () => {
     expect(reopened.windows[0]).toMatchObject({ presentation: 'drawer', popup })
   })
 
+  it('opens a child conversation as a lane in the same session window', async () => {
+    const thread = (id: string, session?: string) => ({
+      id, session_id: session || id, session_root_id: session || id, title: id,
+    })
+    backend.set('/conversations/c2?messages=0', thread('c2', 'c1'))
+    backend.set('/conversations?session_id=c1&limit=200&include_archived=true',
+      { items: [thread('c1'), thread('c2', 'c1')] })
+    const store = useChatWindowsStore()
+    await store.openConversation('c2')
+    expect(store.windows).toHaveLength(1)
+    expect(store.windows[0].key).toBe('conv:c1')
+    expect(store.windows[0].sessionRootId).toBe('c1')
+    expect(store.windows[0].tabs.map((tab) => tab.conversationId).sort())
+      .toEqual(['c1', 'c2'])
+  })
+
+  it('adds a lane to the current session instead of opening a new session', async () => {
+    backend.set('/conversations?session_id=c1&limit=200&include_archived=true',
+      { items: [{ id: 'c1', session_id: 'c1', session_root_id: 'c1' }] })
+    const store = useChatWindowsStore()
+    await store.openConversation('c1')
+    store.addTab('conv:c1')
+    expect(store.windows).toHaveLength(1)
+    expect(store.windows[0].tabs.some((tab) => tab.draft)).toBe(true)
+    const draftKey = store.windows[0].activeTabKey
+    expect(store.windows[0].tabs.find((tab) => tab.key === draftKey)?.draft).toBe(true)
+
+    store.promote('conv:c1', 'c4')
+    expect(store.windows[0].sessionRootId).toBe('c1')
+    expect(store.windows[0].tabs.some((tab) => tab.conversationId === 'c4' && !tab.draft))
+      .toBe(true)
+  })
+
+  it('refreshes lanes in place without losing text or the active lane', async () => {
+    const key = '/conversations?session_id=c1&limit=200&include_archived=true'
+    backend.set(key, { items: [{ id: 'c1', session_id: 'c1', session_root_id: 'c1' }] })
+    const store = useChatWindowsStore()
+    await store.openConversation('c1')
+    store.rememberTabText('conv:c1', '还没发出去的正文')
+
+    backend.set(key, { items: [
+      { id: 'c1', session_id: 'c1', session_root_id: 'c1' },
+      { id: 'c-new', session_id: 'c1', session_root_id: 'c1', title: '机器人栏目' },
+    ] })
+    await store.refreshWindow('conv:c1')
+    expect(store.windows).toHaveLength(1)
+    expect(store.windows[0].activeTabKey).toBe('conv:c1')
+    expect(store.windows[0].tabs.map((tab) => tab.conversationId))
+      .toEqual(['c1', 'c-new'])
+    expect(store.windows[0].tabs.find((tab) => tab.conversationId === 'c1')?.text)
+      .toBe('还没发出去的正文')
+    expect(store.windows[0].tabs.find((tab) => tab.conversationId === 'c-new')?.title)
+      .toBe('机器人栏目')
+  })
+
+  it('closes the window when its session root was removed elsewhere', async () => {
+    const key = '/conversations?session_id=c1&limit=200&include_archived=true'
+    backend.set(key, { items: [{ id: 'c1', session_id: 'c1', session_root_id: 'c1' }] })
+    const store = useChatWindowsStore()
+    await store.openConversation('c1')
+    expect(store.windows).toHaveLength(1)
+
+    backend.set(key, { items: [] })
+    await store.refreshWindow('conv:c1')
+    expect(store.windows).toHaveLength(0)
+  })
+
 })

@@ -36,6 +36,16 @@ export interface TaskItem {
   status: string
 }
 
+/** 模型发起的会话指令：由 ChatPanel 用斜杠命令的同一套逻辑执行。 */
+export interface SessionCommand {
+  name: string
+  arg?: string
+  done?: boolean
+  note?: string
+  /** 自增序号：同一条指令重复到达时也要再执行一次。 */
+  seq: number
+}
+
 export interface PendingAttachment {
   localId: string
   name: string
@@ -51,10 +61,11 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 const MAX_ATTACHMENTS_TOTAL = 50 * 1024 * 1024
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|avif)$/i
 const DOC_EXTENSIONS = [
-  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf',
+  '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.ppt', '.pptx', '.odt', '.ods', '.pdf',
   '.txt', '.text', '.md', '.markdown', '.mdx', '.rst', '.log', '.csv', '.tsv',
   '.json', '.jsonl', '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf', '.cfg',
-  '.properties', '.html', '.htm', '.css', '.scss', '.less', '.js', '.mjs', '.cjs',
+  '.properties', '.html', '.htm', '.xhtml', '.svg', '.css', '.scss', '.less', '.js', '.mjs', '.cjs',
+  '.mp4', '.webm', '.mov', '.m4v', '.ogv', '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.opus',
   '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.py', '.java', '.kt', '.scala',
   '.cs', '.c', '.h', '.cc', '.cpp', '.hpp', '.go', '.rs', '.rb', '.php', '.swift',
   '.dart', '.lua', '.r', '.pl', '.sh', '.bash', '.zsh', '.fish', '.bat', '.cmd',
@@ -87,9 +98,12 @@ export function useChat() {
   // 运行中这一轮的实时用量：库里只统计已结束的轮次，这里叠加当轮快照。
   const liveUsage = ref<TokenUsage | null>(null)
   const contextTokens = ref(0)
+  // 模型在对话里执行的会话指令（清空上下文 / 新建 / 重命名…），交给界面处理。
+  const sessionCommand = ref<SessionCommand | null>(null)
 
   let source: EventSource | null = null
   let entrySeq = 0
+  let commandSeq = 0
   let queueTimer: number | null = null
 
   function newKey(): string {
@@ -408,19 +422,9 @@ export function useChat() {
     return /^(text|audio|video)\//.test(file.type || '')
   }
 
-  function supportsVision(effectiveModel?: string): boolean {
-    const conv = conversation.value
-    const code = effectiveModel || conv?.model_code || data.activeModel || ''
-    const model = data.models.find((item) => item.code === code)
-    if (!model) return true
-    if (typeof model.effective_vision === 'boolean') return model.effective_vision
-    return Boolean(model.vision)
-  }
-
-  function addFiles(files: FileList | File[], effectiveModel?: string): void {
+  function addFiles(files: FileList | File[]): void {
     const incoming = Array.from(files || [])
     if (!incoming.length) return
-    const vision = supportsVision(effectiveModel)
     let total = pendingAttachments.value.reduce((sum, item) => sum + Number(item.size || 0), 0)
     let added = 0
     for (const file of incoming) {
@@ -429,10 +433,6 @@ export function useChat() {
         break
       }
       const image = isImageFile(file)
-      if (image && !vision) {
-        app.toast('当前模型未开启图片支持，请切换模型或在设置中开启', 'bad', 5000)
-        continue
-      }
       if (!image && !isSupportedFile(file)) {
         app.toast(`不支持的文件：${file.name}`, 'bad', 4000)
         continue
@@ -551,7 +551,9 @@ export function useChat() {
       const conv = await api<Conversation>(`/conversations/${encodeURIComponent(conversation.value.id)}`)
       conversation.value = conv
       messages.value = conv.messages || []
-      resetLive()
+      // 运行中清空上下文时不能重置实时流：否则正在输出的这一轮会被擦掉。
+      if (streaming.value) contextTokens.value = 0
+      else resetLive()
       app.toast(scope === 'all'
         ? `已清空 ${Number(out?.cleared) || 0} 个会话的上下文（历史消息保留）`
         : '当前会话上下文已清空（历史消息保留）', 'ok', 3000)
@@ -778,6 +780,20 @@ export function useChat() {
       tasks.value = evt.todo_update.items || []
       return
     }
+    if (evt.session_command) {
+      const name = String(evt.session_command.name || '')
+      if (name) {
+        commandSeq += 1
+        sessionCommand.value = {
+          name,
+          arg: evt.session_command.arg || '',
+          done: Boolean(evt.session_command.done),
+          note: evt.session_command.note || '',
+          seq: commandSeq,
+        }
+      }
+      return
+    }
     if (evt.tool_approval) {
       if (!approvals.value.some((item) => item.id === evt.tool_approval?.id)) {
         approvals.value.push(evt.tool_approval)
@@ -915,6 +931,7 @@ export function useChat() {
     waitSeconds,
     liveUsage,
     contextTokens,
+    sessionCommand,
     open,
     beginDraft,
     send,

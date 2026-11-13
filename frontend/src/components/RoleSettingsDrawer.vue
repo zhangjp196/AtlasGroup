@@ -4,6 +4,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import Avatar from '@/components/Avatar.vue'
 import ListPager from '@/components/ListPager.vue'
 import Markdown from '@/components/chat/Markdown.vue'
+import SessionList from '@/components/chat/SessionList.vue'
 import Modal from '@/components/Modal.vue'
 import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
@@ -19,11 +20,15 @@ const emit = defineEmits<{
   (e: 'saved'): void
   (e: 'deleted', id: string): void
   (e: 'chat', id: string): void
+  (e: 'new-chat', id: string): void
+  (e: 'session', id: string): void
   (e: 'work', id: string): void
 }>()
 
 const app = useAppStore()
 const data = useDataStore()
+// 详情按「栏目」分页：概览 / 会话 / 能力 / 信息，避免所有内容堆在一个滚动区里。
+const tab = ref<'overview' | 'sessions' | 'ability' | 'info'>('overview')
 const tools = ref<ToolItem[]>([])
 const skills = ref<Skill[]>([])
 const skillsLoading = ref(false)
@@ -82,6 +87,7 @@ function toolName(code: string): string {
 
 watch(() => [props.open, props.role?.id], () => {
   if (!props.open || !props.role) return
+  tab.value = 'overview'
   workspaceDraft.value = String(props.role.workspace_id || '')
   skills.value = []
   void loadGrants(props.role.id)
@@ -325,6 +331,14 @@ async function removeRole(): Promise<void> {
       </header>
 
       <div v-if="role" class="side-drawer-body">
+        <div class="seg drawer-tabs" role="tablist" aria-label="角色详情栏目">
+          <button class="seg-btn" :class="{ on: tab === 'overview' }" type="button" @click="tab = 'overview'">概览</button>
+          <button v-if="!temporary" class="seg-btn" :class="{ on: tab === 'sessions' }" type="button" @click="tab = 'sessions'">会话</button>
+          <button class="seg-btn" :class="{ on: tab === 'ability' }" type="button" @click="tab = 'ability'">能力</button>
+          <button class="seg-btn" :class="{ on: tab === 'info' }" type="button" @click="tab = 'info'">信息</button>
+        </div>
+
+        <template v-if="tab === 'overview'">
         <div class="group-identity">
           <Avatar :name="role.name || '角'" :avatar="role.avatar" round :size="48" />
           <div class="group-identity-main">
@@ -362,8 +376,23 @@ async function removeRole(): Promise<void> {
             <span v-else>（未填写）</span>
           </div>
         </section>
+        </template>
 
-        <section class="group-section">
+        <section v-if="tab === 'sessions' && !temporary" class="group-section">
+          <div class="group-section-head">
+            <h3>会话</h3>
+            <span>这个角色的历史会话</span>
+            <button class="btn small" type="button" @click="emit('new-chat', role.id)">新会话</button>
+          </div>
+          <SessionList
+            :role-id="role.id"
+            :page-size="6"
+            empty-text="还没有会话。点「新会话」开始第一条。"
+            @open="emit('session', $event)"
+          />
+        </section>
+
+        <section v-if="tab === 'ability'" class="group-section">
           <div class="group-section-head">
             <h3>工具权限</h3>
             <span>{{ roleTools.length ? `${roleTools.length} 个工具` : '全部工具' }}</span>
@@ -380,7 +409,7 @@ async function removeRole(): Promise<void> {
           />
         </section>
 
-        <section class="group-section">
+        <section v-if="tab === 'ability'" class="group-section">
           <div class="group-section-head">
             <h3>永久工具授权</h3>
             <span>{{ grantsLoading ? '加载中…' : (grants.length ? `${grants.length} 条` : '未设置') }}</span>
@@ -403,7 +432,7 @@ async function removeRole(): Promise<void> {
           />
         </section>
 
-        <section class="group-section">
+        <section v-if="tab === 'ability'" class="group-section">
           <div class="group-section-head">
             <h3>专属技能</h3>
             <span>{{ skillsLoading ? '加载中…' : `${skills.length} / 20` }}</span>
@@ -433,7 +462,7 @@ async function removeRole(): Promise<void> {
           </div>
         </section>
 
-        <section class="group-section">
+        <section v-if="tab === 'info'" class="group-section">
           <div class="group-section-head"><h3>角色信息</h3></div>
           <div class="work-meta" style="border:0;padding:0">
             <span>ID <b>{{ role.id }}</b></span>
@@ -442,7 +471,7 @@ async function removeRole(): Promise<void> {
           </div>
         </section>
 
-        <section v-if="!role.system" class="group-section group-danger">
+        <section v-if="tab === 'info' && !role.system" class="group-section group-danger">
           <div class="group-section-head"><h3>删除角色</h3></div>
           <p class="group-mode-hint" style="margin:0">只删除角色本身，已有会话保留；临时角色删除后不可恢复。</p>
           <button class="btn danger" type="button" :disabled="deleting" @click="removeRole">{{ deleting ? '删除中…' : '删除角色' }}</button>

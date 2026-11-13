@@ -13,6 +13,7 @@ import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 import PageHeader from '@/components/PageHeader.vue'
 import ModelFlow from '@/components/ModelFlow.vue'
+import BotsSettings from '@/components/BotsSettings.vue'
 
 const app = useAppStore()
 const data = useDataStore()
@@ -27,7 +28,7 @@ const roleCountByWs = computed(() => {
   return map
 })
 
-type Tab = 'models' | 'usage' | 'magpie' | 'mcp' | 'skills' | 'commands' | 'appearance' | 'tools' | 'runtime' | 'workspaces'
+type Tab = 'models' | 'usage' | 'magpie' | 'mcp' | 'skills' | 'commands' | 'appearance' | 'tools' | 'runtime' | 'workspaces' | 'bots'
 const tab = ref<Tab>('models')
 const tabs: Array<{ id: Tab; label: string }> = [
   { id: 'models', label: '模型与订阅' },
@@ -36,6 +37,7 @@ const tabs: Array<{ id: Tab; label: string }> = [
   { id: 'mcp', label: 'MCP 服务' },
   { id: 'skills', label: '技能' },
   { id: 'commands', label: '命令与钩子' },
+  { id: 'bots', label: '机器人' },
   { id: 'appearance', label: '外观' },
   { id: 'tools', label: '工具' },
   { id: 'runtime', label: '运行时' },
@@ -1796,6 +1798,9 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
         </template>
       </template>
 
+      <template v-else-if="tab === 'bots'">
+        <BotsSettings />
+      </template>
 
         <SideDrawer :open="platformOpen" title="平台预设" subtitle="官方 API、编程订阅、聚合平台，以及自建 / 本地网关。" width="680px" @close="platformOpen = false">
           <el-input v-model="platformSearch" placeholder="搜索平台" clearable />

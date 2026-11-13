@@ -28,11 +28,30 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   return defaultLinkOpen(tokens, idx, options, env, self)
 }
 
-export function renderMarkdown(text?: string | null): string {
+const defaultImage = md.renderer.rules.image!
+md.renderer.rules.image = (tokens, idx, options, env, self) => {
+  const token = tokens[idx]
+  const src = token.attrGet('src') || ''
+  if (env.resolveImage) {
+    const resolved = env.resolveImage(src)
+    if (!resolved) {
+      const alt = self.renderInlineAsText(token.children || [], options, env)
+      return `<a href="#" data-preview-href="${escapeHtml(src)}">${escapeHtml(alt || '预览图片')}</a>`
+    }
+    token.attrSet('src', resolved)
+    token.attrSet('data-preview-href', src)
+    token.attrSet('loading', 'lazy')
+    token.attrSet('referrerpolicy', 'no-referrer')
+    token.attrSet('tabindex', '0')
+  }
+  return defaultImage(tokens, idx, options, env, self)
+}
+
+export function renderMarkdown(text?: string | null, resolveImage?: (src: string) => string): string {
   const raw = String(text || '')
   if (!raw) return ''
-  return DOMPurify.sanitize(md.render(raw), {
-    ADD_ATTR: ['target', 'rel', 'data-lang'],
+  return DOMPurify.sanitize(md.render(raw, { resolveImage }), {
+    ADD_ATTR: ['target', 'rel', 'data-lang', 'referrerpolicy'],
   })
 }
 

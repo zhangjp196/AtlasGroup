@@ -45,7 +45,7 @@ LEGACY_OFFICE_EXT = document_service.LEGACY_OFFICE_EXT
 TEXT_EXT = {
     ".txt", ".text", ".md", ".markdown", ".mdx", ".rst", ".log", ".csv", ".tsv",
     ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg",
-    ".properties", ".env", ".html", ".htm", ".xhtml", ".css", ".scss", ".sass",
+    ".properties", ".env", ".html", ".htm", ".xhtml", ".svg", ".css", ".scss", ".sass",
     ".less", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte",
     ".py", ".pyw", ".java", ".kt", ".kts", ".scala", ".groovy", ".cs", ".c", ".h",
     ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".m", ".mm", ".go", ".rs", ".rb", ".php",
@@ -79,6 +79,8 @@ def _ext_of(name: str) -> str:
 
 
 def _kind_of(ext: str, mime: str, name: str = "") -> str:
+    if ext == ".svg" or mime == "image/svg+xml":
+        return "text"
     if ext in IMAGE_EXT or mime.startswith("image/"):
         return "image"
     if ext in PDF_EXT or mime == "application/pdf":
@@ -133,7 +135,8 @@ def _decode_text_bytes(data: bytes) -> str:
 
 
 def _read_text_file(path: Path) -> str:
-    return _decode_text_bytes(path.read_bytes()[:MAX_TEXT_BYTES])
+    with path.open("rb") as stream:
+        return _decode_text_bytes(stream.read(MAX_TEXT_BYTES))
 
 
 # ── Office / PDF 文本抽取 ──────────────────────────────────────────────────
@@ -228,16 +231,13 @@ def process_uploads(conv_id: str, items: List[Dict[str, Any]],
             try:
                 text = _extract_text(target, ext, kind)
             except Exception as e:
-                target.unlink(missing_ok=True)
-                raise ValueError(f"无法解析 {name}：{e}") from e
-            if not text.strip():
-                target.unlink(missing_ok=True)
-                raise ValueError(f"无法从 {name} 中提取文本")
-            truncated = len(text) > MAX_EXTRACT_CHARS
-            text = text[:MAX_EXTRACT_CHARS]
-            _text_path(folder, att_id).write_text(text, encoding="utf-8")
-            meta["text_chars"] = len(text)
-            meta["truncated"] = truncated
+                logger.info("无法抽取附件正文 %s: %s", name, e)
+                text = ""
+            if text.strip():
+                meta["truncated"] = len(text) > MAX_EXTRACT_CHARS
+                text = text[:MAX_EXTRACT_CHARS]
+                _text_path(folder, att_id).write_text(text, encoding="utf-8")
+                meta["text_chars"] = len(text)
         try:
             import json
 

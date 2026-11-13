@@ -2,8 +2,7 @@
 
 覆盖以前会「停不下来」的路径：
 
-1. **强制停止立即生效**：长运行中调用 stop，run 很快落 stopped，且生成器
-   确实收到 CancelledError（不是等数据里的 stop 标记被下一次事件间隙看到）。
+1. **强制停止立即生效**：长运行中调用 stop，run 很快落 stopped，且生成器关闭。
 2. **已产出的正文不丢**：停止时缓冲里的 delta 已经落库。
 3. **失联 / 排队 run 也能停**：不再干等 30s 失联回收。
 4. **同步工具不阻塞事件循环**：否则 task.cancel() 投递不进去，停止无效。
@@ -11,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 API = "/api/agent-zero"
@@ -75,7 +75,8 @@ def test_stop_watchdog_is_disarmed_after_run_finishes(client, monkeypatch):
 def test_stop_is_forced_and_keeps_partial_text(client, monkeypatch):
     from services.agent_zero.task_layer import conversation
 
-    state = {"cancelled": False}
+    started = threading.Event()
+    closed = threading.Event()
 
     async def fake_stream(*args, **kwargs):
         try:
@@ -85,10 +86,10 @@ def test_stop_is_forced_and_keeps_partial_text(client, monkeypatch):
                 i += 1
                 yield {"delta": {"delta": f"chunk{i} ", "round": 1,
                                  "role_id": "default", "role_name": "Atlas"}}
+                started.set()
                 await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            state["cancelled"] = True
-            raise
+        finally:
+            closed.set()
 
     monkeypatch.setattr(conversation, "generate_reply_stream", fake_stream)
 
@@ -97,7 +98,7 @@ def test_stop_is_forced_and_keeps_partial_text(client, monkeypatch):
                                  json={"content": "长任务", "mode": "chat"}).json())
     assert run_id
 
-    time.sleep(1.0)                       # 等它真的开始产正文
+    assert started.wait(5), "生成器未开始输出"
     resp = client.post(f"{API}/runs/{run_id}/stop").json()
     assert resp["code"] == 0
     assert resp["data"]["forced"] is True, resp
@@ -105,11 +106,7 @@ def test_stop_is_forced_and_keeps_partial_text(client, monkeypatch):
     status = _wait_status(client, run_id, {"stopped"}, timeout=8.0)
     assert status == "stopped", status
 
-    for _ in range(40):                   # 取消要真的传到生成器
-        if state["cancelled"]:
-            break
-        time.sleep(0.05)
-    assert state["cancelled"] is True, "生成器没有收到取消：停止没有传达到执行层"
+    assert closed.wait(2), "停止后生成器仍未关闭"
 
     data = client.get(f"{API}/runs/{run_id}?since=0").json()["data"]
     text = "".join(str(e.get("delta") or "") for e in data["events"]

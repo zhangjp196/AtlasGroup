@@ -88,10 +88,32 @@ def create_conversation(workspace_id: str, user: str,
                         model_code: Optional[str] = None,
                         thinking_level: Optional[str] = None,
                         permission_mode: Optional[str] = None,
-                        run_mode: Optional[str] = None) -> Dict[str, Any]:
-    """发起对话（本地单用户）。可绑定团队。"""
+                        run_mode: Optional[str] = None,
+                        session_id: Optional[str] = None) -> Dict[str, Any]:
+    """发起对话（本地单用户）。可绑定团队。
+
+    `session_id` 指向会话根：普通会话为空（自己就是根），窗口里新增的「栏目」
+    填根会话 id，各自持有独立的消息与上下文，但共用同一个会话卡片。
+    """
     zone = str(zone or "").strip() or None
     role_id = str(role_id or "").strip() or None
+    session_id = str(session_id or "").strip() or None
+    session_root: Optional[Dict[str, Any]] = None
+    if session_id:
+        session_root = get_conversation(session_id)
+        if not session_root:
+            raise ValueError(f"栏目所属会话不存在: {session_id}")
+        # 传进来的是栏目时归一到根，避免出现「栏目的栏目」。
+        session_id = str(session_root.get("session_id") or session_root.get("id") or "")
+        if not session_id:
+            raise ValueError("栏目所属会话无效")
+        role_id = role_id or session_root.get("role_id")
+        zone = zone or session_root.get("zone")
+        workspace_id = workspace_id or str(session_root.get("workspace_id") or "")
+        model_code = model_code or session_root.get("model_code")
+        thinking_level = thinking_level or session_root.get("thinking_level")
+        permission_mode = permission_mode or session_root.get("permission_mode")
+        run_mode = run_mode or session_root.get("run_mode")
     if zone == GLOBAL_AGENT_ZONE:
         # 全局 Agent 是 AtlasX 的唯一入口，且它本身不是群聊：
         # 即使调用方带了 team_id 也不能绑定，否则群组页会把这条会话当成群聊，
@@ -117,6 +139,18 @@ def create_conversation(workspace_id: str, user: str,
             leader = team.get("leader") or {}
             role_id = str(leader.get("id") or "").strip() or None
 
+    # 共享群组是长期实体：栏目继续留在同一个群里。
+    # 会话私有参与角色（participants-*）不在这里继承——它绑定单条会话，
+    # 分支会自己复制一份，普通栏目沿用调用方传入的团队。
+    if not team_id and session_root:
+        inherited_team = str(session_root.get("team_id") or "")
+        if inherited_team and not inherited_team.startswith("participants-"):
+            from services.agent_zero.services import team_service
+
+            team = team_service.get_team(inherited_team) or {}
+            if str(team.get("kind") or "group") == "group":
+                team_id = inherited_team
+
     workspace_id = validate_conversation_workspace(bound_workspace_id or workspace_id)
     workspace_custom = bool(workspace_id)
     bound_workspace_id = None
@@ -141,18 +175,25 @@ def create_conversation(workspace_id: str, user: str,
         db.execute(
             text(f"INSERT INTO {_q('conversations')} "
                  f"(id, workspace_id, bound_workspace_id, workspace_custom, role_id, zone, "
-                 f"created_by, source, "
+                 f"created_by, source, session_id, "
                  f"permission_mode, run_mode, team_id, model_code, thinking_level, last_read_at) "
-                 f"VALUES (:id, :wid, :bwid, :wcustom, :rid, :zone, :by, :src, :mode, :run_mode, "
+                 f"VALUES (:id, :wid, :bwid, :wcustom, :rid, :zone, :by, :src, :session, :mode, :run_mode, "
                  f":team, :model, :think, datetime('now','localtime'))"),
             {"id": conv_id, "wid": workspace_id or zero_store.DEFAULT_WORKSPACE_ID, "bwid": None,
              "wcustom": 1 if workspace_custom else 0,
              "rid": role_id,
-             "zone": zone, "by": user, "src": source or "chat",
+             "zone": zone, "by": user, "src": source or "chat", "session": session_id,
              "mode": mode, "run_mode": run_mode,
              "team": team_id or None,
              "model": (model_code or None), "think": (thinking_level or None)},
         )
+        if session_id:
+            # 新栏目 = 会话有了新活动：把根会话顶到列表前面。
+            db.execute(
+                text(f"UPDATE {_q('conversations')} SET updated_at = datetime('now','localtime') "
+                     f"WHERE id = :id"),
+                {"id": session_id},
+            )
         db.commit()
     if team_id:
         team = None
@@ -178,6 +219,9 @@ def create_conversation(workspace_id: str, user: str,
             "role_id": role_id, "zone": zone, "source": source or "chat",
             "permission_mode": mode, "run_mode": run_mode,
             "team_id": team_id,
+            "session_id": session_id or conv_id,
+            "session_root_id": session_id or conv_id,
+            "thread_count": 1,
             "model_code": model_code or "", "thinking_level": thinking_level or ""}
 
 
@@ -499,9 +543,17 @@ def get_conversation(conv_id: str) -> Optional[Dict[str, Any]]:
             text(f"SELECT * FROM {_q('conversations')} WHERE id = :id"),
             {"id": conv_id},
         ).mappings().first()
-    if not row:
-        return None
-    data = dict(row)
+        if not row:
+            return None
+        data = dict(row)
+        root = str(data.get("session_id") or data.get("id") or "")
+        data["session_id"] = root
+        data["session_root_id"] = root
+        data["thread_count"] = int(db.execute(
+            text(f"SELECT COUNT(*) FROM {_q('conversations')} "
+                 f"WHERE COALESCE(NULLIF(session_id, ''), id) = :root"),
+            {"root": root},
+        ).scalar() or 1)
     data["workspace_id"] = zero_store.public_workspace_id(data.get("workspace_id"))
     data["workspace_custom"] = bool(data["workspace_id"])
     return data
@@ -562,6 +614,8 @@ def fork_conversation(conv_id: str, *, message_id: Optional[str] = None,
         thinking_level=src.get("thinking_level"),
         permission_mode=src.get("permission_mode"),
         run_mode=src.get("run_mode"),
+        # 分支仍属于原会话：在窗口左侧作为新栏目出现，不另占一张会话卡。
+        session_id=str(src.get("session_root_id") or src.get("session_id") or src.get("id")),
     )
     new_id = str(new["id"])
     if src_team and not src_is_shared_group:
@@ -1514,6 +1568,7 @@ _SEQ_CALLS_TOOLS = frozenset({
     "role_manage",
     "schedule_manage",
     "app_manage",
+    "session_manage",
     "ask_user",
     # 工具监督本身是「读共享注册表 + 可能长时间 wait」：走串行，避免与
     # 其它工具的并发批互相干扰（也让 wait 的语义可预测）。
@@ -2386,6 +2441,59 @@ def _exec_app_manage(conv: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, An
         return {"ok": True, "run_id": rid, "stop_requested": bool(stopped),
                 "forced": forced}
     return {"error": f"非法 action: {action}"}
+
+
+# 由界面执行的会话指令（与前端斜杠命令共用同一套处理路径）。
+# `clear` 不走这里：它可能发生在运行中途，必须由后端立即落清空标记，
+# 否则界面重置实时流会把正在输出的这一轮擦掉。
+SESSION_UI_ACTIONS = frozenset({
+    "compact", "new", "rename", "delete", "clean", "stop", "work", "read",
+    "model", "attach", "conv", "settings", "about", "theme",
+})
+
+
+def _exec_session_manage(conv: Dict[str, Any], args: Dict[str, Any],
+                         *, user: str = "") -> Dict[str, Any]:
+    """会话指令：把用户用自然语言提出的操作落到具体动作。
+
+    - `clear`：后端立即执行（插一条清空标记，历史消息保留）；
+    - 其余动作返回 `done=False`，由前端用斜杠命令同一套逻辑执行
+      （新建 / 重命名 / 删除 / 打开设置等本来就是界面状态，只有界面知道怎么做）。
+
+    机器人来源（`user=bot:*`）只能清当前栏目：清空全部会话会连带别的会话，
+    不属于机器人可自动执行的安全指令。
+    """
+    a = args or {}
+    action = str(a.get("action") or "").strip().lower()
+    title = str(a.get("title") or "").strip()
+    scope = str(a.get("scope") or "current").strip().lower()
+    cid = str(conv.get("id") or "")
+    if not cid:
+        return {"error": "缺少会话 id"}
+    if action == "clear":
+        if scope not in ("current", "all"):
+            scope = "current"
+        if scope == "all":
+            if str(user or "").startswith("bot:"):
+                return {"error": "机器人只能清空当前栏目；清空全部会话请在 AtlasX 里操作"}
+            count = clear_all_contexts()
+            return {"ok": True, "action": "clear", "scope": scope, "done": True,
+                    "cleared": count,
+                    "note": f"已清空 {count} 个会话的模型上下文（历史消息保留）"}
+        ok = clear_context(cid)
+        if not ok:
+            return {"error": "清空上下文失败（会话不存在或已被删除）"}
+        return {"ok": True, "action": "clear", "scope": scope, "done": True,
+                "cleared": 1,
+                "note": "当前会话上下文已清空（历史消息保留）"}
+    if action == "rename" and not title:
+        return {"error": "rename 需要 title（新的会话标题）"}
+    if action in SESSION_UI_ACTIONS:
+        return {"ok": True, "action": action, "done": False, "arg": title,
+                "note": "已把指令发给界面执行；用一句话确认即可，不要重复操作。"}
+    return {"error": f"未知会话指令: {action}（可选：clear / compact / new / rename / "
+                     "delete / clean / stop / work / read / model / attach / conv / "
+                     "settings / about / theme）"}
 
 
 def _exec_department_manage(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -3828,6 +3936,45 @@ def clear_context(conv_id: str) -> bool:
     return True
 
 
+async def compact_context(conv_id: str) -> Dict[str, Any]:
+    """手动压缩一个会话的上下文（供界面 /compact 与机器人指令共用）。
+
+    运行中的会话拒绝压缩，避免和 run 抢同一份上下文。
+    """
+    from services.agent_zero.runtime.zero import compress
+    from services.agent_zero.task_layer import run_service
+
+    conv = get_conversation(conv_id)
+    if not conv:
+        raise ValueError(f"对话不存在: {conv_id}")
+    if run_service.running_run(conv_id):
+        raise RuntimeError("当前会话正在运行，先停止再压缩")
+    role = zero_store.get_role(str(conv.get("role_id") or "")) or {}
+    models = _chat_models(role) or {"loop": "default", "fallback": "default"}
+    messages = _history_messages(conv_id)
+    decision = await compress.decide(messages, models=models, force=True, reason="manual")
+    if not decision.get("should_compress"):
+        return {
+            "compressed": False,
+            "reason": decision.get("reason") or "nothing",
+            "before_tokens": int(decision.get("current") or 0),
+            "after_tokens": int(decision.get("current") or 0),
+        }
+    result = await compress.apply(
+        messages, models=models, decision=decision, force_summary=True)
+    if result.get("summary"):
+        persist_checkpoint(conv, str(result.get("summary") or ""),
+                           str(result.get("source") or "manual"))
+    return {
+        "compressed": bool(result.get("compressed")),
+        "source": result.get("source") or "",
+        "before_tokens": int(result.get("original_tokens") or 0),
+        "after_tokens": int(result.get("tokens") or 0),
+        "pruned_tool_outputs": int(result.get("pruned_tool_outputs") or 0),
+        "dropped_exchanges": int(result.get("dropped_exchanges") or 0),
+    }
+
+
 def clear_all_contexts() -> int:
     """清空所有会话的模型上下文（历史消息保留）。返回处理的会话数。"""
     from sqlalchemy import text
@@ -4855,7 +5002,6 @@ async def _prepare_role_run(
     """
     from services.agent_zero.runtime.zero import llm as llm_mod
     from services.agent_zero.runtime.zero.dispatch import ToolDispatcher
-
     models = _resolved_chat_models(conv, role)
     display_model = llm_mod.get_model_name(models.get("loop") or "default")
     try:
@@ -4901,13 +5047,18 @@ async def _prepare_role_run(
     specs = _chat_tool_specs(envelope, None, autonomous=autonomous,
                              workspace_id=ws_id, mcp_specs=mcp_specs,
                              team_bound=team_bound)
+    if isolated:
+        # 会话指令操作的是用户眼前的这个会话：子代理 / 团队成员不能替用户点界面。
+        specs = [s for s in specs
+                 if (s.get("function") or {}).get("name") != "session_manage"]
     if is_global:
         from services.agent_zero.tools import registry as tool_reg
 
         # 工单助手 只拿「管理 App」需要的工具，不继承默认角色的 shell / 文件能力。
         specs = []
-        global_tools = ["app_manage", "ask_user", "department_manage",
-                        "role_manage", "schedule_manage", "team_manage"]
+        global_tools = ["app_manage", "session_manage", "ask_user",
+                        "department_manage", "role_manage",
+                        "schedule_manage", "team_manage"]
         for code in global_tools:
             tool = tool_reg.get_tool(code)
             if tool is not None:
@@ -5040,13 +5191,20 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                 (_rsvc0.get_run(run_id) or {}).get("team_task_id"))
         except Exception:
             _is_task_member = False
-    if not isolated:
+    if not isolated and not user.startswith("bot:"):
         if not _is_task_member:
             if not team:
                 _drop_team_tool(specs)
             _append_background_task_tool(specs)
             _append_proactive_tool(specs)
         _append_role_discussion_tool(specs)
+    if user.startswith("bot:"):
+        # 外部聊天参与者与本机用户身份不同。
+        specs = []
+    if _is_task_member:
+        # 后台任务在会话里单独跑，但界面动作属于用户当前这篇对话，任务成员不碰。
+        specs = [s for s in specs
+                 if (s.get("function") or {}).get("name") != "session_manage"]
     if _is_task_member and not isolated:
         from services.agent_zero.task_layer import prompt_builder as _pb
 
@@ -5394,7 +5552,7 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
             try:
                 from services.agent_zero.services import hooks_service as _hsvc
 
-                if _hsvc.has_hooks(ws_id):
+                if not user.startswith("bot:") and _hsvc.has_hooks(ws_id):
                     for _hi, _c in enumerate(calls):
                         _hn, _ha, _hpe = _resolved[_hi]
                         if _hpe:
@@ -5455,7 +5613,7 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                     }
             _pre_results: Optional[List[Any]] = None
             _pre_started: Optional[float] = None
-            if len(calls) >= 2 and all(
+            if not user.startswith("bot:") and len(calls) >= 2 and all(
                     _resolved[i][0] not in _SEQ_CALLS
                     and not _decisions[i].get("ask")
                     and not _resolved[i][2]
@@ -5589,7 +5747,9 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                     _tact = None
                     _act_id = ""
                 _hp = _hook_pre[_ci] if _ci < len(_hook_pre) else {}
-                if _hp.get("decision") == "deny":
+                if user.startswith("bot:"):
+                    result = json.dumps({"error": "请在 AtlasX 内发起工具或管理操作"}, ensure_ascii=False)
+                elif _hp.get("decision") == "deny":
                     # 钩子拒绝：不执行、不询问，把原因回给模型（它下一轮可换做法）
                     _reason = str(_hp.get("reason") or "被 PreToolUse 钩子拒绝")
                     result = json.dumps(
@@ -5850,6 +6010,23 @@ async def _stream_role(conv: Dict[str, Any], user: str, role: Dict[str, Any],
                             result = _exec_team_manage(conv, ws_id, args, specs)
                     else:
                         result = _exec_team_manage(conv, ws_id, args, specs)
+                elif name in ("session_manage", "session_command"):
+                    # 会话指令：清空上下文在后台立即执行；界面动作（新建 / 重命名 /
+                    # 主题…）通过事件交给前端，复用斜杠命令的同一套处理逻辑。
+                    _open_text = None
+                    _sess_out = ({"error": "会话指令只能由主对话执行，子代理 / "
+                                           "后台任务成员不能调用"}
+                                 if (isolated or _is_task_member)
+                                 else _exec_session_manage(conv, args, user=user))
+                    result = json.dumps(_sess_out, ensure_ascii=False)
+                    if _sess_out.get("ok"):
+                        yield {"session_command": {
+                            "name": _sess_out.get("action"),
+                            "arg": _sess_out.get("arg") or "",
+                            "done": bool(_sess_out.get("done")),
+                            "note": _sess_out.get("note") or "",
+                            "role_id": rid, "role_name": rname,
+                        }}
                 elif name in ("todo_write", "todo"):
                     # 任务清单：整份覆盖；用户与模型改的是同一份（界面对话内卡片）
                     from services.agent_zero.services import todo_service as _tdsvc
@@ -6509,14 +6686,18 @@ def archive_stale_conversations(days: int = ARCHIVE_AFTER_DAYS) -> int:
             text(f"UPDATE {_q('conversations')} SET archived = 1 "
                  f"WHERE archived = 0 "
                  f"AND COALESCE(zone, '') <> '{GLOBAL_AGENT_ZONE}' "
+                 f"AND id NOT IN (SELECT conversation_id FROM {_q('bot_routes')}) "
                  f"AND updated_at < datetime('now','localtime','-{int(days)} days')")
         )
         db.commit()
         return res.rowcount or 0
 
 
-def _page_message_stats(db: Any, items: list) -> None:
+def _page_message_stats(db: Any, items: list, *, by_session: bool = False) -> None:
     """给一页会话就地补上 unread / unread_count / message_count / last_message。
+
+    `by_session=True` 时把一条会话根下的全部栏目一起统计（会话中心的一张卡 =
+    一个会话，未读 / 预览取整棵会话）。
 
     列表页一次最多 50 条，逐条跑「消息数 + 最后一条 + 未读」会变成 150 次查询
     （模板里最贵的接口之一）。这里改成按页两次聚合：
@@ -6540,32 +6721,48 @@ def _page_message_stats(db: Any, items: list) -> None:
         params[f"lr{i}"] = str(item.get("last_read_at") or "")
         values.append(f"(:id{i}, :lr{i})")
     page = f"WITH page(id, last_read) AS (VALUES {', '.join(values)})"
+    if by_session:
+        scope = (f", threads(root_id, tid, last_read) AS ("
+                 f"SELECT p.id, c.id, c.last_read_at FROM page p "
+                 f"JOIN {_q('conversations')} c "
+                 f"ON c.id = p.id OR c.session_id = p.id)")
+        source = (f"page p JOIN threads t ON t.root_id = p.id "
+                  f"JOIN {_q('gdag_nodes')} g INDEXED BY idx_gdag_conv "
+                  f"ON json_extract(g.props, '$.conversation_id') = t.tid")
+        group = "p.id"
+        unread_time = "t.last_read"
+        preview_partition = "t.root_id"
+    else:
+        scope = ""
+        source = (f"page p JOIN {_q('gdag_nodes')} g INDEXED BY idx_gdag_conv "
+                  f"ON json_extract(g.props, '$.conversation_id') = p.id")
+        group = "p.id"
+        unread_time = "p.last_read"
+        preview_partition = "json_extract(g.props, '$.conversation_id')"
 
     stats_sql = (
-        f"{page} "
-        f"SELECT p.id AS cid, "
+        f"{page}{scope} "
+        f"SELECT {group} AS cid, "
         f"  MAX(CASE WHEN json_extract(g.props, '$.by') = 'assistant' "
         f"           THEN g.created_at END) AS last_assistant_at, "
         f"  SUM(CASE WHEN json_extract(g.props, '$.by') = 'assistant' "
         f"           AND json_extract(g.props, '$.stage') = 'exploration' "
         f"           AND COALESCE(json_extract(g.props, '$.kind'), '') <> 'checkpoint' "
-        f"           AND g.created_at > COALESCE(p.last_read, '') "
+        f"           AND g.created_at > COALESCE({unread_time}, '') "
         f"           THEN 1 ELSE 0 END) AS unread_count "
-        f"FROM page p JOIN {_q('gdag_nodes')} g INDEXED BY idx_gdag_conv "
-        f"  ON json_extract(g.props, '$.conversation_id') = p.id "
+        f"FROM {source} "
         f"WHERE g.type = 'fact' "
-        f"GROUP BY p.id"
+        f"GROUP BY {group}"
     )
     preview_sql = (
-        f"{page} "
+        f"{page}{scope} "
         f"SELECT cid, content, n FROM ("
-        f"  SELECT json_extract(g.props, '$.conversation_id') AS cid, "
+        f"  SELECT {preview_partition} AS cid, "
         f"    json_extract(g.props, '$.content') AS content, "
-        f"    COUNT(*) OVER (PARTITION BY json_extract(g.props, '$.conversation_id')) AS n, "
-        f"    ROW_NUMBER() OVER (PARTITION BY json_extract(g.props, '$.conversation_id') "
+        f"    COUNT(*) OVER (PARTITION BY {preview_partition}) AS n, "
+        f"    ROW_NUMBER() OVER (PARTITION BY {preview_partition} "
         f"      ORDER BY g.created_at DESC, g.rowid DESC) AS rn "
-        f"  FROM page p JOIN {_q('gdag_nodes')} g INDEXED BY idx_gdag_conv "
-        f"    ON json_extract(g.props, '$.conversation_id') = p.id "
+        f"  FROM {source} "
         f"  WHERE g.type = 'fact' "
         f"    AND json_extract(g.props, '$.stage') = 'exploration' "
         f"    AND COALESCE(json_extract(g.props, '$.kind'), '') "
@@ -6596,7 +6793,10 @@ def list_conversations(workspace_id: Optional[str] = None,
                        limit: int = 50, offset: int = 0,
                        keyword: Optional[str] = None,
                        source: Optional[str] = None,
-                       include_archived: bool = False) -> list:
+                       forked_from_id: Optional[str] = None,
+                       include_archived: bool = False,
+                       session_id: Optional[str] = None,
+                       roots_only: bool = False) -> list:
     """对话列表（工作区 / 角色 / 关键字 / 来源过滤；附消息数 + 最后一条预览）。
 
     **排序 = 进行中优先，两组各自按时间倒序**：有活跃 run（queued/running/waiting）
@@ -6604,6 +6804,10 @@ def list_conversations(workspace_id: Optional[str] = None,
     同一组内按 updated_at 倒序（最近活动在最上）。
 
     每条带 `active`（进行中）/ `has_active_goal` / `run_status` 字段，前端据此分组。
+
+    `roots_only` = 只列会话根（会话中心 / 角色详情用）；`session_id` = 列某个根
+    会话下的全部栏目（窗口左侧栏目栏用）。根的统计（运行 / 未读 / 更新时间）
+    按整棵会话聚合，栏目则保持自己的口径。
 
     source='task_result' = 后台任务结果会话（收件箱）。
     默认排除自动归档（30 天无活动）的对话；include_archived=True 时包含。
@@ -6613,29 +6817,57 @@ def list_conversations(workspace_id: Optional[str] = None,
     from services.agent_zero.stores.zero_store import _q
 
     archive_stale_conversations()
+    scope_expr = "COALESCE(NULLIF(c.session_id, ''), c.id)"
     # live = 正在跑（有活跃 run）或正在追（active 目标）。用子查询算在 SQL 里，
     # 这样分页仍然正确：不能取完一页再在 Python 里排序。
-    live_expr = (
-        f"CASE WHEN EXISTS (SELECT 1 FROM {_q('conversation_runs')} r "
-        f"  WHERE r.conversation_id = c.id "
-        f"  AND r.status IN ('queued','running','waiting')) "
-        f"OR EXISTS (SELECT 1 FROM {_q('goals')} gg "
-        f"  WHERE gg.conversation_id = c.id AND gg.status = 'active') "
-        f"THEN 1 ELSE 0 END"
-    )
+    if roots_only:
+        live_expr = (
+            f"CASE WHEN EXISTS (SELECT 1 FROM {_q('conversation_runs')} r "
+            f"  JOIN {_q('conversations')} tc ON tc.id = r.conversation_id "
+            f"  WHERE COALESCE(NULLIF(tc.session_id, ''), tc.id) = {scope_expr} "
+            f"  AND r.status IN ('queued','running','waiting')) "
+            f"OR EXISTS (SELECT 1 FROM {_q('goals')} gg "
+            f"  JOIN {_q('conversations')} tg ON tg.id = gg.conversation_id "
+            f"  WHERE COALESCE(NULLIF(tg.session_id, ''), tg.id) = {scope_expr} "
+            f"  AND gg.status = 'active') "
+            f"THEN 1 ELSE 0 END"
+        )
+        running_count_expr = (
+            f"(SELECT COUNT(*) FROM {_q('conversation_runs')} r "
+            f"  JOIN {_q('conversations')} tc ON tc.id = r.conversation_id "
+            f"  WHERE COALESCE(NULLIF(tc.session_id, ''), tc.id) = {scope_expr} "
+            f"  AND r.status IN ('queued','running','waiting'))"
+        )
+        sort_expr = (
+            f"(SELECT MAX(tc.updated_at) FROM {_q('conversations')} tc "
+            f"  WHERE COALESCE(NULLIF(tc.session_id, ''), tc.id) = {scope_expr})"
+        )
+    else:
+        live_expr = (
+            f"CASE WHEN EXISTS (SELECT 1 FROM {_q('conversation_runs')} r "
+            f"  WHERE r.conversation_id = c.id "
+            f"  AND r.status IN ('queued','running','waiting')) "
+            f"OR EXISTS (SELECT 1 FROM {_q('goals')} gg "
+            f"  WHERE gg.conversation_id = c.id AND gg.status = 'active') "
+            f"THEN 1 ELSE 0 END"
+        )
+        running_count_expr = (
+            f"(SELECT COUNT(*) FROM {_q('conversation_runs')} r "
+            f"  WHERE r.conversation_id = c.id "
+            f"  AND r.status IN ('queued','running','waiting'))"
+        )
+        sort_expr = "c.updated_at"
     # 未读 / 消息数不在主查询里做相关子查询：那是「每个会话各扫一遍 gdag_nodes」，
     # 300 个会话就要扫 300 次全表（实测 3.6s）。主查询只取分页需要的最小列，
     # 未读与预览在拿到这一页 id 之后按页批量算，见 _page_message_stats。
-    running_count_expr = (
-        f"(SELECT COUNT(*) FROM {_q('conversation_runs')} r "
-        f"  WHERE r.conversation_id = c.id "
-        f"  AND r.status IN ('queued','running','waiting'))"
-    )
     base = (f"SELECT c.id, c.workspace_id, c.bound_workspace_id, c.workspace_custom, "
-            f"c.role_id, c.team_id, "
+            f"c.role_id, c.team_id, c.session_id, "
+            f"{scope_expr} AS session_root_id, "
+            f"(SELECT COUNT(*) FROM {_q('conversations')} tc "
+            f"  WHERE tc.session_id = {scope_expr} OR tc.id = {scope_expr}) AS thread_count, "
             f"c.zone, c.source, c.title, "
             f"c.archived, c.forked_from_id, c.forked_from_message_id, "
-            f"c.created_by, c.created_at, c.updated_at, c.last_read_at, "
+            f"c.created_by, c.created_at, {sort_expr} AS sort_at, c.last_read_at, "
             f"{running_count_expr} AS running_count, "
             f"(SELECT r2.status FROM {_q('conversation_runs')} r2 "
             f"  WHERE r2.conversation_id = c.id "
@@ -6650,6 +6882,11 @@ def list_conversations(workspace_id: Optional[str] = None,
                               "offset": max(0, int(offset))}
     if not include_archived:
         base += " AND c.archived = 0"
+    if roots_only:
+        base += " AND COALESCE(c.session_id, '') = ''"
+    if session_id:
+        base += f" AND {scope_expr} = :sid"
+        params["sid"] = str(session_id)
     if workspace_id:
         base += " AND c.workspace_id = :wid"
         params["wid"] = workspace_id
@@ -6662,6 +6899,10 @@ def list_conversations(workspace_id: Optional[str] = None,
     if source:
         base += " AND c.source = :src"
         params["src"] = source
+    if forked_from_id:
+        # 分支树：查某条会话（两跳内的直接子分支）。
+        base += " AND c.forked_from_id = :fork"
+        params["fork"] = forked_from_id
     if keyword:
         # 用 json_extract 而不是 ->>：表达式索引建在 json_extract 上，->> 命中不了。
         base += (f" AND EXISTS (SELECT 1 FROM {_q('gdag_nodes')} g "
@@ -6673,7 +6914,7 @@ def list_conversations(workspace_id: Optional[str] = None,
         params["kw"] = f"%{keyword}%"
     # 进行中在前（is_live DESC），组内时间倒序。
     sql = (f"SELECT * FROM ({base}) t "
-           f"ORDER BY t.is_live DESC, t.updated_at DESC, t.created_at DESC, t.id "
+           f"ORDER BY t.is_live DESC, t.sort_at DESC, t.created_at DESC, t.id "
            f"LIMIT :limit OFFSET :offset")
     SessionLocal = get_session_local()
     with SessionLocal() as db:
@@ -6681,8 +6922,13 @@ def list_conversations(workspace_id: Optional[str] = None,
         out = []
         for r in rows:
             item = dict(r)
+            root = str(item.get("session_root_id") or item.get("id") or "")
             item["created_at"] = str(item.get("created_at") or "")
-            item["updated_at"] = str(item.get("updated_at") or item["created_at"])
+            item["updated_at"] = str(item.get("sort_at") or item.get("created_at") or "")
+            item["session_id"] = root
+            item["session_root_id"] = root
+            item["thread_count"] = int(item.get("thread_count") or 1)
+            item.pop("sort_at", None)
             item["active"] = bool(item.pop("is_live", 0))
             item["running_count"] = int(item.get("running_count") or 0)
             item["last_read_at"] = str(item.get("last_read_at") or "")
@@ -6692,7 +6938,8 @@ def list_conversations(workspace_id: Optional[str] = None,
             item["has_active_goal"] = item.pop("goal_status", None) == "active"
             out.append(item)
         # 未读 / 消息数 / 最后一条预览：整页两次聚合查询，不再逐条 N+1。
-        _page_message_stats(db, out)
+        # 根会话按整棵会话（含栏目）统计；列栏目时按各自的会话口径。
+        _page_message_stats(db, out, by_session=roots_only)
     # token 用量：整页一次聚合（输入 / 输出 / 速度 / 缓存），列表卡片直接展示。
     from services.agent_zero.services import usage_service
 
@@ -6704,17 +6951,23 @@ def list_conversations(workspace_id: Optional[str] = None,
 
 
 def mark_conversation_read(conv_id: str) -> bool:
-    """把会话的已读水位推到当前时间（打开会话 / 本轮回复收尾时调用）。"""
+    """把会话的已读水位推到当前时间（打开会话 / 本轮回复收尾时调用）。
+
+    栏目共享同一个会话：标记已读时整棵会话（根 + 所有栏目）一起推进。
+    """
     from sqlalchemy import text
     from services.agent_zero.database import get_session_local
     from services.agent_zero.stores.zero_store import _q
 
+    conv = get_conversation(conv_id) or {}
+    root = str(conv.get("session_root_id") or conv_id)
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         res = db.execute(
             text(f"UPDATE {_q('conversations')} "
-                 f"SET last_read_at = datetime('now','localtime') WHERE id = :id"),
-            {"id": conv_id},
+                 f"SET last_read_at = datetime('now','localtime') "
+                 f"WHERE id = :root OR session_id = :root"),
+            {"root": root},
         )
         db.commit()
         return bool(res.rowcount)
@@ -6742,7 +6995,10 @@ def count_conversations(workspace_id: Optional[str] = None,
                         team_id: Optional[str] = None,
                         keyword: Optional[str] = None,
                         source: Optional[str] = None,
-                        include_archived: bool = False) -> int:
+                        forked_from_id: Optional[str] = None,
+                        include_archived: bool = False,
+                        session_id: Optional[str] = None,
+                        roots_only: bool = False) -> int:
     """对话总数（与 list_conversations 同过滤条件）。"""
     from sqlalchemy import text
     from services.agent_zero.database import get_session_local
@@ -6751,7 +7007,13 @@ def count_conversations(workspace_id: Optional[str] = None,
     sql = f"SELECT COUNT(*) FROM {_q('conversations')} WHERE 1=1"
     if not include_archived:
         sql += " AND archived = 0"
+    if roots_only:
+        sql += " AND COALESCE(session_id, '') = ''"
+    if session_id:
+        sql += " AND COALESCE(NULLIF(session_id, ''), id) = :sid"
     params: Dict[str, Any] = {}
+    if session_id:
+        params["sid"] = str(session_id)
     if workspace_id:
         sql += " AND workspace_id = :wid"
         params["wid"] = workspace_id
@@ -6772,6 +7034,9 @@ def count_conversations(workspace_id: Optional[str] = None,
     if source:
         sql += " AND source = :src"
         params["src"] = source
+    if forked_from_id:
+        sql += " AND forked_from_id = :fork"
+        params["fork"] = forked_from_id
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         n = db.execute(text(sql), params).scalar()
@@ -7318,10 +7583,27 @@ def delete_conversations(conv_ids: List[str]) -> int:
 
 
 def delete_conversation(conv_id: str) -> bool:
-    """删除对话（连同其探索态消息节点与临时角色）。"""
+    """删除对话（连同其探索态消息节点与临时角色）。
+
+    删除会话根时把整棵会话的栏目一起删掉；删除单个栏目只影响该栏目。
+    """
     from sqlalchemy import text
     from services.agent_zero.database import get_session_local
     from services.agent_zero.stores.zero_store import _q
+
+    meta = get_conversation(conv_id) or {}
+    if str(meta.get("session_root_id") or conv_id) == conv_id:
+        SessionLocal = get_session_local()
+        with SessionLocal() as db:
+            child_ids = [str(row[0]) for row in db.execute(
+                text(f"SELECT id FROM {_q('conversations')} WHERE session_id = :cid"),
+                {"cid": conv_id},
+            ).all()]
+        for child_id in child_ids:
+            try:
+                delete_conversation(child_id)
+            except Exception:
+                logger.exception("删除栏目失败 conv=%s", child_id)
 
     old_team_id = ""
     try:
@@ -7356,6 +7638,10 @@ def delete_conversation(conv_id: str) -> bool:
             text(f"DELETE FROM {_q('conversations')} WHERE id = :id"), {"id": conv_id}
         )
         db.commit()
+        if res.rowcount:
+            from services.agent_zero.task_layer import tool_jobs
+
+            tool_jobs.kill_conversation(conv_id, reason="会话已删除")
         attachment_service.remove_conversation(conv_id)
         if old_team_id:
             try:

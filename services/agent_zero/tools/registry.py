@@ -534,6 +534,42 @@ TOOL_DEFS: List[ToolDef] = [
         gated=False,
     ),
     ToolDef(
+        "session_manage", ("session_command", "conversation_command", "chat_command"),
+        name="会话指令",
+        description=(
+            "执行当前会话的界面 / 系统指令。**用户用自然语言提出这些操作时直接调用**，"
+            "不要只口头解释或让用户去点界面：\n"
+            "- clear：清空模型上下文（聊天历史仍保留，可回看）；scope=current 只清当前"
+            "会话（默认），scope=all 清空所有会话；\n"
+            "- compact：压缩上下文；new：新建会话；rename：重命名当前会话（title）；\n"
+            "- delete：删除当前会话；clean：彻底清空当前会话历史；stop：停止当前运行；\n"
+            "- work：把当前会话转成工单（title 可空）；read：标记为已读；\n"
+            "- model：聚焦模型选择器；attach：选择附件；conv：返回会话列表；\n"
+            "- settings / about：打开设置 / 关于；theme：切换明暗主题。\n"
+            "删除 / 清空 / 重命名等界面动作会沿用界面的确认流程；用户只是询问做法"
+            "（如「怎么清空上下文」）时不要调用。"
+        ),
+        parameters=_obj({
+            "action": {
+                "type": "string",
+                "enum": ["clear", "compact", "new", "rename", "delete", "clean",
+                         "stop", "work", "read", "model", "attach", "conv",
+                         "settings", "about", "theme"],
+                "description": "要执行的会话指令",
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["current", "all"],
+                "description": "clear 的范围：current（默认）= 当前会话，all = 所有会话",
+            },
+            "title": {
+                "type": "string",
+                "description": "rename 的新标题；work 的工单标题（可空）",
+            },
+        }, ["action"]),
+        gated=False,
+    ),
+    ToolDef(
         "role_manage", ("role_admin",),
         name="角色库",
         description=(

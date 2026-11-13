@@ -1,4 +1,7 @@
+import type { InjectionKey } from 'vue'
 import { API_PREFIX, apiUrl } from '@/api/client'
+
+export const conversationImageSource: InjectionKey<(src: string) => string> = Symbol('conversationImageSource')
 
 export type ConversationLink =
   | { kind: 'web'; title: string; url: string }

@@ -26,4 +26,14 @@ describe('markdown rendering', () => {
     expect(html).toContain('href="#"')
   })
 
+  it('routes conversation images through the file resolver and leaves unsupported files clickable', () => {
+    const html = renderMarkdown('![图](art/chart.png) ![矢量图](art/chart.svg)', (src) => (
+      src.endsWith('.png') ? '/api/agent-zero/conversations/c1/link-file?path=art%2Fchart.png' : ''
+    ))
+    const template = document.createElement('template')
+    template.innerHTML = html
+    expect(template.content.querySelector('img')?.getAttribute('src'))
+      .toBe('/api/agent-zero/conversations/c1/link-file?path=art%2Fchart.png')
+    expect(template.content.querySelector('a')?.getAttribute('data-preview-href')).toBe('art/chart.svg')
+  })
 })

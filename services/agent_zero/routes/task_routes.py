@@ -42,13 +42,18 @@ class CreateConvBody(BaseModel):
     thinking_level: Optional[str] = None
     permission_mode: Optional[str] = None
     run_mode: Optional[str] = None
+    # 栏目：挂在已有会话根下；为空 = 新会话（自己就是根）。
+    session_id: Optional[str] = None
 
 
 @router.post("/conversations")
 def create_conversation(body: CreateConvBody):
     zone = str(body.zone or "").strip() or None
+    # 栏目挂在已有会话根下：角色 / 群组 / 工作区都从根继承，调用方不用重复传。
+    if body.session_id:
+        role_id = body.role_id
     # AtlasX 只服务全局 Agent；普通会话默认落到「通用助手」。
-    if zone == conversation.GLOBAL_AGENT_ZONE:
+    elif zone == conversation.GLOBAL_AGENT_ZONE:
         role_id = body.role_id or GLOBAL_ROLE_ID
     elif body.team_id:
         # 群聊的主持由群组决定；显式 role_id 仍然优先。
@@ -62,6 +67,7 @@ def create_conversation(body: CreateConvBody):
             bound_workspace_id=body.bound_workspace_id,
             model_code=body.model_code, thinking_level=body.thinking_level,
             permission_mode=body.permission_mode, run_mode=body.run_mode,
+            session_id=body.session_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -403,7 +409,7 @@ async def conv_message_run(conv_id: str, body: MessageBody):
             attachments = attachment_service.process_uploads(
                 conv_id,
                 [a.model_dump() for a in body.attachments],
-                allow_images=conversation.chat_vision_for(conv),
+                allow_images=True,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -470,40 +476,13 @@ async def compact_conversation(conv_id: str):
     没有可折叠历史时只返回原因，不报错；运行中的会话要求先停止，避免
     压缩和正在执行的 run 同时改同一份上下文。
     """
-    conv = conversation.get_conversation(conv_id)
-    if not conv:
+    if not conversation.get_conversation(conv_id):
         raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
-    if run_service.running_run(conv_id):
-        raise HTTPException(status_code=409, detail="当前会话正在运行，先停止再压缩")
     try:
-        role = zero_store.get_role(str(conv.get("role_id") or "")) or {}
-        models = conversation._chat_models(role) or {"loop": "default", "fallback": "default"}
-        messages = conversation._history_messages(conv_id)
-        from services.agent_zero.runtime.zero import compress
-
-        decision = await compress.decide(
-            messages, models=models, force=True, reason="manual")
-        if not decision.get("should_compress"):
-            return {"code": 0, "data": {
-                "compressed": False,
-                "reason": decision.get("reason") or "nothing",
-                "before_tokens": int(decision.get("current") or 0),
-                "after_tokens": int(decision.get("current") or 0),
-            }}
-        result = await compress.apply(
-            messages, models=models, decision=decision, force_summary=True)
-        if result.get("summary"):
-            conversation.persist_checkpoint(
-                conv, str(result.get("summary") or ""),
-                str(result.get("source") or "manual"))
-        return {"code": 0, "data": {
-            "compressed": bool(result.get("compressed")),
-            "source": result.get("source") or "",
-            "before_tokens": int(result.get("original_tokens") or 0),
-            "after_tokens": int(result.get("tokens") or 0),
-            "pruned_tool_outputs": int(result.get("pruned_tool_outputs") or 0),
-            "dropped_exchanges": int(result.get("dropped_exchanges") or 0),
-        }}
+        data = await conversation.compact_context(conv_id)
+        return {"code": 0, "data": data}
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         logger.warning("手动压缩失败: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"压缩失败: {e}")
@@ -879,21 +858,28 @@ def list_conversations(workspace_id: Optional[str] = None,
                        role_id: Optional[str] = None,
                        team_id: Optional[str] = None,
                        keyword: Optional[str] = None,
+                       forked_from_id: Optional[str] = None,
+                       session_id: Optional[str] = None,
+                       roots_only: bool = False,
                        limit: int = 50, offset: int = 0,
                        include_archived: bool = False):
     items = conversation.list_conversations(
         workspace_id=workspace_id, role_id=role_id, team_id=team_id,
         keyword=keyword, limit=limit, offset=offset,
-        include_archived=include_archived)
+        forked_from_id=forked_from_id,
+        include_archived=include_archived,
+        session_id=session_id, roots_only=roots_only)
     total = conversation.count_conversations(
         workspace_id=workspace_id, role_id=role_id, team_id=team_id,
-        keyword=keyword, include_archived=include_archived)
+        keyword=keyword, forked_from_id=forked_from_id,
+        include_archived=include_archived,
+        session_id=session_id, roots_only=roots_only)
     return {"code": 0, "data": {"items": items, "total": total,
                                 "limit": limit, "offset": offset}}
 
 
 @router.get("/conversations/{conv_id}")
-def get_conversation(conv_id: str):
+def get_conversation(conv_id: str, messages: bool = True):
     conv = conversation.get_conversation(conv_id)
     if not conv:
         raise HTTPException(status_code=404, detail=f"对话不存在: {conv_id}")
@@ -903,7 +889,7 @@ def get_conversation(conv_id: str):
     usage = conversation.usage_total(conv_id)
     return {"code": 0, "data": {
         **conv,
-        "messages": conversation.list_messages(conv_id),
+        "messages": conversation.list_messages(conv_id) if messages else [],
         # usage 与 usage_total 同源：新前端读 usage，旧字段保留兼容。
         "usage": usage,
         "usage_total": usage,
@@ -1010,25 +996,26 @@ def preview_conversation_attachment(conv_id: str, attachment_id: str,
     from urllib.parse import quote
 
     from services.agent_zero.services import attachment_service
-    from services.agent_zero.services.preview_service import OFFICE_EXT, preview_path
+    from services.agent_zero.services.preview_service import HTML_EXT, OFFICE_EXT, SVG_EXT, preview_path
 
     path, meta = attachment_service.resolve_attachment(conv_id, attachment_id)
     if path is None:
         raise HTTPException(status_code=404, detail="附件不存在")
     limit = max(1_000, min(int(max_chars or 120_000), 400_000))
     name = str(meta.get("name") or path.name)
-    office = preview_path(path, name) if Path(name).suffix.lower() in OFFICE_EXT else {}
-    text = (office.get("text", "")[:limit] if office
+    ext = Path(name).suffix.lower()
+    rendered = preview_path(path, name) if ext in OFFICE_EXT | HTML_EXT | SVG_EXT else {}
+    text = (rendered.get("text", "")[:limit] if rendered
             else attachment_service.read_attachment_text(conv_id, meta, max_chars=limit))
     return {"code": 0, "data": {
-        **office,
+        **rendered,
         "id": attachment_id,
         "name": name,
         "mime": str(meta.get("mime") or "application/octet-stream"),
         "size": int(meta.get("size") or path.stat().st_size),
-        "kind": office.get("kind") or str(meta.get("kind") or "file"),
+        "kind": rendered.get("kind") if ext in OFFICE_EXT else str(meta.get("kind") or "file"),
         "text": text,
-        "truncated": bool(office.get("truncated") or meta.get("truncated") or len(text) >= limit),
+        "truncated": bool(rendered.get("truncated") or meta.get("truncated") or len(text) >= limit),
         "url": (f"/api/agent-zero/conversations/{quote(str(conv_id), safe='')}"
                 f"/attachments/{quote(str(attachment_id), safe='')}"),
     }}
@@ -1529,8 +1516,7 @@ def list_conversation_processes(conv_id: str):
             "kind": tool_activity.kind_for(str(job.get("name") or "")),
             "name": job.get("name"),
             "status": job.get("status"),
-            "elapsed_s": round(max(0.0, time.time()
-                                   - float(job.get("started_at") or 0)), 1),
+            "elapsed_s": tool_jobs.summary(job)["elapsed_s"],
             "started_at": float(job.get("started_at") or 0),
             "args": job.get("args") or {},
             "run_id": job.get("run_id") or "",

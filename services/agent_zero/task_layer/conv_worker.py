@@ -201,7 +201,7 @@ class ConversationRunWorker:
             run = run_service.get_run(run_id) or {}
             conv_id = str(run.get("conversation_id") or "")
             if conv_id:
-                n = tool_jobs.kill_conversation(conv_id, reason="运行已停止")
+                n = tool_jobs.kill_conversation(conv_id, reason="运行已停止", include_manual=False)
                 if n:
                     logger.info("停止 run=%s 时一并终止 %d 个后台工具", run_id, n)
         except Exception:

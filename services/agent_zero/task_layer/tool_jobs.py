@@ -35,6 +35,7 @@ import json
 import logging
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -138,17 +139,28 @@ async def _watch(job_id: str) -> None:
         return
     try:
         value = await task
+        if job["status"] == "killed":
+            return
+        if job.get("manual"):
+            job["exit_code"] = value.exit_code
+            _finish(job, status="done" if value.ok else "failed")
+            return
         text = value if isinstance(value, str) else json.dumps(
             value, ensure_ascii=False, default=str)
         text = await _post_hook(job, "done", text)
-        _finish(job, status="done", result=text)
+        if job["status"] != "killed":
+            _finish(job, status="done", result=text)
     except asyncio.CancelledError:
-        _finish(job, status="killed", error="已停止（用户停止运行或主动 kill）")
+        _finish(job, status="killed", error=job.get("error") or "已停止")
     except Exception as exc:                      # noqa: BLE001
+        if job["status"] == "killed":
+            return
         logger.warning("后台工具 %s 执行失败: %s", job.get("name"), exc)
         msg = f"{type(exc).__name__}: {exc}"
-        msg = await _post_hook(job, "failed", msg)
-        _finish(job, status="failed", error=msg)
+        if not job.get("manual"):
+            msg = await _post_hook(job, "failed", msg)
+        if job["status"] != "killed":
+            _finish(job, status="failed", error=msg)
 
 
 def adopt(*, conversation_id: str, run_id: str, name: str,
@@ -189,13 +201,50 @@ def start(*, conversation_id: str, run_id: str, name: str,
                  args=args, task=task, call_id=call_id)
 
 
+def start_script(conversation_id: str, directory: Path, name: str, command: str) -> Dict[str, Any]:
+    from services.agent_zero.runtime.zero.sandbox.subprocess_sandbox import MAX_OUTPUT, SubprocessSandbox
+
+    command = command.strip()
+    if not command or "\0" in command:
+        raise ValueError("请输入有效的脚本命令")
+    if sum(1 for job in _JOBS.values() if job.get("manual") and job["status"] == "running") >= 20:
+        raise ValueError("同时运行的脚本已达到 20 个")
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    truncated = set()
+
+    def record(channel: str, chunk: bytes) -> None:
+        buffer = output[channel]
+        buffer.extend(chunk)
+        if len(buffer) > MAX_OUTPUT:
+            del buffer[:-MAX_OUTPUT]
+            truncated.add(channel)
+
+    sandbox = SubprocessSandbox(directory, timeout_s=0, on_output=record)
+    job = start(conversation_id=conversation_id, run_id="", name=name.strip() or "脚本",
+                coro=sandbox.run_shell(command), args={"cmd": command, "cwd": str(directory)})
+    job.update(manual=True, output=output, truncated_output=truncated)
+    return job
+
+
+async def stop_manual_jobs() -> None:
+    loop = asyncio.get_running_loop()
+    pending = []
+    for job in list(_JOBS.values()):
+        task = _TASKS.get(job["id"])
+        if job.get("manual") and task is not None and task.get_loop() is loop and not task.done():
+            if job["status"] == "running":
+                kill(job["id"], reason="应用已关闭")
+            pending.append(task)
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
 def get(job_id: str) -> Optional[Dict[str, Any]]:
     return _JOBS.get(str(job_id or ""))
 
 
-def list_jobs(conversation_id: str, running_only: bool = False) -> List[Dict[str, Any]]:
+def list_jobs(conversation_id: Optional[str], running_only: bool = False) -> List[Dict[str, Any]]:
     jobs = [j for j in _JOBS.values()
-            if j.get("conversation_id") == conversation_id
+            if (conversation_id is None or j.get("conversation_id") == conversation_id)
             and (not running_only or j.get("status") == "running")]
     jobs.sort(key=lambda j: float(j.get("started_at") or 0))
     return jobs
@@ -206,20 +255,23 @@ def kill(job_id: str, reason: str = "模型主动终止") -> bool:
     job = _JOBS.get(str(job_id or ""))
     if task is None or job is None:
         return False
-    if job.get("status") != "running":
+    if job.get("status") != "running" or task.get_loop().is_closed():
         return False
-    task.cancel()
     job["status"] = "killed"
     job["error"] = reason
     job["finished_at"] = time.time()
     job["elapsed_s"] = round(job["finished_at"] - float(job.get("started_at") or 0), 1)
+    task.get_loop().call_soon_threadsafe(task.cancel)
     return True
 
 
-def kill_conversation(conversation_id: str, reason: str = "运行已停止") -> int:
+def kill_conversation(conversation_id: str, reason: str = "运行已停止", *,
+                      include_manual: bool = True) -> int:
     """对话停止时把它名下的后台工具一并杀掉（否则「停不下来」）。"""
     n = 0
     for job in list_jobs(conversation_id, running_only=True):
+        if not include_manual and job.get("manual"):
+            continue
         if kill(job["id"], reason):
             n += 1
     return n
@@ -230,13 +282,19 @@ def summary(job: Dict[str, Any], *, with_result: bool = False) -> Dict[str, Any]
         "job_id": job["id"],
         "name": job.get("name"),
         "status": job.get("status"),
-        "elapsed_s": round(time.time() - float(job.get("started_at") or 0), 1),
+        "elapsed_s": round((job.get("finished_at") or time.time()) - job["started_at"], 1),
         "args": job.get("args") or {},
     }
     err = str(job.get("error") or "")
     if err:
         out["error"] = err
-    if with_result and job.get("status") != "running":
+    if with_result and job.get("manual"):
+        from services.agent_zero.runtime.zero.sandbox.subprocess_sandbox import decode_output
+
+        out.update({channel: decode_output(bytes(raw)) for channel, raw in job["output"].items()})
+        out["output_truncated"] = bool(job["truncated_output"])
+        out["exit_code"] = job.get("exit_code")
+    elif with_result and job.get("status") != "running":
         out["result"] = _clip(str(job.get("result") or ""))
     elif job.get("status") == "running":
         out["note"] = "仍在运行；可继续别的工作，稍后再查，或用 action=kill 终止"

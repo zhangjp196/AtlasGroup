@@ -210,6 +210,9 @@ class Conversation(Base):
     last_read_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
     # 绑定的 Agent 团队（可空）
     team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 栏目归属：会话根下面可以挂无限个独立栏目（各自消息 / 上下文）。
+    # 根会话为空；栏目填所属根会话的 id。空值兼容旧库，等价于「自己就是根」。
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 会话分支来源：从哪条会话 / 哪条消息 fork 出来（普通会话为空）
     forked_from_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     forked_from_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -220,6 +223,51 @@ class Conversation(Base):
     updated_at: Mapped[object] = mapped_column(
         DateTime, server_default=text("datetime('now','localtime')"), nullable=False
     )
+
+
+class ConversationBot(Base):
+    """机器人长连接（全局资源）。聊天到会话的路由见 `BotRoute`。
+
+    `conversation_id` / `peer_id` 是旧版「一个机器人绑定一个会话、一个聊天」
+    留下的列，只为兼容已有库保留，不再参与路由：conversation_id 写全局 Agent
+    会话（满足旧库外键），peer_id 记录最近活跃的聊天。
+    """
+
+    __tablename__ = "conversation_bots"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False, default="", index=True)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    bot_id: Mapped[str] = mapped_column(Text, nullable=False)
+    secret: Mapped[str] = mapped_column(Text, nullable=False)
+    peer_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    __table_args__ = (Index("uq_conversation_bots_account", "provider", "bot_id", unique=True),)
+
+
+class BotRoute(Base):
+    """机器人当前绑定的会话（一个机器人同时只绑定一个）。
+
+    `peer_id` 只记录最近一次收到消息的聊天，用于设置页展示；路由只按
+    `bot_id` 查，不按聊天分流。
+    """
+
+    __tablename__ = "bot_routes"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    bot_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("conversation_bots.id", ondelete="CASCADE")
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    peer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # 机器人当前使用的栏目：绑定会话根时，机器人消息默认落到这里，而不是根会话；
+    # /new 换栏目时只改这一列，绑定关系（会话根）不变。
+    lane_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
+    )
+    __table_args__ = (Index("uq_bot_routes_bot", "bot_id", unique=True),)
 
 
 class ConversationRun(Base):
@@ -762,6 +810,7 @@ ENSURE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_team_tasks_conv ON team_tasks(conversation_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_team_tasks_status ON team_tasks(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_conversations_archived ON conversations(workspace_id, archived, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_workspaces_archived ON workspaces(archived)",
     "CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, ts)",

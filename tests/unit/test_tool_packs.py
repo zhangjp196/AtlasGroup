@@ -147,9 +147,9 @@ def test_pack_specs_keep_workspace_tools_without_dir():
     names = {s["function"]["name"] for s in specs}
     assert "fs" in names
     assert {"net", "memory", "plan", "dev", "skill", "mcp"} <= names
-    # 独立工具：shell / ask_user 仍在，workspace 被过滤
+    # 独立工具：shell / ask_user / session_manage 仍在，workspace 被过滤
     chat_only = packs.unpacked_codes(registry.known_codes(), has_working_dir=False)
-    assert chat_only == ["shell", "ask_user"]
+    assert chat_only == ["shell", "ask_user", "session_manage"]
     # dev 包在纯聊天工作区里动作齐全（job / vcs / graph）
     dev = next(s for s in specs if s["function"]["name"] == "dev")
     assert set(dev["function"]["parameters"]["properties"]["op"]["enum"]) == {

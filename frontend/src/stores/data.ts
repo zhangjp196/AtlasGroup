@@ -81,7 +81,7 @@ export const useDataStore = defineStore('data', () => {
     try {
       const [ws, conv, roleList, teamList, deptList, modelData] = await Promise.all([
         api<ListResponse<Workspace>>('/workspaces?include_archived=true').catch(() => ({ items: [] })),
-        api<ListResponse<Conversation>>('/conversations?limit=80').catch(() => ({ items: [] })),
+        api<ListResponse<Conversation>>('/conversations?limit=80&roots_only=1').catch(() => ({ items: [] })),
         api<ListResponse<Role>>('/roles').catch(() => ({ items: [] })),
         api<ListResponse<Team>>('/teams?kind=all').catch(() => ({ items: [] })),
         api<ListResponse<Department>>('/departments').catch(() => ({ items: [] })),
@@ -142,7 +142,7 @@ export const useDataStore = defineStore('data', () => {
 
   async function loadConversations(): Promise<void> {
     try {
-      const result = await api<ListResponse<Conversation>>('/conversations?limit=80')
+      const result = await api<ListResponse<Conversation>>('/conversations?limit=80&roots_only=1')
       const items = result.items || []
       if (JSON.stringify(conversations.value) !== JSON.stringify(items)) conversations.value = items
     } catch (error) {

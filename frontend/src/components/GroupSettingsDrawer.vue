@@ -6,6 +6,7 @@ import Avatar from '@/components/Avatar.vue'
 import AvatarField from '@/components/AvatarField.vue'
 import Modal from '@/components/Modal.vue'
 import WorkEditorDialog, { type WorkSeed } from '@/components/WorkEditorDialog.vue'
+import SessionList from '@/components/chat/SessionList.vue'
 import { api } from '@/api/client'
 import type { Conversation, ListResponse, Role, Team, TeamMember } from '@/api/types'
 import { compactNumber } from '@/lib/format'
@@ -26,11 +27,14 @@ const emit = defineEmits<{
   (e: 'saved', id: string): void
   (e: 'deleted', id: string): void
   (e: 'chat', id: string): void
+  (e: 'new-chat', id: string): void
 }>()
 
 const app = useAppStore()
 const data = useDataStore()
 const router = useRouter()
+// 详情按栏目分页：基本 / 成员 / 会话 / 授权 / 危险操作。
+const tab = ref<'basic' | 'members' | 'sessions' | 'grants' | 'danger'>('basic')
 const saving = ref(false)
 const removing = ref(false)
 const grants = ref<ScopeGrant[]>([])
@@ -100,6 +104,7 @@ function loadDraft(team: Team): void {
 
 watch(() => [props.open, props.team?.id], () => {
   if (props.open && props.team) {
+    tab.value = 'basic'
     loadDraft(props.team)
     void loadGrants(props.team.id)
     void loadConversations(props.team.id)
@@ -307,6 +312,11 @@ function openConversation(id: string): void {
   void router.push(`/conv/${encodeURIComponent(id)}`)
 }
 
+/** 会话列表里删除 / 分支 / 已读后刷新群组维度的统计。 */
+function onSessionsChanged(): void {
+  void data.loadAll()
+}
+
 function openWork(): void {
   if (!props.team) return
   const teamId = props.team.id
@@ -339,12 +349,20 @@ function onWorkSaved(): void {
       </header>
 
       <div class="side-drawer-body">
-        <div class="group-mode-hint">
+        <div class="seg drawer-tabs" role="tablist" aria-label="群组栏目">
+          <button class="seg-btn" :class="{ on: tab === 'basic' }" type="button" @click="tab = 'basic'">基本</button>
+          <button class="seg-btn" :class="{ on: tab === 'members' }" type="button" @click="tab = 'members'">成员 {{ totalPeople }}</button>
+          <button class="seg-btn" :class="{ on: tab === 'sessions' }" type="button" @click="tab = 'sessions'">会话 {{ boundConversations.length }}</button>
+          <button class="seg-btn" :class="{ on: tab === 'grants' }" type="button" @click="tab = 'grants'">授权</button>
+          <button class="seg-btn" :class="{ on: tab === 'danger' }" type="button" @click="tab = 'danger'">危险</button>
+        </div>
+
+        <div v-if="tab === 'basic'" class="group-mode-hint">
           群组是所有群聊会话共享的花名册：改成员 / 协作方式 / 工作区会同步到
           {{ boundConversations.length }} 条已绑定会话；不会影响单聊和其他群组。
         </div>
 
-        <div class="group-identity">
+        <div v-if="tab === 'basic'" class="group-identity">
           <AvatarField v-model="draft.avatar" scope="team" :name="draft.name || team?.name || '群'" />
           <div class="group-identity-main">
             <div class="field">
@@ -358,7 +376,7 @@ function onWorkSaved(): void {
           </div>
         </div>
 
-        <section class="group-section">
+        <section v-if="tab === 'members'" class="group-section">
           <div class="group-section-head">
             <h3>群成员</h3>
             <span>{{ totalPeople }} / 13 人 · 群主 1 人</span>
@@ -387,7 +405,7 @@ function onWorkSaved(): void {
           </div>
         </section>
 
-        <section class="group-section">
+        <section v-if="tab === 'basic'" class="group-section">
           <div class="group-section-head">
             <h3>群设置</h3>
             <span>协作方式与发言上限</span>
@@ -414,33 +432,24 @@ function onWorkSaved(): void {
           <div class="group-mode-hint">{{ modeHint }}</div>
         </section>
 
-        <section class="group-section">
+        <section v-if="tab === 'sessions'" class="group-section">
           <div class="group-section-head">
             <h3>群聊会话</h3>
             <span>{{ boundConversations.length }} 条 · {{ compactNumber(groupTokens) }} tokens</span>
+            <button class="btn small" type="button" :disabled="!allMembers.length" @click="emit('new-chat', team?.id || '')">新会话</button>
             <button class="btn small" type="button" :disabled="!allMembers.length" @click="openChat">打开群聊</button>
           </div>
-          <div class="group-member-list">
-            <button
-              v-for="conv in boundConversations"
-              :key="conv.id"
-              class="group-member"
-              type="button"
-              style="width:100%;text-align:left;cursor:pointer"
-              @click="openConversation(conv.id)"
-            >
-              <Avatar :name="conv.title || draft.name || '群聊'" :avatar="draft.avatar" round />
-              <div class="group-member-main">
-                <div class="group-member-name"><span>{{ conv.title || draft.name || '群聊' }}</span></div>
-                <div class="group-member-sub">{{ conv.last_message || '还没有消息' }}</div>
-              </div>
-              <span class="tag grp">{{ conv.run_status || '打开' }}</span>
-            </button>
-            <div v-if="!boundConversations.length" class="group-empty">还没有群聊会话。点「打开群聊」开始第一条。</div>
-          </div>
+          <SessionList
+            v-if="team"
+            :team-id="team.id"
+            :page-size="6"
+            empty-text="还没有群聊会话。点「新会话」开始第一条。"
+            @open="openConversation"
+            @changed="onSessionsChanged"
+          />
         </section>
 
-        <section class="group-section">
+        <section v-if="tab === 'grants'" class="group-section">
           <div class="group-section-head">
             <h3>群组永久授权</h3>
             <span>{{ grantsLoading ? '加载中…' : (grants.length ? `${grants.length} 条` : '未设置') }}</span>
@@ -459,7 +468,7 @@ function onWorkSaved(): void {
           </p>
         </section>
 
-        <section class="group-section group-danger">
+        <section v-if="tab === 'danger'" class="group-section group-danger">
           <div class="group-section-head"><h3>解散群聊</h3></div>
           <p class="group-mode-hint" style="margin:0">删除群组后，绑定会话会退回单聊；群成员角色本身不会被删除。</p>
           <button class="btn danger" type="button" :disabled="removing" @click="removeTeam">{{ removing ? '解散中…' : '解散群聊' }}</button>

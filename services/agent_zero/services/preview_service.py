@@ -198,7 +198,9 @@ def _pptx_preview(target: Path) -> Tuple[str, str]:
         plain: List[str] = []
         for idx, name in enumerate(slides, start=1):
             root = ET.fromstring(zf.read(name))
-            content = root.find(_tag(P_NS, "content"))
+            content = root.find(f"{_tag(P_NS, 'cSld')}/{_tag(P_NS, 'spTree')}")
+            if content is None:
+                content = root.find(_tag(P_NS, "content"))
             parts: List[str] = []
             texts: List[str] = []
             if content is None:
@@ -209,7 +211,7 @@ def _pptx_preview(target: Path) -> Tuple[str, str]:
                     line = "\n".join(r.strip() for r in runs if r.strip())
                     if not line:
                         continue
-                    ph = el.find(f"{_tag(P_NS, 'spPr')}/{_tag(P_NS, 'ph')}")
+                    ph = el.find(f".//{_tag(P_NS, 'ph')}")
                     is_title = ph is not None and (ph.get("type") or "") in ("title", "centerTitle")
                     texts.append(line)
                     parts.append(f"<h3>{_esc(line)}</h3>" if is_title else f"<p>{_esc(line)}</p>")

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ElPopover } from 'element-plus'
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
+import BackgroundJobs from '@/components/BackgroundJobs.vue'
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import SideDrawer from '@/components/SideDrawer.vue'
 import Modal from '@/components/Modal.vue'
@@ -13,12 +14,12 @@ import type { Conversation, SlashCommand, WorkItem } from '@/api/types'
 import { ACTION_COMMANDS } from '@/lib/commands'
 import { conversationIsSharedGroup, conversationMeta, conversationTitle, GLOBAL_AGENT_ZONE } from '@/lib/derive'
 import { compactNumber } from '@/lib/format'
-import { resolveConversationLink, type ConversationLink } from '@/lib/conversationLinks'
+import { conversationImageSource, resolveConversationLink, type ConversationLink } from '@/lib/conversationLinks'
 import { cacheTone, mergeUsage, usageSummary } from '@/lib/usage'
 import { useChat } from '@/composables/useChat'
 import { useAppStore } from '@/stores/app'
 import { useAttentionStore } from '@/stores/attention'
-import { useChatWindowsStore, type ChatPopup, type ChatPresentation } from '@/stores/chatWindows'
+import { useChatWindowsStore, type ChatPopup, type ChatPresentation, type ChatTabState } from '@/stores/chatWindows'
 import { useDataStore } from '@/stores/data'
 import ChatTaskCenter from './ChatTaskCenter.vue'
 import ApprovalCard from './ApprovalCard.vue'
@@ -51,8 +52,25 @@ const props = defineProps<{
   draftParticipants?: string[]
   draftWorkspaceId?: string
   draftTeamId?: string
+  /** 会话窗口 key（栏目操作按窗口处理）。 */
+  windowKey?: string
+  /** 会话根 id：栏目都挂在这个根下面。 */
+  sessionRootId?: string
+  /** 左侧栏目：一根会话下的全部独立对话。 */
+  tabs?: ChatTabState[]
+  activeTabKey?: string
 }>()
-const emit = defineEmits<{ (e: 'close'): void; (e: 'title', title: string): void; (e: 'promoted', conversationId: string): void; (e: 'draft-workspace', workspaceId: string): void; (e: 'update:presentation', mode: ChatPresentation): void; (e: 'update:popup', popup: ChatPopup): void }>()
+const emit = defineEmits<{
+  (e: 'close'): void
+  (e: 'title', title: string): void
+  (e: 'promoted', conversationId: string): void
+  (e: 'draft-workspace', workspaceId: string): void
+  (e: 'update:presentation', mode: ChatPresentation): void
+  (e: 'update:popup', popup: ChatPopup): void
+  (e: 'switch-tab', tabKey: string): void
+  (e: 'add-tab'): void
+  (e: 'draft-text', text: string): void
+}>()
 const floating = computed(() => (props.presentation || 'popup') === 'popup')
 
 const BUILTIN_COMMANDS = ACTION_COMMANDS
@@ -78,6 +96,60 @@ let settleTimers: number[] = []
 // 长会话一次铺 200 条（约 3900 个 DOM 节点）会把首帧拖到 400ms+。
 const MESSAGE_WINDOW = 60
 const messageWindow = ref(MESSAGE_WINDOW)
+// 窗口左侧栏目：一个会话根下的全部独立对话，各自消息 / 上下文互不影响。
+const lanes = computed(() => props.tabs || [])
+const activeLane = computed(() => lanes.value.find((tab) => tab.key === props.activeTabKey))
+const showLanes = computed(() => !isGlobalPanel.value)
+const canAddLane = computed(() => Boolean(props.sessionRootId) && !isGlobalPanel.value)
+const lanesRefreshing = ref(false)
+function switchLane(tab: ChatTabState): void {
+  if (!tab.key || tab.key === props.activeTabKey) return
+  emit('switch-tab', tab.key)
+}
+function addLane(): void {
+  if (!canAddLane.value) {
+    app.toast('发出第一条消息后，才能继续添加栏目', 'bad', 3000)
+    return
+  }
+  emit('add-tab')
+}
+/** 刷新左侧栏目：手动按钮与 5s 轮询共用；不打断当前对话 / 草稿。 */
+async function refreshLanes(manual = false): Promise<void> {
+  if (!props.windowKey || !props.sessionRootId || isGlobalPanel.value) {
+    if (manual) app.toast('当前面板没有栏目', 'bad', 2000)
+    return
+  }
+  if (lanesRefreshing.value) return
+  lanesRefreshing.value = true
+  try {
+    await chatWindows.refreshWindow(props.windowKey)
+    if (manual) {
+      // 手动刷新顺手把会话卡片 / 未读 / 运行状态也拉一遍。
+      await Promise.all([data.loadConversations(), attention.load()])
+      app.toast('栏目已刷新', 'ok', 1500)
+    }
+  } finally {
+    lanesRefreshing.value = false
+  }
+}
+function onVisibilityChange(): void {
+  if (lanesVisible()) void refreshLanes()
+}
+function lanesVisible(): boolean {
+  if (document.hidden) return false
+  // 标签页形态下，只有当前激活的会话标签才需要轮询。
+  if (props.presentation === 'tab' && chatWindows.activeTab !== props.windowKey) return false
+  return true
+}
+watch(() => props.activeTabKey, () => {
+  const text = activeLane.value?.text || ''
+  if (draft.value !== text) draft.value = text
+})
+watch(draft, (value) => emit('draft-text', value))
+// 从别的标签切回这个会话时，立即刷新一次栏目（不必等 5s 轮询）。
+watch(() => chatWindows.activeTab, () => {
+  if (lanesVisible()) void refreshLanes()
+})
 const hiddenMessages = computed(
   () => Math.max(0, chat.messages.value.length - messageWindow.value),
 )
@@ -107,6 +179,7 @@ function showEarlierMessages(): void {
 const tempOpen = ref(false)
 const tempForm = reactive({ name: '', expertise: '', persona: '' })
 const taskCenterOpen = ref(false)
+const backgroundJobsOpen = ref(false)
 const settingsOpen = ref(false)
 const participantsOpen = ref(false)
 const groupInfoOpen = ref(false)
@@ -119,21 +192,25 @@ const avatarMenuItems = computed<ContextMenuItem[]>(() => {
       { label: '关闭窗口', action: 'close' },
     ]
   }
+  const lane = Boolean(props.sessionRootId && conversation.value?.id
+    && conversation.value.id !== props.sessionRootId)
+  const noun = lane ? '栏目' : '会话'
   return [
-    { label: '会话管理', action: 'settings' },
+    { label: lane ? '栏目管理' : '会话管理', action: 'settings' },
     isGroupChat.value
       ? { label: '群资料 / 群成员', action: 'group-info' }
       : { label: '参与角色', action: 'participants', disabled: Boolean(props.globalAgent) },
     ...(isGroupChat.value
       ? [{ label: '打开群组页', action: 'group-page' }]
       : []),
-    { label: '重命名会话', action: 'rename' },
-    { label: '复制会话 ID', action: 'copy-id' },
+    { label: `重命名${noun}`, action: 'rename' },
+    { label: `复制${noun} ID`, action: 'copy-id' },
     { label: '', action: '', separator: true },
-    { label: '清空会话上下文', action: 'clean' },
+    { label: '清空上下文（历史保留）', action: 'clear' },
+    { label: '清空会话历史', action: 'clean' },
     { label: '标记已读', action: 'read' },
     { label: '', action: '', separator: true },
-    { label: '删除会话', action: 'delete', danger: true, disabled: Boolean(props.globalAgent) },
+    { label: `删除${noun}`, action: 'delete', danger: true, disabled: Boolean(props.globalAgent) },
     { label: '关闭窗口', action: 'close' },
   ]
 })
@@ -179,20 +256,16 @@ async function onAvatarMenu(action: string): Promise<void> {
     }
     return
   }
+  if (action === 'clear') {
+    await runCommand('clear', 'current')
+    return
+  }
   if (action === 'clean') {
     cleanOpen.value = true
     return
   }
   if (action === 'read') {
-    const id = conversation.value?.id
-    if (!id) return
-    try {
-      await api(`/conversations/${encodeURIComponent(id)}/read`, { method: 'POST' })
-      await data.loadAll()
-      app.toast('已标记为已读')
-    } catch (error) {
-      app.toast(error instanceof Error ? error.message : String(error), 'bad')
-    }
+    await runCommand('read')
     return
   }
   if (action === 'delete') {
@@ -214,13 +287,14 @@ const taskCenterCount = computed(() => backgroundTaskCount.value + openWorkCount
 // 这里给出「继续对话」手动兜底。
 const continueTask = ref<{ id: string; title: string } | null>(null)
 let taskTimer = 0
+let laneTimer = 0
 const globalTab = ref<'chat' | 'inbox'>(props.initialTab || 'chat')
 // 角标只算必须由人处理的事项：待授权 + 待回答。
 const inboxCount = computed(() => Number(attention.counts.authorizations || 0))
 watch(() => props.initialTab, (tab) => { if (tab) globalTab.value = tab })
 const isGlobalPanel = computed(() => props.globalAgent || props.globalConversation)
 // 截图中的普通会话弹窗约为 1386 × 1280（2x）。
-const size = ref({ w: props.popup?.w ?? (isGlobalPanel.value ? 440 : 693), h: props.popup?.h ?? 640 })
+const size = ref({ w: props.popup?.w ?? (isGlobalPanel.value ? 440 : 820), h: props.popup?.h ?? 640 })
 function defaultPosition(): Pick<ChatPopup, 'x' | 'y'> {
   const w = Math.min(size.value.w, Math.max(320, window.innerWidth - 32))
   const h = Math.min(size.value.h, Math.max(260, window.innerHeight - 40))
@@ -342,6 +416,7 @@ function endDrag(): void {
 
 onMounted(() => {
   window.addEventListener('resize', updateViewport)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   if (chat.messages.value.length || chat.entries.value.length) settleBottom()
   taskTimer = window.setInterval(() => {
     if (!props.globalAgent) void loadBackgroundTasks()
@@ -349,6 +424,10 @@ onMounted(() => {
     // 否则要等用户手动刷新才能看到角色继续输出的内容。
     if (!chat.streaming.value) void chat.resumeRunning()
   }, 4000)
+  // 栏目自动刷新：机器人在别处新建栏目、其他窗口改名 / 删除时，不用重开窗口。
+  laneTimer = window.setInterval(() => {
+    if (lanesVisible()) void refreshLanes()
+  }, 5000)
   if (!msgsEl.value || typeof ResizeObserver === 'undefined') return
   resizeObserver = new ResizeObserver(() => {
     updateScrollState()
@@ -361,7 +440,9 @@ onBeforeUnmount(() => {
   stopResize?.()
   endDrag()
   window.removeEventListener('resize', updateViewport)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   window.clearInterval(taskTimer)
+  window.clearInterval(laneTimer)
   resizeObserver?.disconnect()
   resizeObserver = null
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
@@ -705,84 +786,128 @@ async function onSend(): Promise<void> {
   }
 }
 
+// 运行中收到的压缩请求：等这一轮结束再执行，避免和 run 抢上下文。
+const compactAfterRun = ref(false)
+watch(() => chat.streaming.value, (streaming) => {
+  if (streaming || !compactAfterRun.value) return
+  compactAfterRun.value = false
+  void chat.compact()
+})
+// 一轮结束后刷新左侧栏目：标题 / 未读 / 运行状态都可能变了。
+watch(() => chat.streaming.value, (streaming) => {
+  if (streaming || !props.windowKey) return
+  void chatWindows.refreshWindow(props.windowKey)
+})
+
+/** 执行一条会话动作：斜杠命令与模型发起的会话指令共用这一套逻辑。 */
+async function runCommand(name: string, arg = ''): Promise<boolean> {
+  const action = String(name || '').replace(/^\//, '').toLowerCase()
+  const value = String(arg || '').trim()
+  if (action === 'new') {
+    createConversation()
+    return true
+  }
+  if (action === 'compact') {
+    // 运行中压缩会被后端拒绝（压缩和正在跑的 run 抢同一份上下文）：
+    // 记下来，等这一轮结束再压。
+    if (chat.streaming.value || chat.sending.value) {
+      compactAfterRun.value = true
+      app.toast('本轮结束后自动压缩上下文', 'ok', 3000)
+    } else {
+      await chat.compact()
+    }
+    return true
+  }
+  if (action === 'clear') {
+    // 默认只清当前会话；显式 all 才清全部，避免误清其它会话。
+    await chat.clearContext(value.toLowerCase() === 'all' ? 'all' : 'current')
+    return true
+  }
+  if (action === 'clean') {
+    cleanOpen.value = true
+    return true
+  }
+  if (action === 'work') {
+    await createWorkItem(value)
+    return true
+  }
+  if (action === 'stop') {
+    await chat.stop()
+    return true
+  }
+  if (action === 'attach') {
+    document.querySelector<HTMLButtonElement>('.composer .attach')?.click()
+    return true
+  }
+  if (action === 'model') {
+    document.querySelector<HTMLSelectElement>('.composer select.mini')?.focus()
+    return true
+  }
+  if (action === 'rename') {
+    await renameConversation(value)
+    return true
+  }
+  if (action === 'delete') {
+    await deleteConversation()
+    return true
+  }
+  if (action === 'conv') {
+    emit('close')
+    return true
+  }
+  if (action === 'settings') {
+    void router.push('/settings')
+    return true
+  }
+  if (action === 'about') {
+    void router.push('/about')
+    return true
+  }
+  if (action === 'theme') {
+    app.toggleTheme()
+    return true
+  }
+  if (action === 'read') {
+    const id = conversation.value?.id
+    if (id) {
+      try {
+        await api(`/conversations/${encodeURIComponent(id)}/read`, { method: 'POST' })
+        await data.loadAll()
+        app.toast('已标记为已读')
+      } catch (err) {
+        app.toast(err instanceof Error ? err.message : String(err), 'bad')
+      }
+    }
+    return true
+  }
+  return false
+}
+
+/** 模型在对话里请求执行会话指令（session_manage）：后端已执行完的直接提示，
+ * 界面动作走与斜杠命令相同的 runCommand。 */
+async function handleSessionCommand(cmd: { name?: string, arg?: string, done?: boolean, note?: string }): Promise<void> {
+  if (cmd.done) {
+    if (cmd.note) app.toast(cmd.note, 'ok', 3200)
+    if (cmd.name === 'clear') chat.contextTokens.value = 0
+    return
+  }
+  const handled = await runCommand(String(cmd.name || ''), String(cmd.arg || ''))
+  if (!handled) app.toast(`不支持的会话指令：${cmd.name || ''}`, 'bad')
+}
+
+watch(() => chat.sessionCommand.value?.seq, () => {
+  const cmd = chat.sessionCommand.value
+  if (cmd) void handleSessionCommand(cmd)
+})
+
 async function sendDraft(): Promise<void> {
   const text = draft.value.trim()
   if (!text && !chat.pendingAttachments.value.length) return
   if (text.startsWith('/')) {
     const match = /^\/([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$/.exec(text)
-    if (match) {
-      const name = match[1]
-      const arg = String(match[2] || '').trim()
-      if (name === 'new') {
-        draft.value = ''
-        await createConversation()
-        return
-      }
-      if (name === 'compact') {
-        draft.value = ''
-        await chat.compact()
-        return
-      }
-      if (name === 'clear') {
-        draft.value = ''
-        await chat.clearContext(arg.toLowerCase() === 'current' ? 'current' : 'all')
-        return
-      }
-      if (name === 'clean') {
-        draft.value = ''
-        cleanOpen.value = true
-        return
-      }
-      if (name === 'work') {
-        draft.value = ''
-        await createWorkItem(arg)
-        return
-      }
-      if (name === 'stop') {
-        draft.value = ''
-        await chat.stop()
-        return
-      }
-      if (name === 'attach') {
-        draft.value = ''
-        document.querySelector<HTMLButtonElement>('.composer .attach')?.click()
-        return
-      }
-      if (name === 'model') {
-        draft.value = ''
-        document.querySelector<HTMLSelectElement>('.composer select.mini')?.focus()
-        return
-      }
-      if (name === 'rename') {
-        draft.value = ''
-        await renameConversation(arg)
-        return
-      }
-      if (name === 'delete') {
-        draft.value = ''
-        await deleteConversation()
-        return
-      }
-      if (name === 'conv') {
-        draft.value = ''
-        emit('close')
-        return
-      }
-      if (name === 'settings') {
-        draft.value = ''
-        router.push('/settings')
-        return
-      }
-      if (name === 'about') {
-        draft.value = ''
-        router.push('/about')
-        return
-      }
-      if (name === 'theme') {
-        draft.value = ''
-        app.toggleTheme()
-        return
-      }
+    if (match && await runCommand(match[1], String(match[2] || '').trim())) {
+      draft.value = ''
+      return
     }
   }
   // 草稿会话：第一条消息发出时才真正创建后端会话。
@@ -794,6 +919,7 @@ async function sendDraft(): Promise<void> {
           role_id: props.draftRoleId || undefined,
           workspace_id: draftWorkspace.value,
           team_id: props.draftTeamId || undefined,
+          session_id: props.sessionRootId || undefined,
           model_code: model.value || undefined,
           thinking_level: thinking.value || undefined,
         },
@@ -827,7 +953,16 @@ async function sendDraft(): Promise<void> {
 }
 
 function createConversation(): void {
-  // 新会话也是延迟创建：先开草稿，发出第一条消息才落到后端。
+  // 「新会话」在会话窗口里 = 新栏目：挂在当前会话根下，独立消息 / 上下文。
+  if (props.sessionRootId) {
+    emit('add-tab')
+    return
+  }
+  if (props.globalAgent || props.globalConversation) {
+    app.toast('全局面板不支持栏目', 'bad', 3000)
+    return
+  }
+  // 还没落库的新会话草稿：再点 /new 仍然另起一条会话。
   const roleId = conversation.value?.role_id || ''
   if (!roleId || roleId === 'default') {
     app.toast('先选择一个角色再新建会话', 'bad')
@@ -970,11 +1105,13 @@ async function confirmClean(): Promise<void> {
 
 async function deleteConversation(): Promise<void> {
   if (!conversation.value) return
-  if (!window.confirm(`删除会话「${title.value}」？历史消息会一并删除。`)) return
+  const id = conversation.value.id
+  const lane = Boolean(props.sessionRootId && id !== props.sessionRootId)
+  if (!window.confirm(`删除${lane ? '栏目' : '会话'}「${title.value}」？历史消息会一并删除。`)) return
   try {
-    await api(`/conversations/${encodeURIComponent(conversation.value.id)}`, { method: 'DELETE' })
+    await api(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' })
     await data.loadAll()
-    emit('close')
+    chatWindows.closeConversation(id)
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
   }
@@ -991,7 +1128,37 @@ function onConversationSaved(updated: Conversation): void {
 
 function onConversationDeleted(): void {
   settingsOpen.value = false
-  emit('close')
+  const id = conversation.value?.id || props.conversationId
+  if (id) chatWindows.closeConversation(id)
+  else emit('close')
+}
+
+/** 从某条消息处分支出新会话：复制到此消息为止的上下文，然后打开新会话。 */
+async function forkAtMessage(message: { id?: string }): Promise<void> {
+  const conv = conversation.value
+  const messageId = String(message?.id || '')
+  if (!conv?.id || !messageId) return
+  try {
+    const next = await api<Conversation>(
+      `/conversations/${encodeURIComponent(conv.id)}/fork`,
+      { method: 'POST', body: { message_id: messageId } },
+    )
+    await data.loadAll()
+    app.toast('已创建分支会话')
+    if (next?.id) {
+      settingsOpen.value = false
+      chatWindows.openConversation(next.id)
+    }
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  }
+}
+
+/** 会话管理里的分支来源 / 子分支：直接打开对应会话。 */
+function openBranchConversation(id: string): void {
+  if (!id) return
+  settingsOpen.value = false
+  chatWindows.openConversation(id)
 }
 
 async function refreshConversation(): Promise<void> {
@@ -1018,20 +1185,60 @@ async function onGroupDeleted(): Promise<void> {
   await refreshConversation()
 }
 const previewLink = ref<ConversationLink | null>(null)
+const terminalOpening = ref(false)
+const terminalWorkspace = computed(() => isDraft.value ? draftWorkspace.value : conversation.value?.workspace_id || '')
+const terminalAvailable = computed(() => Boolean(terminalWorkspace.value
+  && !data.workspaces.find((item) => item.id === terminalWorkspace.value)?.chat_only))
 
-function onConversationLink(event: MouseEvent): void {
-  if (event.type === 'auxclick' && event.button !== 1) return
+async function openTerminal(): Promise<void> {
+  if (!terminalAvailable.value || terminalOpening.value || workspaceSwitching.value) return
+  terminalOpening.value = true
+  try {
+    await api('/local/terminal', {
+      method: 'POST',
+      body: { conversation_id: props.conversationId, workspace_id: terminalWorkspace.value },
+    })
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  } finally {
+    terminalOpening.value = false
+  }
+}
+
+watch(() => props.conversationId, () => {
+  backgroundJobsOpen.value = false
+  previewLink.value = null
+})
+
+function resolveChatLink(href: string, title = ''): ConversationLink {
+  return resolveConversationLink(
+    href, title, props.conversationId, conversation.value?.workspace_id || '', location.origin,
+  )
+}
+
+provide(conversationImageSource, (src) => {
+  if (/\.svg(?:$|[?#])/i.test(src)) return ''
+  if (/^data:image\/(?:png|gif|jpeg|webp);base64,/i.test(src)) return src
+  try {
+    const link = resolveChatLink(src)
+    return link.kind === 'file' && !terminalWorkspace.value && link.preview.includes('/link-file/') ? '' : link.url
+  } catch {
+    return ''
+  }
+})
+
+function onConversationLink(event: MouseEvent | KeyboardEvent): void {
+  if (event.type === 'auxclick' && event instanceof MouseEvent && event.button !== 1) return
   const element = event.target
   if (!(element instanceof Element)) return
-  const link = element.closest<HTMLAnchorElement>('.md a[href], .attachments a[href]')
+  const link = element.closest<HTMLElement>('.md a[href], .attachments a[href], .md img[data-preview-href]')
   if (!link) return
-  event.preventDefault()
   const href = link.dataset.previewHref || link.getAttribute('href') || ''
+  if (href.startsWith('data:') || href.startsWith('blob:')) return
+  if (event instanceof KeyboardEvent && link.tagName !== 'IMG') return
+  event.preventDefault()
   try {
-    previewLink.value = resolveConversationLink(
-      href, link.getAttribute('aria-label') || link.textContent || '',
-      props.conversationId, conversation.value?.workspace_id || '', location.origin,
-    )
+    previewLink.value = resolveChatLink(href, link.getAttribute('aria-label') || link.getAttribute('alt') || link.textContent || '')
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
   }
@@ -1047,6 +1254,7 @@ function onConversationLink(event: MouseEvent): void {
     :data-dragging="(dragging || resizing) || undefined"
     @click.capture="onConversationLink"
     @auxclick.capture="onConversationLink"
+    @keydown.enter.capture="onConversationLink"
   >
     <header class="win-head chat-head" @pointerdown="startDrag">
       <button class="chat-avatar-btn" type="button" title="右键：更多会话操作" aria-label="会话头像，右键更多操作"
@@ -1056,6 +1264,7 @@ function onConversationLink(event: MouseEvent): void {
       <span class="win-title">
         <b>{{ title }}</b>
         <span :title="headerMeta">{{ headerMeta }}</span>
+        <span v-if="conversation?.forked_from_id" class="chip fork-chip" title="这是分支会话">分支</span>
       </span>
       <WorkspacePicker
         v-if="isDraft || conversation"
@@ -1116,6 +1325,10 @@ function onConversationLink(event: MouseEvent): void {
           @click="openTempRole"
         >＋</button>
         <button v-if="!isDraft" class="head-btn" title="会话管理（角色 / 参与角色）" @click="settingsOpen = true">⚙</button>
+        <button v-if="terminalAvailable" class="head-btn" type="button" title="在工作区打开终端"
+          aria-label="在工作区打开终端" :disabled="terminalOpening || workspaceSwitching" @click="openTerminal">›_</button>
+        <button v-if="!isDraft" class="head-btn" type="button" title="后台脚本与工具"
+          aria-label="后台脚本与工具" @click="backgroundJobsOpen = true">≡</button>
         <button v-if="!isDraft" class="head-btn task-btn" title="任务中心（执行 / 工单）" aria-label="任务中心" @click="openTaskCenter">
           ◎<span v-if="taskCenterCount" class="head-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span>
         </button>
@@ -1123,19 +1336,49 @@ function onConversationLink(event: MouseEvent): void {
       </div>
     </header>
 
-    <div v-if="globalAgent" class="ga-tabs">
-      <button class="ga-tab" :class="{ on: globalTab === 'chat' }" @click="globalTab = 'chat'">对话</button>
-      <button class="ga-tab" :class="{ on: globalTab === 'inbox' }" @click="globalTab = 'inbox'; attention.load()">
-        收件箱
-        <span v-if="inboxCount" class="ga-tab-badge">{{ inboxCount > 99 ? '99+' : inboxCount }}</span>
-      </button>
-    </div>
+    <div class="chat-body">
+      <aside v-if="showLanes" class="lanes" aria-label="栏目">
+        <div class="lanes-head">
+          <span>栏目</span>
+          <span class="lanes-count">{{ lanes.length }}</span>
+          <button class="lanes-refresh" :class="{ spinning: lanesRefreshing }" type="button"
+            title="刷新栏目" aria-label="刷新栏目" :disabled="lanesRefreshing" @click="refreshLanes(true)">
+            <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3" /><path d="M20 4v7h-7" /></svg>
+          </button>
+          <button class="lanes-add" type="button" title="新增栏目" aria-label="新增栏目"
+            :disabled="!canAddLane" @click="addLane">＋</button>
+        </div>
+        <div class="lanes-list">
+          <button v-for="lane in lanes" :key="lane.key" class="lane"
+            :class="{ on: lane.key === activeTabKey, draft: lane.draft }" type="button"
+            :title="lane.title || '新栏目'" @click="switchLane(lane)">
+            <span v-if="Number(lane.running || 0) > 0" class="lane-run" />
+            <span class="lane-name">{{ lane.title || (lane.draft ? '新栏目' : '未命名栏目') }}</span>
+            <span v-if="Number(lane.unread || 0) > 0" class="lane-badge">
+              {{ Number(lane.unread) > 99 ? '99+' : lane.unread }}
+            </span>
+          </button>
+          <div v-if="!lanes.length" class="lane-empty">还没有栏目</div>
+        </div>
+        <button class="lane-new" type="button" :disabled="!canAddLane" @click="addLane">
+          ＋ 新栏目
+        </button>
+      </aside>
 
-    <div v-if="globalAgent && globalTab === 'inbox'" class="ga-inbox-body">
-      <GlobalInbox full @open="openGlobalConversation" />
-    </div>
+      <div class="chat-main">
+        <div v-if="globalAgent" class="ga-tabs">
+          <button class="ga-tab" :class="{ on: globalTab === 'chat' }" @click="globalTab = 'chat'">对话</button>
+          <button class="ga-tab" :class="{ on: globalTab === 'inbox' }" @click="globalTab = 'inbox'; attention.load()">
+            收件箱
+            <span v-if="inboxCount" class="ga-tab-badge">{{ inboxCount > 99 ? '99+' : inboxCount }}</span>
+          </button>
+        </div>
 
-    <div v-show="!globalAgent || globalTab === 'chat'" ref="scroller" class="win-body" @scroll.passive="onScroll">
+        <div v-if="globalAgent && globalTab === 'inbox'" class="ga-inbox-body">
+          <GlobalInbox full @open="openGlobalConversation" />
+        </div>
+
+        <div v-show="(!globalAgent || globalTab === 'chat')" ref="scroller" class="win-body" @scroll.passive="onScroll">
       <div ref="msgsEl" class="msgs">
         <div v-if="chat.loading.value" class="chat-empty"><b>正在打开会话…</b></div>
         <div v-else-if="!chat.messages.value.length && !chat.entries.value.length && !chat.streaming.value" class="chat-empty">
@@ -1154,7 +1397,7 @@ function onConversationLink(event: MouseEvent): void {
           <span>还有 {{ hiddenMessages }} 条历史消息</span>
         </button>
 
-        <MessageItem v-for="(message, index) in visibleMessages" :key="message.id || `m-${index + hiddenMessages}`" :message="message" :data-mid="message.id || ''" @continue-task="chat.continueTask" />
+        <MessageItem v-for="(message, index) in visibleMessages" :key="message.id || `m-${index + hiddenMessages}`" :message="message" :data-mid="message.id || ''" @continue-task="chat.continueTask" @fork="forkAtMessage" />
 
         <LiveMessage
           v-if="chat.streaming.value || chat.entries.value.length"
@@ -1221,7 +1464,7 @@ function onConversationLink(event: MouseEvent): void {
     </div>
 
     <Composer
-      v-show="!globalAgent || globalTab === 'chat'"
+      v-show="(!globalAgent || globalTab === 'chat')"
       v-model:draft="draft"
       :streaming="chat.streaming.value"
       :sending="preparingSend || chat.sending.value"
@@ -1237,12 +1480,14 @@ function onConversationLink(event: MouseEvent): void {
       :commands="commands"
       @send="onSend"
       @stop="chat.stop"
-      @files="(files) => chat.addFiles(files, effectiveModel)"
+      @files="chat.addFiles"
       @remove-attachment="chat.removeAttachment"
       @update:model="chooseModel"
       @update:thinking="(value) => { thinking = value; savePreferences({ thinking_level: value }) }"
       @update:perm="setPerm"
     />
+      </div>
+    </div>
 
     <ChatTaskCenter
       :open="taskCenterOpen"
@@ -1253,13 +1498,16 @@ function onConversationLink(event: MouseEvent): void {
     />
 
     <LinkPreview :link="previewLink" @close="previewLink = null" @link-click="onConversationLink" />
-
+    <BackgroundJobs :open="backgroundJobsOpen" :conversation-id="conversationId"
+      :workspace-id="terminalAvailable && !workspaceSwitching ? terminalWorkspace : ''"
+      @close="backgroundJobsOpen = false" />
     <ConversationSettingsDrawer
       :open="settingsOpen"
       :conversation="conversation"
       @close="settingsOpen = false"
       @saved="onConversationSaved"
       @deleted="onConversationDeleted"
+      @open="openBranchConversation"
     />
 
     <GroupSettingsDrawer

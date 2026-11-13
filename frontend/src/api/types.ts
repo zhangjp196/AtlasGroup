@@ -51,10 +51,20 @@ export interface Conversation {
   permission_mode?: string
   run_mode?: string
   zone?: string
+  /** 栏目：所属会话根 id（根会话也会归一成自己的 id）。 */
+  session_id?: string
+  session_root_id?: string
+  /** 整棵会话（根 + 栏目）里的栏目数。 */
+  thread_count?: number
   kind?: string
   active?: boolean
   unread?: boolean
   unread_count?: number
+  archived?: boolean
+  /** 分支来源：从哪条会话 / 哪条消息分出来的。 */
+  forked_from_id?: string
+  forked_from_message_id?: string
+  title_source?: string
   running_count?: number
   usage?: TokenUsage
   usage_total?: TokenUsage
@@ -607,6 +617,13 @@ export interface RunEvent {
   role_update?: unknown
   app_update?: unknown
   schedule_update?: unknown
+  /** 模型发起、由界面执行的会话指令（与斜杠命令同一套动作）。 */
+  session_command?: {
+    name?: string
+    arg?: string
+    done?: boolean
+    note?: string
+  }
 }
 
 export interface MagpieSettings {

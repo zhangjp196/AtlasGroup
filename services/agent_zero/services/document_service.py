@@ -216,7 +216,10 @@ def _pptx_parts(target: Path) -> List[Dict[str, Any]]:
             )
             parts: List[Dict[str, Any]] = []
             for idx, name in enumerate(slides, start=1):
-                content = ET.fromstring(zf.read(name)).find(_tag(P_NS, "content"))
+                root = ET.fromstring(zf.read(name))
+                content = root.find(f"{_tag(P_NS, 'cSld')}/{_tag(P_NS, 'spTree')}")
+                if content is None:
+                    content = root.find(_tag(P_NS, "content"))
                 if content is None:
                     continue
                 lines: List[str] = []

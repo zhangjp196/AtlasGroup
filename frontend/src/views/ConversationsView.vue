@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElButton } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu.vue'
 import CreateDialog from '@/components/CreateDialog.vue'
@@ -11,7 +11,7 @@ import ListPager from '@/components/ListPager.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TokenMeter from '@/components/TokenMeter.vue'
 import { api } from '@/api/client'
-import type { Conversation } from '@/api/types'
+import type { Conversation, ListResponse } from '@/api/types'
 import {
   conversationIsSharedGroup,
   conversationMeta,
@@ -24,11 +24,14 @@ import { compactNumber, shortTime } from '@/lib/format'
 import { clampPage, DEFAULT_PAGE_SIZE, pageCount, pageSlice } from '@/lib/paging'
 import { usageSummary } from '@/lib/usage'
 import { useAppStore } from '@/stores/app'
+import { useChatWindowsStore } from '@/stores/chatWindows'
 import { useDataStore } from '@/stores/data'
 
 const data = useDataStore()
 const app = useAppStore()
+const chatWindows = useChatWindowsStore()
 const router = useRouter()
+const route = useRoute()
 const createOpen = ref(false)
 const settingsOpen = ref(false)
 const manageConv = ref<Conversation | null>(null)
@@ -40,6 +43,46 @@ const filterKind = ref<'all' | 'single' | 'group'>('all')
 const unreadOnly = ref(false)
 const runningOnly = ref(false)
 const keyword = ref('')
+// 从角色 / 群组页跳过来时带上的范围：/conv?role_id=… 或 ?team_id=…。
+const filterRole = ref(String(route.query.role_id || ''))
+const filterTeam = ref(String(route.query.team_id || ''))
+
+watch(() => [route.query.role_id, route.query.team_id], () => {
+  filterRole.value = String(route.query.role_id || '')
+  filterTeam.value = String(route.query.team_id || '')
+  page.value = 1
+})
+
+const scopeLabel = computed(() => {
+  if (filterTeam.value) {
+    return `群组：${data.teams.find((team) => team.id === filterTeam.value)?.name || filterTeam.value}`
+  }
+  if (filterRole.value) {
+    return `角色：${data.roles.find((role) => role.id === filterRole.value)?.name || filterRole.value}`
+  }
+  return ''
+})
+
+// 带范围进来时按后端全量拉一次：store 里只有最近 80 条，长历史会被截断。
+const scopedRows = ref<Conversation[] | null>(null)
+async function loadScoped(): Promise<void> {
+  const roleId = filterRole.value
+  const teamId = filterTeam.value
+  if (!roleId && !teamId) {
+    scopedRows.value = null
+    return
+  }
+  const query = roleId
+    ? `role_id=${encodeURIComponent(roleId)}`
+    : `team_id=${encodeURIComponent(teamId)}`
+  try {
+    const out = await api<ListResponse<Conversation>>(`/conversations?${query}&limit=200&roots_only=1`)
+    scopedRows.value = out.items || []
+  } catch {
+    scopedRows.value = null
+  }
+}
+watch([filterRole, filterTeam], () => { void loadScoped() }, { immediate: true })
 
 const menuItems = computed<ContextMenuItem[]>(() => {
   const conv = menu.conv
@@ -49,6 +92,7 @@ const menuItems = computed<ContextMenuItem[]>(() => {
     { label: '会话管理（角色 / 参与角色）', action: 'manage' },
     { label: '', action: '', separator: true },
     { label: '复制 / 分支', action: 'fork', hint: '保留当前上下文' },
+    ...(conv?.forked_from_id ? [{ label: '查看分支来源', action: 'source' }] : []),
     { label: '标记已读', action: 'read', disabled: !conv?.unread },
     { label: '', action: '', separator: true },
     { label: '删除会话', action: 'delete', danger: true },
@@ -111,6 +155,10 @@ async function onMenu(action: string): Promise<void> {
     }
     return
   }
+  if (action === 'source' && conv.forked_from_id) {
+    openConversation(conv.forked_from_id)
+    return
+  }
   if (action === 'read') {
     try {
       await api(`/conversations/${encodeURIComponent(conv.id)}/read`, { method: 'POST' })
@@ -124,6 +172,7 @@ async function onMenu(action: string): Promise<void> {
     if (!window.confirm(`删除会话「${conversationTitle(conv, data.teams, data.roles)}」？历史消息会一并删除。`)) return
     try {
       await api(`/conversations/${encodeURIComponent(conv.id)}`, { method: 'DELETE' })
+      chatWindows.closeConversation(conv.id)
       await data.loadAll()
       app.toast('会话已删除')
     } catch (error) {
@@ -145,7 +194,8 @@ function onManagedDeleted(): void {
 }
 
 const conversations = computed(() => {
-  const list = data.conversations.filter((conv) => ![GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE].includes(String(conv.zone || '')))
+  const source = scopedRows.value ?? data.conversations
+  const list = source.filter((conv) => ![GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE].includes(String(conv.zone || '')))
     // 只有真正产生过消息的会话才进入列表：草稿会话尚未创建后端记录。
     .filter((conv) => Number(conv.message_count || 0) > 0 || Boolean(conv.last_message))
   return [...list].sort((a, b) => {
@@ -168,6 +218,8 @@ const filteredConversations = computed(() => {
   const q = keyword.value.trim().toLowerCase()
   return conversations.value.filter((conv) => {
     const { team, role, isGroup } = conversationParts(conv, data.teams, data.roles)
+    if (filterRole.value && String(conv.role_id || '') !== filterRole.value) return false
+    if (filterTeam.value && String(conv.team_id || '') !== filterTeam.value) return false
     if (filterWorkspace.value && String(conv.workspace_id || '') !== filterWorkspace.value) return false
     if (filterKind.value === 'single' && isGroup) return false
     if (filterKind.value === 'group' && !isGroup) return false
@@ -205,15 +257,19 @@ const filteredTokens = computed(() => filteredConversations.value.reduce(
 ))
 
 const filtersActive = computed(() => Boolean(
-  filterWorkspace.value || filterKind.value !== 'all' || unreadOnly.value || runningOnly.value || keyword.value.trim(),
+  filterRole.value || filterTeam.value
+  || filterWorkspace.value || filterKind.value !== 'all' || unreadOnly.value || runningOnly.value || keyword.value.trim(),
 ))
 
 function clearFilters(): void {
+  filterRole.value = ''
+  filterTeam.value = ''
   filterWorkspace.value = ''
   filterKind.value = 'all'
   unreadOnly.value = false
   runningOnly.value = false
   keyword.value = ''
+  if (route.query.role_id || route.query.team_id) void router.replace('/conv')
 }
 
 function workspaceOf(conv: (typeof data.conversations)[number]): string {
@@ -259,6 +315,14 @@ function openConversation(id: string): void {
   void router.push(`/conv/${encodeURIComponent(id)}`)
 }
 
+function goRole(id?: string): void {
+  if (id) void router.push(`/role/${encodeURIComponent(id)}`)
+}
+
+function goTeam(id?: string): void {
+  if (id) void router.push(`/group/${encodeURIComponent(id)}`)
+}
+
 function onCreated(_kind: string, id: string): void {
   createOpen.value = false
   void router.push(`/conv/${encodeURIComponent(id)}`)
@@ -277,6 +341,7 @@ function onCreated(_kind: string, id: string): void {
   <div class="canvas-body">
     <div class="conv-filters">
       <input v-model="keyword" class="input conv-search" placeholder="搜索会话 / 角色 / 工作区…" />
+      <span v-if="scopeLabel" class="chip scope-chip" :title="`只显示该范围下的会话：${scopeLabel}`">{{ scopeLabel }}</span>
       <WorkspacePicker
         v-model="filterWorkspace"
         :workspaces="workspaceOptions"
@@ -326,8 +391,12 @@ function onCreated(_kind: string, id: string): void {
         <TokenMeter :usage="conv.usage" variant="tile" />
         <div class="tile-chips">
           <span class="chip ws-chip" :title="`工作区：${workspaceOf(conv)}`">{{ workspaceOf(conv) }}</span>
+          <span v-if="Number(conv.thread_count || 1) > 1" class="chip" :title="`这个会话有 ${conv.thread_count} 个栏目`">{{ conv.thread_count }} 个栏目</span>
           <span v-if="openWorkByConv.get(conv.id)" class="chip work-chip">{{ openWorkByConv.get(conv.id) }} 工单</span>
+          <span v-if="conv.forked_from_id" class="chip" title="分支会话">分支</span>
           <span v-for="chip in chipsOf(conv)" :key="chip" class="chip">{{ chip }}</span>
+          <button v-if="conv.team_id" class="chip link-chip" type="button" title="打开群组" @click.stop="goTeam(conv.team_id)">群组</button>
+          <button v-else-if="conv.role_id" class="chip link-chip" type="button" title="打开角色" @click.stop="goRole(conv.role_id)">角色</button>
         </div>
         <div class="tile-foot">
           <span>{{ shortTime(conv.updated_at) }}</span>

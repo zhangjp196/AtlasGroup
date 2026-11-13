@@ -29,6 +29,7 @@ const menu = reactive({ open: false, x: 0, y: 0, team: null as Team | null })
 const menuItems = computed<ContextMenuItem[]>(() => [
   { label: '打开群资料', action: 'detail' },
   { label: '打开群聊', action: 'chat', disabled: !(menu.team?.members || []).length },
+  { label: '全部会话（会话中心）', action: 'sessions' },
   { label: '新建群工单', action: 'work', disabled: !(menu.team?.members || []).length },
   { label: '复制群名', action: 'copy' },
   { label: '', action: '', separator: true },
@@ -47,6 +48,10 @@ async function onMenu(action: string): Promise<void> {
   if (!team) return
   if (action === 'detail') return openDetail(team)
   if (action === 'chat') return openChat(team)
+  if (action === 'sessions') {
+    void router.push(`/conv?team_id=${encodeURIComponent(team.id)}`)
+    return
+  }
   if (action === 'work') return openWork(team)
   if (action === 'copy') {
     try {
@@ -154,6 +159,22 @@ function openDrawerChat(id: string): void {
   if (team) void openChat(team)
 }
 
+/** 「新会话」：不复用已有群聊会话，按群组当前工作区另起一条。 */
+function openDrawerNewChat(id: string): void {
+  const team = teamById(id)
+  if (!team) return
+  const leader = String(team.leader?.id || '')
+  if (!leader) {
+    app.toast('请先在群组资料中设置群主', 'bad')
+    return
+  }
+  closeDetail()
+  chatWindows.openDraft(leader, {
+    teamId: team.id,
+    workspaceId: String(team.workspace_id || ''),
+  })
+}
+
 function openWork(team: Team): void {
   void router.push(`/work?team_id=${encodeURIComponent(team.id)}`)
 }
@@ -225,6 +246,7 @@ function onSaved(): void {
     @saved="onSaved"
     @deleted="onSaved"
     @chat="openDrawerChat"
+    @new-chat="openDrawerNewChat"
   />
 
   <ContextMenu

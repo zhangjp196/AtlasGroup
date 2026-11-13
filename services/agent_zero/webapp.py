@@ -33,7 +33,9 @@ from services.agent_zero.version import APP_NAME, APP_VERSION
 from services.agent_zero.routes import (
     app_routes,
     avatar_routes,
+    bot_routes,
     department_routes,
+    local_tools_routes,
     magpie_routes,
     role_routes,
     schedule_routes,
@@ -236,8 +238,17 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
         except Exception:
             pass
 
+        from services.agent_zero.services.conversation_bots import BotManager
+
+        app.state.bot_manager = BotManager()
+        bot_task = asyncio.create_task(app.state.bot_manager.maintain())
         logger.info("%s 就绪（本地单用户 / sqlite）", APP_NAME)
-        yield
+        try:
+            yield
+        finally:
+            bot_task.cancel()
+            await asyncio.gather(bot_task, return_exceptions=True)
+            await app.state.bot_manager.close()
 
         if mcp_reaper_task:
             mcp_reaper_task.cancel()
@@ -264,6 +275,9 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
                 await schedule_service.stop_ticker()
             except Exception:
                 logger.debug("停止定时任务 ticker 失败", exc_info=True)
+        from services.agent_zero.task_layer import tool_jobs
+
+        await tool_jobs.stop_manual_jobs()
         try:
             from services.agent_zero.services import mcp_service
 
@@ -307,6 +321,8 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
     app.include_router(avatar_routes.router, prefix=API_PREFIX, tags=["头像"])
     app.include_router(role_routes.router, prefix=API_PREFIX, tags=["角色"])
     app.include_router(schedule_routes.router, prefix=API_PREFIX, tags=["定时任务"])
+    app.include_router(local_tools_routes.router, prefix=API_PREFIX, tags=["本机工具"])
+    app.include_router(bot_routes.router, prefix=API_PREFIX, tags=["机器人"])
     app.include_router(workspace_routes.router,
                        prefix=f"{API_PREFIX}/workspace", tags=["Workspace"])
 

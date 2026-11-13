@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import DOMPurify from 'dompurify'
 import { api } from '@/api/client'
 import Modal from '@/components/Modal.vue'
 import { openExternal } from '@/composables/useNative'
@@ -47,12 +48,13 @@ const extension = computed(() => {
 })
 const kind = computed(() => {
   const mime = preview.value?.mime || ''
+  if (preview.value?.html && (preview.value.kind === 'office' || /^(html?|xhtml|svg)$/.test(extension.value))) return 'document'
   if (mime.startsWith('video/') || /^(mp4|webm|mov|m4v|ogv)$/.test(extension.value)) return 'video'
   if (mime.startsWith('audio/') || /^(mp3|wav|ogg|m4a|aac|flac|opus)$/.test(extension.value)) return 'audio'
   if (preview.value?.kind === 'image' || /^(png|jpe?g|gif|webp|bmp|avif)$/.test(extension.value)) return 'image'
+  if (props.link?.kind === 'web' && extension.value === 'svg') return 'image'
   if (extension.value === 'pdf') return 'pdf'
   if (props.link?.kind === 'web') return 'web'
-  if (preview.value?.html && preview.value.kind === 'office' || /^(html?|xhtml|svg)$/.test(extension.value)) return 'document'
   if (/^(md|markdown|mdx)$/.test(extension.value)) return 'markdown'
   if (/^(csv|tsv)$/.test(extension.value) && preview.value?.text) return 'table'
   return 'text'
@@ -62,7 +64,11 @@ const rows = computed(() => kind.value === 'table'
     .map((line) => line.split(extension.value === 'tsv' ? '\t' : ',').slice(0, 20))
   : [])
 const documentHtml = computed(() => {
-  const content = preview.value?.html || preview.value?.text || ''
+  const content = DOMPurify.sanitize(preview.value?.html || '', {
+    WHOLE_DOCUMENT: true,
+    ADD_TAGS: ['style'],
+    FORBID_TAGS: ['base', 'meta', 'iframe', 'object', 'embed', 'form', 'a'],
+  })
   return `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"><style>
   body{font:15px/1.65 system-ui,sans-serif;margin:24px;color:#182333;background:#fff;overflow-wrap:anywhere}
   table{border-collapse:collapse} th,td{border:1px solid #cbd5e1;padding:5px 9px} th{background:#eef2f6}
@@ -87,9 +93,10 @@ const documentHtml = computed(() => {
           <audio v-else :key="link.url" :src="link.url" controls preload="metadata" @error="mediaError = true" />
           <p v-if="mediaError" class="hintline">当前播放器无法播放此文件，请下载或在浏览器中打开。</p>
         </template>
-        <img v-else-if="kind === 'image'" :src="link.url" :alt="link.title" />
+        <img v-else-if="kind === 'image'" :src="link.url" :alt="link.title" referrerpolicy="no-referrer" />
         <iframe v-else-if="kind === 'pdf'" :src="link.url" :title="link.title" :sandbox="link.kind === 'web' ? '' : undefined" referrerpolicy="no-referrer" />
-        <iframe v-else-if="kind === 'document' && (preview?.html || preview?.text)" :srcdoc="documentHtml" :title="link.title" sandbox="" />
+        <iframe v-else-if="kind === 'document' && preview?.html" :srcdoc="documentHtml"
+          :title="link.title" sandbox="" referrerpolicy="no-referrer" />
         <Markdown v-else-if="kind === 'markdown'" class="reply-text" :text="preview?.text" />
         <div v-else-if="kind === 'table'" class="reply-text">
           <div class="md-table-wrap">

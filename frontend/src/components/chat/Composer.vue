@@ -282,7 +282,7 @@ watch(() => [props.model, props.roleModel], () => nextTick(grow))
 
     <div class="box" :class="{ 'drag-over': dragOver }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop="onDrop">
       <el-button text class="attach" :title="attachments.length >= 8 ? '最多 8 个附件' : '添加图片或文档'" aria-label="添加附件" @click="pickFiles">📎</el-button>
-      <input ref="fileInput" type="file" class="file-input" hidden multiple accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.md,.txt,.csv,.json,.html,.css,.js,.ts,.py,.yaml,.yml,.toml,.log" @change="onFileInput" />
+      <input ref="fileInput" type="file" class="file-input" hidden multiple accept="image/*,audio/*,video/*,.svg,.pdf,.doc,.docx,.xls,.xlsx,.xlsm,.ppt,.pptx,.odt,.ods,.md,.txt,.csv,.tsv,.json,.html,.htm,.xhtml,.css,.js,.ts,.py,.yaml,.yml,.toml,.log" @change="onFileInput" />
       <textarea
         ref="textarea"
         v-model="draft"

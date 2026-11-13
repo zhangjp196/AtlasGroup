@@ -13,7 +13,7 @@ import os
 import shutil
 import signal
 import subprocess
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from services.agent_zero.runtime.zero.sandbox.base import Sandbox, SandboxResult
 
@@ -95,7 +95,7 @@ async def _kill_tree_async(proc) -> None:
         return
     try:
         if hasattr(os, "killpg"):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGKILL)
         else:
             proc.kill()
     except Exception:
@@ -145,11 +145,13 @@ class SubprocessSandbox(Sandbox):
     """子进程执行（python / shell），cwd 限定工作区。"""
 
     def __init__(self, workspace, timeout_s: float = 60.0,
-                 idle_timeout_s: float = 0.0):
+                 idle_timeout_s: float = 0.0, *,
+                 on_output: Optional[Callable[[str, bytes], None]] = None):
         super().__init__(workspace, timeout_s)
         # 无总超时（timeout_s=0）时的兜底：连续这么久没有任何输出就判定挂住。
         # 0 = 不判定（老行为）。由 config 的 tools.shell_idle_timeout_s 控制。
         self.idle_timeout_s = float(idle_timeout_s or 0)
+        self.on_output = on_output
 
     async def run_shell(self, cmd: str, timeout: Optional[float] = None) -> SandboxResult:
         """执行 shell 命令（macOS/Linux: bash -c；Windows: PowerShell / cmd）。"""
@@ -220,13 +222,15 @@ class SubprocessSandbox(Sandbox):
         # 管道停滞时后台子进程仍握着 fd：主动回收 transport，避免
         # 「Event loop is closed」的 __del__ 噪音（结果不受影响）。
         if pipe_stalled:
+            if self.on_output is not None:
+                await _kill_tree_async(proc)
             try:
                 transport = getattr(proc, "_transport", None)
                 if transport is not None:
                     transport.close()
             except Exception:
                 pass
-        truncated = len(out) > MAX_OUTPUT or len(err) > MAX_OUTPUT
+        truncated = len(out_b) > MAX_OUTPUT or len(err_b) > MAX_OUTPUT
         return SandboxResult(
             ok=(process_exit_code(proc) == 0) and not timed_out,
             exit_code=process_exit_code(proc) or 0,
@@ -254,44 +258,42 @@ class SubprocessSandbox(Sandbox):
            进程仍未退出 → 杀进程组（防止「命令还在跑但什么都不做」）。
         """
 
-        async def _pump(stream, sink) -> None:
+        async def _pump(stream, sink, channel: str) -> None:
             while True:
                 chunk = await stream.read(65536)
                 if not chunk:
                     return
-                sink.append(chunk)
+                if self.on_output is not None:
+                    self.on_output(channel, chunk)
+                remaining = MAX_OUTPUT + 1 - len(sink)
+                if remaining > 0:
+                    sink.extend(chunk[:remaining])
                 state["at"] = asyncio.get_event_loop().time()
 
-        out_chunks: list = []
-        err_chunks: list = []
+        out_chunks = bytearray()
+        err_chunks = bytearray()
         state = {"at": asyncio.get_event_loop().time()}
-        out_task = asyncio.ensure_future(_pump(proc.stdout, out_chunks))
-        err_task = asyncio.ensure_future(_pump(proc.stderr, err_chunks))
+        out_task = asyncio.ensure_future(_pump(proc.stdout, out_chunks, "stdout"))
+        err_task = asyncio.ensure_future(_pump(proc.stderr, err_chunks, "stderr"))
         idle_limit = float(self.idle_timeout_s or 0)
         idle_stalled = False
         # 等进程退出：轮询返回码（不看管道），顺带做空闲兜底判定。
-        while process_exit_code(proc) is None:
-            await asyncio.sleep(0.1)
-            if idle_limit > 0 and (
-                    asyncio.get_event_loop().time() - state["at"] >= idle_limit):
-                idle_stalled = True
-                await _kill_tree_async(proc)
-                await _wait_exit(proc, 3.0)
-                break
-        if idle_stalled:
-            for t in (out_task, err_task):
-                if not t.done():
-                    t.cancel()
-            return b"".join(out_chunks), b"".join(err_chunks), False, True
-        # 进程退出后，给管道一个短暂的收尾窗口。
+        pipe_stalled = False
         try:
-            await asyncio.wait_for(
-                asyncio.gather(out_task, err_task, return_exceptions=True),
-                timeout=_PIPE_LINGER_S,
-            )
-            return b"".join(out_chunks), b"".join(err_chunks), False, False
-        except asyncio.TimeoutError:
+            while process_exit_code(proc) is None:
+                await asyncio.sleep(0.1)
+                if idle_limit > 0 and (
+                        asyncio.get_event_loop().time() - state["at"] >= idle_limit):
+                    idle_stalled = True
+                    await _kill_tree_async(proc)
+                    await _wait_exit(proc, 3.0)
+                    break
+            if not idle_stalled:
+                _, pending = await asyncio.wait((out_task, err_task), timeout=_PIPE_LINGER_S)
+                pipe_stalled = bool(pending)
+        finally:
             for t in (out_task, err_task):
                 if not t.done():
                     t.cancel()
-            return b"".join(out_chunks), b"".join(err_chunks), True, False
+            await asyncio.gather(out_task, err_task, return_exceptions=True)
+        return bytes(out_chunks), bytes(err_chunks), pipe_stalled, idle_stalled

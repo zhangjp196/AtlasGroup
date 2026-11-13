@@ -10,7 +10,10 @@ import Attachments from './Attachments.vue'
 import ProcessList from './ProcessList.vue'
 
 const props = defineProps<{ message: Message }>()
-const emit = defineEmits<{ (e: 'continue-task', taskId: string): void }>()
+const emit = defineEmits<{
+  (e: 'continue-task', taskId: string): void
+  (e: 'fork', message: Message): void
+}>()
 const data = useDataStore()
 
 const entries = computed(() => entriesFromMessage(props.message))
@@ -89,6 +92,11 @@ const turnUsage = computed(() => {
     <div class="msg-body">
       <div v-if="message.content" class="bubble">{{ message.content }}</div>
       <Attachments :items="message.attachments" />
+      <div v-if="message.id" class="msg-ops">
+        <button class="msg-op" type="button" title="复制到此消息为止，另起一条分支会话" @click="emit('fork', message)">
+          从此处分支
+        </button>
+      </div>
     </div>
   </div>
 
@@ -112,6 +120,11 @@ const turnUsage = computed(() => {
 
       <Attachments :items="message.attachments" />
       <div v-if="message.error" class="run-error">{{ message.error }}</div>
+      <div v-if="message.id" class="msg-ops">
+        <button class="msg-op" type="button" title="复制到此消息为止，另起一条分支会话" @click="emit('fork', message)">
+          从此处分支
+        </button>
+      </div>
     </div>
   </div>
 </template>

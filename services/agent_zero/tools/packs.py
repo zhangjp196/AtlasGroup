@@ -126,6 +126,9 @@ STANDALONE_TOOLS: Tuple[str, ...] = (
     "workspace",
     # ask_user 是通用的人机交互，不属于任何工具包。
     "ask_user",
+    # session_manage 是会话级指令（清空上下文 / 新建 / 重命名…），
+    # 由对话层直接处理并驱动界面，同样不进包。
+    "session_manage",
     # Superagent 专用：手动注入到 global-agent 会话，普通会话不下发。
     "app_manage",
 )

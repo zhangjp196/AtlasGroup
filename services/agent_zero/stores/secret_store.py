@@ -71,3 +71,13 @@ def get_secret(name: str) -> Optional[str]:
         return None
 
 
+def delete_secret(name: str) -> None:
+    _cache.pop(str(name), None)
+    if available():
+        try:
+            subprocess.run(["security", "delete-generic-password", "-s", SERVICE, "-a", str(name)],
+                           capture_output=True, timeout=_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("无法删除 Keychain 条目 %s", name)
+
+

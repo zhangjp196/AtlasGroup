@@ -1,4 +1,5 @@
 import type { Message, TraceItem } from '@/api/types'
+import { stripDsml } from './dsml'
 
 export interface ProcessEntry {
   kind: 'thinking' | 'text' | 'tool' | 'retry' | 'compress' | string
@@ -60,7 +61,7 @@ export function entriesFromMessage(message: Message): ProcessEntry[] {
     } else if (item.kind === 'tool') {
       entries.push({ ...item, kind: 'tool' })
     } else if (item.kind === 'text') {
-      const text = String(item.text || '').trim()
+      const text = stripDsml(String(item.text || '')).trim()
       if (text) entries.push({ kind: 'text', text, round: item.round })
     } else if (item.kind === 'retry' || item.kind === 'compress') {
       entries.push({ kind: item.kind, text: String(item.text || '') })
@@ -77,7 +78,7 @@ export function entriesFromMessage(message: Message): ProcessEntry[] {
 }
 
 function markFinal(message: Message, entries: ProcessEntry[]): void {
-  const body = String(message.content || '').trim()
+  const body = stripDsml(String(message.content || '')).trim()
   if (body) {
     for (let i = entries.length - 1; i >= 0; i -= 1) {
       const entry = entries[i]

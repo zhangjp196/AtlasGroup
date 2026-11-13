@@ -26,6 +26,11 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from services.agent_zero.version import APP_NAME, APP_VERSION
+from services.agent_zero.runtime.zero.dsml import (
+    DsmlStreamFilter,
+    clean_dsml_text,
+    extract_dsml_calls,
+)
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
@@ -1304,6 +1309,23 @@ def _tool_calls_of(parts: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _dsml_calls_of(text: str, tool_defs: List[ToolDefinition]) -> List[Dict[str, Any]]:
+    """正文里的 DSML 调用：本会话级指令始终执行，其它工具须在可用清单里。
+
+    部分兼容端点（实测 OpenCode Go 的 deepseek-v4.1-flash）会把 DSML 原文
+    当正文流回来；即使这一轮没有下发工具清单，`session_manage` 也是对话层
+    自己处理的会话指令，应当照常执行，避免用户只看到一串标记。
+    """
+    if not text:
+        return []
+    allowed = {str(tool.name) for tool in tool_defs} | {"session_manage"}
+    calls = [call for call in extract_dsml_calls(text) if call["name"] in allowed]
+    if calls:
+        logger.info("正文 DSML 工具调用已还原: %s",
+                    ", ".join(str(call.get("name") or "") for call in calls))
+    return calls
+
+
 def _text_of_parts(parts: Any, *, kind: Any = TextPart) -> str:
     return "".join(str(p.content) for p in parts or [] if isinstance(p, kind))
 
@@ -1585,6 +1607,11 @@ async def _llm_chat_once(
         raise _request_error(e, llm_code, api_base) from e
     content = _text_of_parts(response.parts)
     calls = _tool_calls_of(response.parts)
+    # 部分 DeepSeek 兼容端点会把 DSML 工具调用写进正文：还原成结构化调用，
+    # 并从正文里抹掉标记，避免前端看到 <｜DSML｜…> 原文。
+    if not calls:
+        calls = _dsml_calls_of(content, tool_defs)
+    content = clean_dsml_text(content)
     if magpie is not None:
         content = magpie.restore_text(content)
         calls = magpie.restore_obj(calls)
@@ -1849,6 +1876,10 @@ async def _llm_chat_stream_full_once(
     params = ModelRequestParameters(function_tools=tool_defs)
     acc_text: List[str] = []
     acc_think: List[str] = []
+    # DeepSeek 兼容端点可能把工具调用写成 DSML 正文：无论这一轮是否下发工具，
+    # 标记都不能进入可见正文（见 runtime/zero/dsml.py）。
+    dsml_filter = DsmlStreamFilter()
+    shown_text: List[str] = []
     prepared: set[int] = set()
     names: Dict[int, str] = {}
     usage: Dict[str, Any] = {}
@@ -1871,9 +1902,12 @@ async def _llm_chat_stream_full_once(
                                 if part.content:
                                     piece = str(part.content)
                                     acc_text.append(piece)
-                                    out = text_stream.feed(piece) if text_stream else piece
-                                    if out:
-                                        yield {"type": "delta", "content": out}
+                                    shown = dsml_filter.feed(piece) if dsml_filter else piece
+                                    if shown:
+                                        shown_text.append(shown)
+                                        out = text_stream.feed(shown) if text_stream else shown
+                                        if out:
+                                            yield {"type": "delta", "content": out}
                             elif isinstance(part, ThinkingPart):
                                 if part.content:
                                     piece = str(part.content)
@@ -1897,9 +1931,12 @@ async def _llm_chat_stream_full_once(
                                 if delta.content_delta:
                                     piece = str(delta.content_delta)
                                     acc_text.append(piece)
-                                    out = text_stream.feed(piece) if text_stream else piece
-                                    if out:
-                                        yield {"type": "delta", "content": out}
+                                    shown = dsml_filter.feed(piece) if dsml_filter else piece
+                                    if shown:
+                                        shown_text.append(shown)
+                                        out = text_stream.feed(shown) if text_stream else shown
+                                        if out:
+                                            yield {"type": "delta", "content": out}
                             elif isinstance(delta, ThinkingPartDelta):
                                 if delta.content_delta:
                                     piece = str(delta.content_delta)
@@ -1922,6 +1959,13 @@ async def _llm_chat_stream_full_once(
                                     yield {"type": "tool_progress",
                                            "id": str(delta.tool_call_id or ""),
                                            "index": event.index}
+                    if dsml_filter is not None:
+                        tail = dsml_filter.finish()
+                        if tail:
+                            shown_text.append(tail)
+                            out = text_stream.feed(tail) if text_stream else tail
+                            if out:
+                                yield {"type": "delta", "content": out}
                     response = stream.get()
                     usage = _usage_event(stream.usage)
                     finish_reason = _finish_reason(stream.finish_reason)
@@ -1931,9 +1975,10 @@ async def _llm_chat_stream_full_once(
         raise _request_error(e, llm_code, api_base) from e
 
     calls = _tool_calls_of(getattr(response, "parts", []))
-    if not finish_reason:
-        finish_reason = "tool_calls" if calls else "stop"
-    content = "".join(acc_text)
+    if not calls:
+        calls = _dsml_calls_of("".join(acc_text), tool_defs)
+    finish_reason = "tool_calls" if calls else (finish_reason or "stop")
+    content = "".join(shown_text) if dsml_filter is not None else "".join(acc_text)
     reasoning = "".join(acc_think)
     if magpie is not None:
         content = magpie.restore_text(content)

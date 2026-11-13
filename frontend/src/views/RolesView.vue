@@ -52,6 +52,8 @@ const menuItems = computed<ContextMenuItem[]>(() => {
     { label: '打开角色详情', action: 'detail' },
     { label: '编辑角色', action: 'edit' },
     { label: '发起单聊', action: 'chat' },
+    { label: '会话历史', action: 'sessions' },
+    { label: '全部会话（会话中心）', action: 'all-sessions' },
     { label: role?.status === 'offline' ? '设为在线' : '设为离线', action: 'presence' },
     { label: '复制名字', action: 'copy' },
     { label: '', action: '', separator: true },
@@ -76,6 +78,11 @@ async function onMenu(action: string): Promise<void> {
     return
   }
   if (action === 'chat') return startRoleChat(role.id)
+  if (action === 'sessions') return openRole(role)
+  if (action === 'all-sessions') {
+    void router.push(`/conv?role_id=${encodeURIComponent(role.id)}`)
+    return
+  }
   if (action === 'presence') {
     try {
       await api(`/roles/${encodeURIComponent(role.id)}`, {
@@ -256,10 +263,6 @@ function isRoleChat(conv: Conversation): boolean {
   return String(team?.kind || '') === 'participants'
 }
 
-function hasMessages(conv: Conversation): boolean {
-  return Number(conv.message_count || 0) > 0 || Boolean(conv.last_message)
-}
-
 const openingRole = ref('')
 
 async function startRoleChat(id: string): Promise<void> {
@@ -289,15 +292,19 @@ async function startRoleChat(id: string): Promise<void> {
     const localChats = data.conversations.filter(
       (conv) => conv.role_id === rid && isRoleChat(conv),
     )
-    let existing = localChats.find(hasMessages) || localChats[0] || null
+    // 同一角色 + 工作区只保留一条「当前会话」：优先打开工作区匹配的那条。
+    const roleWs = String(role.workspace_id || '')
+    let existing = localChats.find((conv) => String(conv.workspace_id || '') === roleWs)
+      || localChats[0] || null
     if (!existing) {
       // 最近 80 条里没有时再按 role_id 查一次：避免重复建单聊。
       try {
         const out = await api<ListResponse<Conversation>>(
-          `/conversations?role_id=${encodeURIComponent(rid)}&limit=50`,
+          `/conversations?role_id=${encodeURIComponent(rid)}&roots_only=1&limit=50`,
         )
         const chats = (out.items || []).filter(isRoleChat)
-        existing = chats.find(hasMessages) || chats[0] || null
+        existing = chats.find((conv) => String(conv.workspace_id || '') === roleWs)
+          || chats[0] || null
       } catch {
         // 查询失败不阻塞：退回到草稿窗口，消息发出后仍可正常落库。
       }
@@ -306,10 +313,22 @@ async function startRoleChat(id: string): Promise<void> {
       chatWindows.openConversation(existing.id)
       return
     }
-    chatWindows.openDraft(rid)
+    chatWindows.openDraft(rid, { workspaceId: roleWs })
   } finally {
     openingRole.value = ''
   }
+}
+
+/** 「新会话」：不复用已有会话，按角色当前工作区另起一条。 */
+function startNewRoleChat(id: string): void {
+  const role = data.roles.find((item) => item.id === id)
+  if (!role) return
+  chatWindows.openDraft(id, { workspaceId: String(role.workspace_id || '') })
+}
+
+/** 从角色详情的会话列表打开一条历史会话。 */
+function openRoleSession(conversationId: string): void {
+  chatWindows.openConversation(conversationId)
 }
 
 function startRoleWork(id: string): void {
@@ -498,6 +517,8 @@ function onWorkSaved(): void {
     @saved="onRoleSaved(roleId)"
     @deleted="onRoleDeleted"
     @chat="startRoleChat"
+    @new-chat="startNewRoleChat"
+    @session="openRoleSession"
     @work="startRoleWork"
   />
 

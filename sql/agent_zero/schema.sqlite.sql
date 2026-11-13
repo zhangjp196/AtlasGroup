@@ -113,6 +113,27 @@ CREATE TABLE conversations (
 	FOREIGN KEY(workspace_id) REFERENCES workspaces (id)
 );
 
+CREATE TABLE conversation_bots (
+	id TEXT NOT NULL PRIMARY KEY,
+	conversation_id TEXT NOT NULL,
+	provider TEXT NOT NULL,
+	bot_id TEXT NOT NULL,
+	secret TEXT NOT NULL,
+	peer_id TEXT NOT NULL
+);
+CREATE UNIQUE INDEX uq_conversation_bots_account ON conversation_bots (provider, bot_id);
+CREATE INDEX ix_conversation_bots_conversation_id ON conversation_bots (conversation_id);
+
+CREATE TABLE bot_routes (
+	id TEXT NOT NULL PRIMARY KEY,
+	bot_id TEXT NOT NULL REFERENCES conversation_bots (id) ON DELETE CASCADE,
+	conversation_id TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+	peer_id TEXT NOT NULL,
+	created_at DATETIME DEFAULT (datetime('now','localtime')) NOT NULL
+);
+CREATE UNIQUE INDEX uq_bot_routes_bot ON bot_routes (bot_id);
+CREATE INDEX ix_bot_routes_conversation_id ON bot_routes (conversation_id);
+
 CREATE TABLE gdag_edges (
 	from_id TEXT NOT NULL, 
 	to_id TEXT NOT NULL, 

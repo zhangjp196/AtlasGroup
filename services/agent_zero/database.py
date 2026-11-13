@@ -222,6 +222,52 @@ def _migrate_legacy_queue(conn) -> None:
         "WHERE priority = 0 AND queue_pos = -1"))
 
 
+def _migrate_bot_routes(conn) -> int:
+    """把旧版「机器人记录自带会话 / 聊天」提升为独立的聊天路由。
+
+    旧结构一条 `conversation_bots` 同时表示连接和唯聊天，新结构连接全局化、
+    聊天路由放 `bot_routes`。只搬有 peer_id 的旧记录，幂等。
+    """
+    columns = {str(row[1]) for row in conn.execute(
+        text('PRAGMA table_info("conversation_bots")'))}
+    if not {"conversation_id", "peer_id"}.issubset(columns):
+        return 0
+    result = conn.execute(text(
+        "INSERT INTO bot_routes (id, bot_id, conversation_id, peer_id, created_at) "
+        "SELECT 'botr-' || lower(hex(randomblob(6))), b.id, b.conversation_id, b.peer_id, "
+        "       datetime('now','localtime') "
+        "FROM conversation_bots b "
+        "WHERE COALESCE(b.conversation_id, '') <> '' "
+        "  AND COALESCE(b.peer_id, '') <> '' "
+        "  AND NOT EXISTS (SELECT 1 FROM bot_routes r "
+        "                  WHERE r.bot_id = b.id AND r.peer_id = b.peer_id)"
+    ))
+    return result.rowcount or 0
+
+
+def _migrate_single_bot_route(conn) -> int:
+    """机器人从「一个聊天一条路由」收敛为「一个机器人只绑定一个会话」。
+
+    旧库里同一个机器人可能有多条 `bot_routes`，只保留最后一条，并把最近聊天
+    回填到 `conversation_bots.peer_id`；随后建立 `bot_id` 唯一索引。
+    """
+    rows = conn.execute(text('PRAGMA table_info("bot_routes")')).mappings().all()
+    if not rows:
+        return 0
+    conn.execute(text("DROP INDEX IF EXISTS uq_bot_routes_peer"))
+    removed = conn.execute(text(
+        "DELETE FROM bot_routes WHERE rowid NOT IN "
+        "(SELECT MAX(rowid) FROM bot_routes GROUP BY bot_id)"
+    )).rowcount or 0
+    conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_bot_routes_bot ON bot_routes(bot_id)"))
+    conn.execute(text(
+        "UPDATE conversation_bots SET peer_id = COALESCE("
+        "(SELECT r.peer_id FROM bot_routes r WHERE r.bot_id = conversation_bots.id), peer_id)"
+    ))
+    return removed
+
+
 def _schema_version_on_disk(path: str) -> int:
     """读取库文件里记录的 schema 版本；没有库 / 没有标记都返回 0。"""
     if not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -276,7 +322,8 @@ def _archive_legacy_database() -> bool:
 def init_database() -> None:
     """按 v3 基线建表（幂等），补旧库缺失列，并做版本守卫。"""
     from services.agent_zero.models.zero import (  # noqa: F401
-        Workspace, Department, Role, Conversation, ConversationRun, ConversationRunEvent,
+        Workspace, Department, Role, Conversation, ConversationBot, BotRoute,
+        ConversationRun, ConversationRunEvent,
         TeamTask, GdagNode, GdagEdge, AuditLog, AppSetting, AgentTeam,
         TodoItem, Goal, WorkItem, ScheduledTask,
         ENSURE_INDEXES,
@@ -299,6 +346,12 @@ def init_database() -> None:
                 "UPDATE conversations SET last_read_at = updated_at "
                 "WHERE last_read_at IS NULL"))
         _migrate_legacy_queue(conn)
+        moved = _migrate_bot_routes(conn)
+        if moved:
+            logger.info("旧机器人聊天已迁移为独立路由：%d 条", moved)
+        removed = _migrate_single_bot_route(conn)
+        if removed:
+            logger.info("机器人路由收敛为单会话绑定：移除 %d 条旧路由", removed)
         # 旧库把「会话私有参与角色」也存成团队：按 id 前缀补成 participants，
         # 群组页 / /teams 默认列表只展示真正的群组（kind=group）。
         conn.execute(text(
