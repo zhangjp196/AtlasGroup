@@ -5039,7 +5039,11 @@ async def _prepare_role_run(
     try:
         from services.agent_zero.services import mcp_service
 
-        mcp_specs = await mcp_service.enabled_tool_specs()
+        mcp_specs = await mcp_service.enabled_tool_specs(
+            conversation_id=str(conv.get("id") or ""),
+            role_id="" if is_global else str(role.get("id") or ""),
+            team_id=str((team or {}).get("id") or ""),
+        )
     except Exception as e:
         logger.warning("MCP 工具列表获取失败: %s", e)
     # single 模式的团队只作角色预设：不下发委派工具，避免把「单角」跑成群聊。

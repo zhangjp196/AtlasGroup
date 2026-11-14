@@ -168,10 +168,11 @@ const menu = reactive<{
   open: boolean
   x: number
   y: number
-  kind: 'session' | 'role' | ''
+  kind: 'session' | 'role' | 'group' | ''
   conv: Conversation | null
   role: Role | null
-}>({ open: false, x: 0, y: 0, kind: '', conv: null, role: null })
+  group: Team | null
+}>({ open: false, x: 0, y: 0, kind: '', conv: null, role: null, group: null })
 
 const menuItems = computed<ContextMenuItem[]>(() => {
   if (menu.kind === 'session' && menu.conv) {
@@ -192,6 +193,14 @@ const menuItems = computed<ContextMenuItem[]>(() => {
       { label: '设为离线', action: 'offline', danger: true },
     ]
   }
+  if (menu.kind === 'group' && menu.group) {
+    return [
+      { label: '打开群聊', action: 'group-chat', disabled: !(menu.group.members || []).length },
+      { label: '打开群资料', action: 'group-detail' },
+      { label: '查看群组会话', action: 'group-sessions' },
+      { label: '复制群名', action: 'group-copy' },
+    ]
+  }
   return []
 })
 
@@ -199,6 +208,7 @@ function openSessionMenu(event: MouseEvent, conv: Conversation): void {
   menu.kind = 'session'
   menu.conv = conv
   menu.role = null
+  menu.group = null
   menu.x = event.clientX
   menu.y = event.clientY
   menu.open = true
@@ -208,6 +218,17 @@ function openRoleMenu(event: MouseEvent, role: Role): void {
   menu.kind = 'role'
   menu.role = role
   menu.conv = null
+  menu.group = null
+  menu.x = event.clientX
+  menu.y = event.clientY
+  menu.open = true
+}
+
+function openGroupMenu(event: MouseEvent, group: Team): void {
+  menu.kind = 'group'
+  menu.group = group
+  menu.conv = null
+  menu.role = null
   menu.x = event.clientX
   menu.y = event.clientY
   menu.open = true
@@ -227,6 +248,22 @@ async function onMenu(action: string): Promise<void> {
       chatWindows.openDraft(menu.role.id)
     } else if (action === 'detail') openRoleDetail(menu.role)
     else if (action === 'offline') await setOffline(menu.role)
+    return
+  }
+  if (menu.kind === 'group' && menu.group) {
+    const group = menu.group
+    if (action === 'group-chat') await openGroupChat(group)
+    else if (action === 'group-detail') void router.push(`/group/${encodeURIComponent(group.id)}`)
+    else if (action === 'group-sessions') {
+      void router.push(`/conv?team_id=${encodeURIComponent(group.id)}`)
+    } else if (action === 'group-copy') {
+      try {
+        await navigator.clipboard.writeText(group.name)
+        app.toast('已复制群名')
+      } catch {
+        app.toast('复制失败', 'bad')
+      }
+    }
   }
 }
 
@@ -350,7 +387,8 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
 
     <div v-else class="dock-list">
       <button v-for="group in filteredGroups" :key="group.id" class="dock-row" type="button"
-        :title="`打开群聊：${group.name}`" @click="openGroupChat(group)">
+        :title="`${group.name} · 点击打开群聊，右键查看操作`" @click="openGroupChat(group)"
+        @contextmenu.prevent.stop="openGroupMenu($event, group)">
         <Avatar :name="group.name" :avatar="group.avatar" :size="38" />
         <span class="dock-main">
           <span class="dock-line"><b>{{ group.name }}</b><span class="dock-count">{{ group.members?.length || 0 }} 位成员</span></span>

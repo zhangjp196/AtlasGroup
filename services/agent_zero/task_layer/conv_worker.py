@@ -331,7 +331,16 @@ class ConversationRunWorker:
 
     async def _cycle(self) -> None:
         self._reap_orphans()
-        capacity = get_settings().max_concurrent_conversation_runs - len(self._live)
+        global_limit = max(0, int(get_settings().max_concurrent_conversation_runs))
+        try:
+            running_count = run_service.count_runs(status=run_service.STATUS_RUNNING)
+        except Exception:
+            logger.exception("读取全局运行数失败；本轮不派发新任务")
+            return
+        # `running_count` spans every session and team member in SQLite, including
+        # work claimed by another worker instance. `_live` also counts tasks that
+        # have been scheduled locally but have not reached their atomic DB claim yet.
+        capacity = global_limit - max(len(self._live), running_count)
         if capacity <= 0:
             return
         try:

@@ -560,6 +560,8 @@ def claim_run(run_id: str) -> bool:
     """queued → running（CAS 单写，防多 worker 双跑）。成功返回 True。
 
     并发规则：
+    - 所有会话 / 成员任务共享 ``max_concurrent_conversation_runs`` 全局上限；
+      在数据库 CAS 中检查，避免多个 worker 实例各自按本地槽位超额认领；
     - 同一对话**至多一条主持 run**（target_role_id 为空）；
     - 成员并行 run（target_role_id 非空）可以同时跑，上限见
       ``parallel_member_limit()``；主持与成员可以并存（主持派发后立即返回，
@@ -567,11 +569,16 @@ def claim_run(run_id: str) -> bool:
     """
     SessionLocal = get_session_local()
     limit = parallel_member_limit()
+    from services.agent_zero.config import get_settings
+
+    global_limit = max(0, int(get_settings().max_concurrent_conversation_runs))
     with SessionLocal() as db:
         res = db.execute(
             text(f"UPDATE {_q('conversation_runs')} "
                  f"SET status = :running, started_at = datetime('now','localtime'), updated_at = datetime('now','localtime') "
                  f"WHERE id = :id AND status = :queued "
+                 f"AND (SELECT COUNT(*) FROM {_q('conversation_runs')} rg "
+                 f"     WHERE rg.status = :running) < :global_limit "
                  f"AND ( "
                  f"  (COALESCE(target_role_id, '') = '' AND NOT EXISTS ( "
                  f"    SELECT 1 FROM {_q('conversation_runs')} r2 "
@@ -584,7 +591,7 @@ def claim_run(run_id: str) -> bool:
                  f"      AND r3.status = :running AND COALESCE(r3.target_role_id, '') <> '') < :parallel_limit) "
                  f")"),
             {"id": run_id, "running": STATUS_RUNNING, "queued": STATUS_QUEUED,
-             "parallel_limit": limit},
+             "parallel_limit": limit, "global_limit": global_limit},
         )
         db.commit()
         return bool(res.rowcount)

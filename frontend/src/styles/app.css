@@ -1566,8 +1566,11 @@ body.ga-open .ga-fab{display:none}
 .agent-task-actions .btn{padding:3px 8px;font-size:10px}
 .agent-task-actions .btn.danger{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 35%,var(--line))}
 .agent-flow-wrap{flex:1;min-width:0;position:relative;background-color:var(--bg-2);background-image:radial-gradient(var(--line) .7px,transparent .7px);background-size:18px 18px}
+.agent-flow-guide{position:absolute;top:12px;right:14px;z-index:5;border:1px solid var(--line);border-radius:999px;background:color-mix(in srgb,var(--panel) 92%,transparent);box-shadow:0 4px 14px rgba(0,0,0,.12);padding:6px 10px;color:var(--dim);font-size:10px;pointer-events:none}
 .agent-flow-empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--faint);font-size:11px}
 .agent-flow{width:100%;height:100%}
+.agent-flow .vue-flow__node{cursor:grab}
+.agent-flow .vue-flow__node.dragging{cursor:grabbing;z-index:10}
 .agent-flow .vue-flow__node{font-family:inherit}
 .agent-flow .vue-flow__edge-text{fill:var(--faint);font-size:9px}
 .agent-flow .vue-flow__controls{border:1px solid var(--line);border-radius:9px;overflow:hidden;box-shadow:0 8px 20px rgba(0,0,0,.16)}

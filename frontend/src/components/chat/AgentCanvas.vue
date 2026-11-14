@@ -37,6 +37,7 @@ const taskBusy = ref('')
 const flowKey = ref(0)
 const flowNodes = ref<any[]>([])
 const flowEdges = ref<any[]>([])
+const flowWrapEl = ref<HTMLElement | null>(null)
 const vfNodes = computed(() => flowNodes.value)
 const vfEdges = computed(() => flowEdges.value)
 let timer: number | null = null
@@ -332,6 +333,7 @@ function buildConversationFlow(): { nodes: any[]; edges: any[] } {
 
 function buildFlow(): void {
   const built = activeTask.value ? buildTaskFlow(activeTask.value) : buildConversationFlow()
+  built.nodes = arrangeWithoutOverlap(built.nodes)
   const signature = built.nodes.map((node) => node.id).join('|')
   flowNodes.value = built.nodes
   flowEdges.value = built.edges
@@ -339,6 +341,110 @@ function buildFlow(): void {
     flowSignature = signature
     flowKey.value += 1
   }
+}
+
+const NODE_GAP = 20
+const NODE_GRID_X = 280
+const NODE_GRID_Y = 170
+
+function positionStorageKey(): string {
+  return `atlasx.agent-canvas.positions.v1:${props.conversationId}:${selectedTaskId.value || '__all__'}`
+}
+
+function readNodePositions(): Record<string, { x: number; y: number }> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(positionStorageKey()) || '{}')
+    return raw && typeof raw === 'object' ? raw : {}
+  } catch {
+    return {}
+  }
+}
+
+function nodeSize(node: any): { width: number; height: number } {
+  const measured = node?.dimensions || {}
+  const element = flowWrapEl.value?.querySelector<HTMLElement>(
+    `[data-id="${CSS.escape(String(node?.id || ''))}"]`,
+  )
+  const estimatedLines = Math.max(1, Math.ceil(
+    String(node?.data?.current || node?.data?.goal || '等待中').length / 30,
+  ))
+  return {
+    width: Number(measured.width || node?.width || 0) || element?.offsetWidth || 240,
+    height: Number(measured.height || node?.height || 0)
+      || element?.offsetHeight || 118 + (estimatedLines - 1) * 15,
+  }
+}
+
+function overlaps(a: { x: number; y: number }, aSize: { width: number; height: number },
+                  b: { x: number; y: number }, bSize: { width: number; height: number }): boolean {
+  return a.x < b.x + bSize.width + NODE_GAP
+    && a.x + aSize.width + NODE_GAP > b.x
+    && a.y < b.y + bSize.height + NODE_GAP
+    && a.y + aSize.height + NODE_GAP > b.y
+}
+
+function nearestFreePosition(
+  node: any,
+  requested: { x: number; y: number },
+  placed: any[],
+): { x: number; y: number } {
+  const size = nodeSize(node)
+  const free = (position: { x: number; y: number }) => placed.every((other) =>
+    !overlaps(position, size, other.position, nodeSize(other)))
+  if (free(requested)) return requested
+
+  // Keep the dragged position as close as possible while looking around it in
+  // expanding rows; this gives predictable collision avoidance without snapping
+  // every move to a coarse grid.
+  for (let ring = 1; ring <= 40; ring += 1) {
+    const candidates: Array<{ x: number; y: number }> = []
+    for (let x = -ring; x <= ring; x += 1) {
+      candidates.push(
+        { x: requested.x + x * NODE_GRID_X, y: requested.y - ring * NODE_GRID_Y },
+        { x: requested.x + x * NODE_GRID_X, y: requested.y + ring * NODE_GRID_Y },
+      )
+    }
+    for (let y = -ring + 1; y < ring; y += 1) {
+      candidates.push(
+        { x: requested.x - ring * NODE_GRID_X, y: requested.y + y * NODE_GRID_Y },
+        { x: requested.x + ring * NODE_GRID_X, y: requested.y + y * NODE_GRID_Y },
+      )
+    }
+    const hit = candidates.find(free)
+    if (hit) return hit
+  }
+  return { x: requested.x, y: requested.y + NODE_GRID_Y * 41 }
+}
+
+function arrangeWithoutOverlap(nodes: any[]): any[] {
+  const saved = readNodePositions()
+  const placed: any[] = []
+  return nodes.map((node) => {
+    const candidate = saved[node.id]
+    const wanted = candidate && Number.isFinite(candidate.x) && Number.isFinite(candidate.y)
+      ? candidate
+      : node.position
+    const position = nearestFreePosition(node, wanted, placed)
+    const arranged = { ...node, position }
+    placed.push(arranged)
+    return arranged
+  })
+}
+
+function saveNodePositions(): void {
+  const positions = Object.fromEntries(flowNodes.value.map((node) => [node.id, node.position]))
+  try { localStorage.setItem(positionStorageKey(), JSON.stringify(positions)) } catch { /* storage may be disabled */ }
+}
+
+function onNodeDragStop(payload: any): void {
+  const dragged = payload?.node || payload
+  if (!dragged?.id || !dragged?.position) return
+  const others = flowNodes.value.filter((node) => node.id !== dragged.id)
+  const position = nearestFreePosition(dragged, dragged.position, others)
+  flowNodes.value = flowNodes.value.map((node) => node.id === dragged.id
+    ? { ...node, position }
+    : node)
+  saveNodePositions()
 }
 
 function selectTask(taskId: string): void {
@@ -568,7 +674,10 @@ onBeforeUnmount(stop)
         </div>
       </aside>
 
-      <div class="agent-flow-wrap">
+      <div ref="flowWrapEl" class="agent-flow-wrap">
+        <div v-if="flowNodes.length" class="agent-flow-guide">
+          拖动节点调整布局 · 松开时自动避让重叠
+        </div>
         <div v-if="loading" class="empty">加载中…</div>
         <div v-else-if="!flowNodes.length" class="empty agent-flow-empty">当前没有代理执行记录</div>
         <VueFlow
@@ -577,11 +686,12 @@ onBeforeUnmount(stop)
           :nodes="vfNodes"
           :edges="vfEdges"
           :fit-view-on-init="true"
-          :nodes-draggable="false"
+          :nodes-draggable="true"
           :min-zoom="0.2"
           :max-zoom="1.6"
           class="agent-flow"
           @node-click="onNodeClick"
+          @node-drag-stop="onNodeDragStop"
         >
           <Background :gap="18" :size="1" />
           <Controls />

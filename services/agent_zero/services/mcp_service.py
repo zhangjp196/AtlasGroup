@@ -69,9 +69,25 @@ def _normalize(cfg: Dict[str, Any]) -> Dict[str, Any]:
     stype = str(cfg.get("type") or "stdio").strip().lower()
     if stype not in ("stdio", "http"):
         raise ValueError("MCP 类型必须是 stdio 或 http")
+    scope = str(cfg.get("scope") or "global").strip().lower()
+    if scope not in ("global", "conversation", "role", "team"):
+        raise ValueError("MCP 作用域必须是 global / conversation / role / team")
+    conversation_id = str(cfg.get("conversation_id") or "").strip()
+    role_id = str(cfg.get("role_id") or "").strip()
+    team_id = str(cfg.get("team_id") or "").strip()
+    if scope == "conversation" and not conversation_id:
+        raise ValueError("会话级 MCP 缺少 conversation_id")
+    if scope == "role" and not role_id:
+        raise ValueError("角色级 MCP 缺少 role_id")
+    if scope == "team" and not team_id:
+        raise ValueError("群组级 MCP 缺少 team_id")
     out: Dict[str, Any] = {
         "id": str(cfg.get("id") or zero_store.new_id("mcp")),
         "name": name[:120],
+        "scope": scope,
+        "conversation_id": conversation_id,
+        "role_id": role_id,
+        "team_id": team_id,
         "type": stype,
         "enabled": bool(cfg.get("enabled", True)),
         "package": str(cfg.get("package") or "").strip()[:200],
@@ -128,7 +144,8 @@ def update_server(server_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         merged = dict(s)
         for key in ("name", "type", "command", "args", "env", "url", "headers",
                     "package", "install_command", "enabled", "note", "installed",
-                    "persistent", "tool_allowlist"):
+                    "persistent", "tool_allowlist", "scope", "conversation_id",
+                    "role_id", "team_id"):
             if key in patch:
                 merged[key] = patch[key]
         normalized = _normalize(merged)
@@ -155,6 +172,54 @@ def delete_server(server_id: str) -> bool:
 
 def export_servers() -> Dict[str, Any]:
     return {"version": 1, "servers": list_servers()}
+
+
+def server_visible(server: Dict[str, Any], *, conversation_id: str = "",
+                   role_id: str = "", team_id: str = "") -> bool:
+    """MCP 配置默认全局；代理创建的服务按 conversation/role/team 限定。"""
+    scope = str(server.get("scope") or "global").strip().lower()
+    if scope == "global":
+        return True
+    if scope == "conversation":
+        return bool(conversation_id) and str(server.get("conversation_id") or "") == conversation_id
+    if scope == "role":
+        return bool(role_id) and str(server.get("role_id") or "") == role_id
+    if scope == "team":
+        return bool(team_id) and str(server.get("team_id") or "") == team_id
+    return False
+
+
+def servers_for_scope(*, conversation_id: str = "", role_id: str = "",
+                      team_id: str = "") -> List[Dict[str, Any]]:
+    return [server for server in list_servers()
+            if server_visible(server, conversation_id=conversation_id,
+                              role_id=role_id, team_id=team_id)]
+
+
+def request_scope(conversation_id: str, role_id: str = "",
+                  team_id: str = "") -> Dict[str, str]:
+    """Choose the narrowest scope already authorized for MCP setup operations.
+
+    A plain/once/session approval creates an MCP for the current conversation.
+    Existing permanent ``mcp`` / ``add_mcp_server`` / ``install_mcp`` grants may
+    broaden it to the authorized role or group.
+    """
+    from services.agent_zero.task_layer import permissions
+
+    accepted = {"mcp", "add_mcp_server", "install_mcp"}
+    grants = permissions.list_scope_grants(role_id=role_id, team_id=team_id)
+    # A group grant applies to all its members and therefore takes precedence when
+    # both a role and a group grant already exist.
+    for wanted in ("team", "role"):
+        for grant in grants:
+            if grant.get("scope") == wanted and str(grant.get("tool") or "") in accepted:
+                if wanted == "team" and team_id and str(grant.get("team_id") or "") == team_id:
+                    return {"scope": "team", "team_id": team_id}
+                if wanted == "role" and role_id and str(grant.get("role_id") or "") == role_id:
+                    return {"scope": "role", "role_id": role_id}
+    if conversation_id:
+        return {"scope": "conversation", "conversation_id": conversation_id}
+    return {"scope": "global"}
 
 
 def import_servers(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -617,10 +682,12 @@ async def server_tools(server_id: str, refresh: bool = False) -> List[Dict[str, 
     return tools
 
 
-async def enabled_tool_specs() -> List[Dict[str, Any]]:
-    """所有启用的 MCP 服务工具，转成 OpenAI function spec（带命名前缀）。"""
+async def enabled_tool_specs(conversation_id: str = "", role_id: str = "",
+                             team_id: str = "") -> List[Dict[str, Any]]:
+    """当前 conversation/role/team 可见的 MCP 工具，转成模型 function spec。"""
     specs: List[Dict[str, Any]] = []
-    for server in list_servers():
+    for server in servers_for_scope(conversation_id=conversation_id,
+                                   role_id=role_id, team_id=team_id):
         if not server.get("enabled"):
             continue
         try:
@@ -646,10 +713,15 @@ async def enabled_tool_specs() -> List[Dict[str, Any]]:
     return specs
 
 
-async def call_tool(server_id: str, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
+async def call_tool(server_id: str, tool: str, args: Dict[str, Any], *,
+                    conversation_id: str = "", role_id: str = "",
+                    team_id: str = "") -> Dict[str, Any]:
     server = get_server(server_id)
     if not server or not server.get("enabled"):
         return {"error": f"MCP 服务不可用: {server_id}"}
+    if not server_visible(server, conversation_id=conversation_id,
+                          role_id=role_id, team_id=team_id):
+        return {"error": f"当前会话无权访问 MCP 服务: {server_id}"}
     await reap_idle(exclude=server_id)
     _last_used[server_id] = time.time()
     client = _client(server)

@@ -314,7 +314,7 @@ class ToolDispatcher:
         if pack_error:
             return {"error": pack_error}
         if canon.startswith("mcp__"):
-            result = await self._act_mcp_tool(canon, args)
+            result = await self._act_mcp_tool(canon, args, task)
             result = self._spill_if_huge(result, task, canon)
             self._invalidate_codegraph(task, canon)
             return result
@@ -393,7 +393,7 @@ class ToolDispatcher:
             return await self._act_skills(canon, args,
                                           role_id=str(task.get("role_id") or ""))
         if canon in MCP_CONFIG_CODES:
-            return await self._act_mcp_config(canon, args)
+            return await self._act_mcp_config(canon, args, task)
         return {"error": f"工具 {canon} 未实现"}
 
     @staticmethod
@@ -668,14 +668,44 @@ class ToolDispatcher:
         except Exception as e:
             return {"error": f"表达式非法: {e}"}
 
-    async def _act_mcp_tool(self, name: str, args: Dict[str, Any]) -> Any:
+    async def _act_mcp_tool(self, name: str, args: Dict[str, Any],
+                            task: Dict[str, Any]) -> Any:
         """执行 mcp__<server_id>__<tool> 形式的 MCP 工具。"""
         from services.agent_zero.services import mcp_service
 
         parts = name.split("__", 2)
         if len(parts) != 3 or not parts[1] or not parts[2]:
             return {"error": f"非法 MCP 工具名: {name}（应为 mcp__<server>__<tool>）"}
-        return await mcp_service.call_tool(parts[1], parts[2], args or {})
+        context = self._mcp_context(task)
+        return await mcp_service.call_tool(parts[1], parts[2], args or {}, **context)
+
+    @staticmethod
+    def _mcp_context(task: Dict[str, Any]) -> Dict[str, str]:
+        """Resolve the current conversation/role/group for MCP scope checks."""
+        from sqlalchemy import text
+
+        from services.agent_zero.database import get_session_local
+        from services.agent_zero.services import team_service
+
+        conv_id = str(task.get("conversation_id") or "")
+        role_id = str(task.get("role_id") or "")
+        team_id = str(task.get("team_id") or "")
+        if conv_id:
+            try:
+                SessionLocal = get_session_local()
+                with SessionLocal() as db:
+                    row = db.execute(text(
+                        "SELECT * FROM conversations WHERE id = :id"
+                    ), {"id": conv_id}).mappings().first()
+                if row:
+                    conv = dict(row)
+                    role_id = role_id or str(conv.get("role_id") or "")
+                    if not team_id:
+                        team = team_service.team_for_conv(conv)
+                        team_id = str((team or {}).get("id") or "")
+            except Exception:
+                logger.debug("MCP scope context lookup failed", exc_info=True)
+        return {"conversation_id": conv_id, "role_id": role_id, "team_id": team_id}
 
     async def _act_skills(self, canon: str, args: Dict[str, Any],
                           role_id: str = "") -> Any:
@@ -718,20 +748,24 @@ class ToolDispatcher:
             return {"error": f"技能操作失败: {e}"}
         return {"error": f"技能工具 {canon} 未实现"}
 
-    async def _act_mcp_config(self, canon: str, args: Dict[str, Any]) -> Any:
+    async def _act_mcp_config(self, canon: str, args: Dict[str, Any],
+                              task: Dict[str, Any]) -> Any:
         from services.agent_zero.services import mcp_service
 
         try:
+            context = self._mcp_context(task)
             if canon == "list_mcp":
                 servers = []
-                for s in mcp_service.list_servers():
+                for s in mcp_service.servers_for_scope(**context):
                     tools = mcp_service._tool_cache.get(s["id"], {}).get("tools") or []
                     servers.append({"id": s["id"], "name": s["name"], "type": s["type"],
                                    "enabled": s["enabled"], "tools": len(tools),
                                    "installed": s.get("installed", False)})
                 return {"servers": servers, "npm": mcp_service.npm_available()}
             if canon == "add_mcp_server":
-                return {"ok": True, "server": mcp_service.add_server(args)}
+                scope = mcp_service.request_scope(**context)
+                cfg = {**args, **scope}
+                return {"ok": True, "server": mcp_service.add_server(cfg)}
             if canon == "install_mcp":
                 pkg = str(args.get("package") or "")
                 res = await mcp_service.install_package(
@@ -744,6 +778,7 @@ class ToolDispatcher:
                     "package": pkg,
                     "args": args.get("args") or [],
                     "installed": True,
+                    **mcp_service.request_scope(**context),
                 })
                 try:
                     tools = await mcp_service.server_tools(server["id"], refresh=True)
