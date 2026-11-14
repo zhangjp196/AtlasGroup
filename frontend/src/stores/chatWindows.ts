@@ -486,11 +486,7 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     if (!hit) return
     const tab = hit.tabs.find((item) => item.key === tabKey)
     if (!tab) return
-    // 会话根本身不能当作普通栏目关掉：删会话由后端负责，这里直接关窗口。
-    if (!tab.draft && tab.conversationId && tab.conversationId === hit.sessionRootId) {
-      close(key)
-      return
-    }
+    // 关闭只收起当前栏目；即使它是根栏目，也不连带关闭仍打开的其他栏目。
     hit.tabs = hit.tabs.filter((item) => item.key !== tabKey)
     if (!hit.tabs.length) {
       close(key)
@@ -507,7 +503,10 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     for (const hit of windows.value) {
       const tab = hit.tabs.find((item) => item.conversationId === conversationId)
       if (tab) {
-        closeTab(hit.key, tab.key)
+        // This helper is used after a persisted conversation was deleted. A deleted
+        // root takes its whole session with it, so discard the now-stale window.
+        if (conversationId === hit.sessionRootId) close(hit.key)
+        else closeTab(hit.key, tab.key)
         return
       }
     }

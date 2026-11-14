@@ -1564,7 +1564,8 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
         <button v-if="!isDraft" class="head-btn task-btn" title="任务中心（执行 / 工单）" aria-label="任务中心" @click="openTaskCenter">
           ◎<span v-if="taskCenterCount" class="head-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span>
         </button>
-        <button class="head-btn close-btn" title="关闭窗口" aria-label="关闭窗口" @click="emit('close')">×</button>
+        <button class="head-btn close-btn" title="关闭窗口" aria-label="关闭窗口"
+          @pointerdown.stop @click.stop="emit('close')">×</button>
       </div>
     </header>
 

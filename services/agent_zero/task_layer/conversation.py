@@ -6977,23 +6977,18 @@ def list_conversations(workspace_id: Optional[str] = None,
 
 
 def mark_conversation_read(conv_id: str) -> bool:
-    """把会话的已读水位推到当前时间（打开会话 / 本轮回复收尾时调用）。
-
-    栏目共享同一个会话：标记已读时整棵会话（根 + 所有栏目）一起推进。
-    """
+    """只把指定栏目（对话）的已读水位推到当前时间。"""
     from sqlalchemy import text
     from services.agent_zero.database import get_session_local
     from services.agent_zero.stores.zero_store import _q
 
-    conv = get_conversation(conv_id) or {}
-    root = str(conv.get("session_root_id") or conv_id)
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         res = db.execute(
             text(f"UPDATE {_q('conversations')} "
                  f"SET last_read_at = datetime('now','localtime') "
-                 f"WHERE id = :root OR session_id = :root"),
-            {"root": root},
+                 f"WHERE id = :cid"),
+            {"cid": conv_id},
         )
         db.commit()
         return bool(res.rowcount)
@@ -7617,14 +7612,21 @@ def delete_conversation(conv_id: str) -> bool:
     from services.agent_zero.database import get_session_local
     from services.agent_zero.stores.zero_store import _q
 
-    meta = get_conversation(conv_id) or {}
-    if str(meta.get("session_root_id") or conv_id) == conv_id:
-        SessionLocal = get_session_local()
-        with SessionLocal() as db:
-            child_ids = [str(row[0]) for row in db.execute(
-                text(f"SELECT id FROM {_q('conversations')} WHERE session_id = :cid"),
-                {"cid": conv_id},
-            ).all()]
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        # Decide from the stored parent link, not the normalized session_root_id
+        # returned by get_conversation(): deleting a child lane must never fan out
+        # into deletion of its siblings (or its root).
+        row = db.execute(
+            text(f"SELECT session_id FROM {_q('conversations')} WHERE id = :cid"),
+            {"cid": conv_id},
+        ).first()
+        is_root = row is not None and not str(row[0] or "").strip()
+        child_ids = [str(child[0]) for child in db.execute(
+            text(f"SELECT id FROM {_q('conversations')} WHERE session_id = :cid"),
+            {"cid": conv_id},
+        ).all()] if is_root else []
+    if is_root:
         for child_id in child_ids:
             try:
                 delete_conversation(child_id)
