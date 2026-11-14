@@ -450,8 +450,8 @@ function showEarlierMessages(): void {
 const tempOpen = ref(false)
 const tempForm = reactive({ name: '', expertise: '', persona: '' })
 type RightPanel = 'browser' | 'terminal' | 'tasks'
-const activeRightPanel = ref<RightPanel | null>(null)
-const rightPanelCollapsed = ref(false)
+const activeRightPanel = ref<RightPanel | null>(props.conversationId ? 'tasks' : isDraft.value ? 'browser' : null)
+const rightPanelCollapsed = ref(true)
 const conversationLargeMode = ref(false)
 const lastRightPanel = ref<RightPanel>('tasks')
 const settingsOpen = ref(false)
@@ -885,14 +885,24 @@ async function loadBackgroundTasks(): Promise<void> {
 function toggleRightPanel(panel: RightPanel): void {
   if (panel === 'terminal' && (!terminalAvailable.value || workspaceSwitching.value)) return
   if (panel === 'tasks' && !convId.value) return
+  if (conversationLargeMode.value) conversationLargeMode.value = false
   activeRightPanel.value = panel
   lastRightPanel.value = panel
   rightPanelCollapsed.value = false
 }
 
-function toggleRightWorkspace(): void {
+function toggleRightPanelCollapsed(): void {
   if (conversationLargeMode.value) {
     conversationLargeMode.value = false
+    rightPanelCollapsed.value = true
+    return
+  }
+  rightPanelCollapsed.value = !rightPanelCollapsed.value
+}
+
+function toggleRightWorkspace(): void {
+  if (conversationLargeMode.value) {
+    toggleConversationLargeMode()
     return
   }
   if (!activeRightPanel.value) {
@@ -1645,7 +1655,7 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
       </div>
     </header>
 
-    <div class="chat-workspace" :class="{ 'right-panel-open': activeRightPanel, 'right-panel-collapsed': activeRightPanel && rightPanelCollapsed, 'conversation-large-mode': conversationLargeMode }">
+    <div class="chat-workspace" :class="{ 'right-panel-open': activeRightPanel && !conversationLargeMode, 'right-panel-collapsed': activeRightPanel && rightPanelCollapsed && !conversationLargeMode, 'conversation-large-mode': conversationLargeMode }">
     <div class="chat-main">
     <div class="chat-body">
       <aside v-if="showLanes && !lanesCollapsed && !conversationLargeMode" class="lanes" aria-label="栏目">
@@ -1857,8 +1867,8 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
         <button v-if="terminalAvailable" type="button" title="终端" aria-label="终端" :class="{ active: activeRightPanel === 'terminal' }" :aria-pressed="activeRightPanel === 'terminal'" @click="toggleRightPanel('terminal')"><span class="panel-icon">›_</span><span class="panel-label">终端</span></button>
         <button v-if="!isDraft" type="button" title="协作中心" aria-label="协作中心" :class="{ active: activeRightPanel === 'tasks' }" :aria-pressed="activeRightPanel === 'tasks'" @click="toggleRightPanel('tasks')"><span class="panel-icon">◎</span><span class="panel-label">协作中心</span><span v-if="taskCenterCount" class="dock-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span></button>
         <span class="right-panel-tabs-spacer" />
-        <button v-if="!rightPanelCollapsed" class="right-panel-large" type="button" :title="conversationLargeMode ? '退出会话大屏' : '切换会话大屏模式'" :aria-pressed="conversationLargeMode" @click="toggleConversationLargeMode">⛶</button>
-        <button class="dock-collapse" type="button" :title="rightPanelCollapsed ? '展开右侧工作区' : '收起右侧工作区'" :aria-label="rightPanelCollapsed ? '展开右侧工作区' : '收起右侧工作区'" @click="rightPanelCollapsed = !rightPanelCollapsed">{{ rightPanelCollapsed ? '‹' : '›' }}</button>
+        <button v-if="!rightPanelCollapsed" class="right-panel-large" type="button" :title="conversationLargeMode ? '还原会话区' : '放大到会话区'" :aria-label="conversationLargeMode ? '还原会话区' : '放大到会话区'" :aria-pressed="conversationLargeMode" @click="toggleConversationLargeMode">⛶</button>
+        <button class="dock-collapse" type="button" :title="rightPanelCollapsed || conversationLargeMode ? '展开右侧工作区' : '收起右侧工作区'" :aria-label="rightPanelCollapsed || conversationLargeMode ? '展开右侧工作区' : '收起右侧工作区'" @click="toggleRightPanelCollapsed">{{ rightPanelCollapsed || conversationLargeMode ? '‹' : '›' }}</button>
       </nav>
       <div class="right-panel-content">
         <BrowserPanel v-if="activeRightPanel === 'browser'" :open="true" @close="collapseRightPanel" />

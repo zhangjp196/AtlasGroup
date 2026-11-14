@@ -9,8 +9,8 @@ const data = useDataStore()
 const route = useRoute()
 const router = useRouter()
 
-const props = defineProps<{ pendingCount?: number; globalAgentOpen?: boolean; globalChatOpen?: boolean }>()
-const emit = defineEmits<{ (e: 'global-agent'): void; (e: 'global-chat'): void; (e: 'navigate'): void }>()
+const props = defineProps<{ pendingCount?: number; globalAgentOpen?: boolean; globalChatOpen?: boolean; collapsed?: boolean }>()
+const emit = defineEmits<{ (e: 'global-agent'): void; (e: 'global-chat'): void; (e: 'navigate'): void; (e: 'toggle-collapse'): void }>()
 
 const sections = [
   { key: 'work', label: '工单', path: '/work' },
@@ -40,6 +40,12 @@ function toggle(): void {
       <span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 17h-5l-4-8-4 8H3L12 3Z" fill="currentColor"/><path d="M10.5 19h3v2h-3z" fill="currentColor"/></svg></span>
       <span class="rail-brand-name">AtlasX</span>
     </router-link>
+    <button class="rail-collapse-toggle" type="button" :title="props.collapsed ? '展开导航栏' : '收起导航栏'"
+      :aria-label="props.collapsed ? '展开导航栏' : '收起导航栏'" :aria-expanded="!props.collapsed"
+      @click="emit('toggle-collapse')">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="props.collapsed ? 'm9 6 6 6-6 6' : 'm15 6-6 6 6 6'" /></svg>
+      <span>{{ props.collapsed ? '展开' : '收起' }}</span>
+    </button>
     <span class="rail-heading">工作空间</span>
 
     <button

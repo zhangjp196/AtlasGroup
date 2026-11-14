@@ -84,6 +84,31 @@
 .rail-brand .logo { width: 34px; height: 34px; margin: 0; border-radius: 9px; }
 .rail-brand .logo svg { width: 22px; height: 22px; }
 .rail-brand-name { font-size: 21px; font-weight: 760; letter-spacing: -.055em; }
+.rail-collapse-toggle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+.rail-collapse-toggle:hover { border-color: var(--line-soft); background: var(--panel); color: var(--text); }
+.rail-collapse-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.rail-collapse-toggle span { font-size: 10px; }
+.app.rail-collapsed .rail-brand-name,
+.app.rail-collapsed .rail-label,
+.app.rail-collapsed .rail-heading { display: none; }
+.app.rail-collapsed .rail { align-items: center; padding-inline: 5px; }
+.app.rail-collapsed .rail-brand { justify-content: center; padding-inline: 0; }
+.app.rail-collapsed .rail-collapse-toggle { justify-content: center; width: 40px; padding: 0; }
+.app.rail-collapsed .rail-collapse-toggle span { display: none; }
 .rail-heading { color: var(--faint); padding: 9px 9px 4px; font-size: 10px; letter-spacing: .11em; }
 .app .rail-btn {
   display: flex;
@@ -287,12 +312,12 @@
 }
 
 @media (max-width: 1210px) {
-  .app .rail { align-items: center; padding-inline: 5px; }
-  .app .rail-btn { width: 40px; justify-content: center; padding: 0; }
-  .rail-brand { padding-inline: 0; }
-  .rail-brand-name, .rail-label, .rail-heading { display: none; }
-  .app .rail-badge { inset: 0 0 auto auto; }
-  .app .theme-auto { inset: 3px 4px auto auto; }
+  .app.rail-collapsed .rail { align-items: center; padding-inline: 5px; }
+  .app.rail-collapsed .rail-btn { width: 40px; justify-content: center; padding: 0; }
+  .app.rail-collapsed .rail-brand { padding-inline: 0; }
+  .app.rail-collapsed .rail-brand-name, .app.rail-collapsed .rail-label, .app.rail-collapsed .rail-heading { display: none; }
+  .app.rail-collapsed .rail-badge { inset: 0 0 auto auto; }
+  .app.rail-collapsed .theme-auto { inset: 3px 4px auto auto; }
 }
 @media (max-width: 840px) {
   .mobile-dock-trigger { display: inline-flex; flex: none; }

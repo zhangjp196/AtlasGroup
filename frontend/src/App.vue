@@ -104,7 +104,10 @@ function closeWorkspaceTab(key: string): void {
 const DOCK_KEY = 'atlasx.dock.v1'
 const dockCollapsed = ref(false)
 const dockWidth = ref(320)
+const RAIL_COLLAPSED_KEY = 'atlasx.rail.collapsed.v1'
+const railCollapsed = ref(false)
 try {
+  railCollapsed.value = localStorage.getItem(RAIL_COLLAPSED_KEY) === '1'
   const saved = JSON.parse(localStorage.getItem(DOCK_KEY) || '{}')
   if (typeof saved.collapsed === 'boolean') dockCollapsed.value = saved.collapsed
   if (Number.isFinite(saved.width)) dockWidth.value = Math.min(720, Math.max(320, Number(saved.width)))
@@ -112,6 +115,11 @@ try {
 const mobileDockOpen = ref(false)
 watch(() => route.fullPath, () => { mobileDockOpen.value = false })
 const dockStyleWidth = computed(() => (dockCollapsed.value ? '64px' : `${dockWidth.value}px`))
+
+function toggleRail(): void {
+  railCollapsed.value = !railCollapsed.value
+  try { localStorage.setItem(RAIL_COLLAPSED_KEY, railCollapsed.value ? '1' : '0') } catch { /* ignore */ }
+}
 
 function saveDockState(): void {
   try {
@@ -388,10 +396,10 @@ onMounted(async () => {
   <StartupSplash v-if="booting" :duration="bootDuration" :ready="bootReady" @done="booting = false" />
 
   <el-config-provider :locale="zhCn">
-  <div class="app flat" :class="{ 'mobile-dock-open': mobileDockOpen }" :style="{ '--dock-width': dockStyleWidth }">
-    <AppRail :pending-count="pendingCount" :global-agent-open="Boolean(globalAgentId)"
+  <div class="app flat" :class="{ 'mobile-dock-open': mobileDockOpen, 'rail-collapsed': railCollapsed }" :style="{ '--dock-width': dockStyleWidth }">
+    <AppRail :pending-count="pendingCount" :global-agent-open="Boolean(globalAgentId)" :collapsed="railCollapsed"
       :global-chat-open="Boolean(globalChatId)" @global-agent="openGlobalAgent" @global-chat="openGlobalChat"
-      @navigate="chatWindows.activeTab = ''" />
+      @navigate="chatWindows.activeTab = ''" @toggle-collapse="toggleRail" />
     <main class="canvas">
       <div class="workspace-header">
         <WorkspaceTabs :tabs="workspaceTabs" :active="activeWorkspaceTab"
