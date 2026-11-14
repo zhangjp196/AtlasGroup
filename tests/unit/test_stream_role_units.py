@@ -160,6 +160,36 @@ def test_extract_final_text_empty_and_blank():
     assert len(tl) == 1
 
 
+def test_trace_from_run_events_rebuilds_partial_tool_and_approval_state():
+    events = [
+        {"delta": "部分结果", "round": 0},
+        {"thinking": "先检查", "round": 0},
+        {"thinking": "再恢复", "round": 0},
+        {"ping": True, "waiting": "worker"},
+        {"tool_call": {"name": "shell", "args": {},
+                        "status": "preparing", "round": 0}},
+        {"tool_call": {"id": "tool-1", "name": "shell", "args": {"cmd": "pwd"},
+                        "status": "running", "round": 0}},
+        {"tool_result": {"id": "tool-1", "ok": True, "summary": "完成"}},
+        {"tool_approval": {"id": "approval-1", "tool": "write_file",
+                            "risk": "high", "round": 1}},
+        {"approval_decided": {"id": "approval-1", "status": "approved"}},
+        {"task_proposal": {"id": "proposal-1", "goal": "继续剩余工作"}},
+    ]
+
+    out = conv_mod._trace_from_run_events(events)
+
+    assert out["content"] == "部分结果"
+    assert out["reasoning"] == "先检查再恢复"
+    assert [step["kind"] for step in out["trace"]] == [
+        "text", "thinking", "tool", "approval", "proposal",
+    ]
+    assert out["tool_trace"][0]["status"] == "done"
+    assert out["tool_trace"][0]["id"] == "tool-1"
+    assert out["trace"][3]["status"] == "approved"
+    assert out["trace"][4]["status"] == "pending"
+
+
 # ── _apply_compaction 端到端（打桩 compress） ─────────────────────────
 
 

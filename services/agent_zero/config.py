@@ -31,9 +31,9 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    # 对话运行并发上限（主持 run 与成员并行 run 共用；默认留足群聊并行空间）
+    # 全局执行并发上限（会话 / 成员 run 与同步子代理共用，默认留足群聊并行空间）
     max_concurrent_conversation_runs: int = 8
-    # 同一对话里最多同时跑几个团队成员的后台 run（主持 run 不占这个名额）
+    # 单对话的团队成员 run 子上限；仍受全局执行并发上限约束
     max_parallel_member_runs: int = 4
     # 上下文压缩阈值百分比（旧口径；未配置时走 OpenCode compaction 语义：
     # 逼近窗口即压缩，详见 config.yaml llm.compaction）

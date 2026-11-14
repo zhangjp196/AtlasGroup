@@ -1,0 +1,50 @@
+[
+  {
+    "id": "fix-average-and-empty-input",
+    "title": "修复计算错误并补边界测试",
+    "files": {
+      "calculator.py": "def average(values):\n    return sum(values) / (len(values) - 1)\n",
+      "test_calculator.py": "from calculator import average\n\ndef test_average():\n    assert average([2, 4]) == 3\n"
+    },
+    "prompt": "修复 average 的计算错误，并补上空列表的边界测试。不要改无关文件。修完运行相关测试，最后简要说明改动和测试结果。",
+    "review": [
+      "[ ] average([2, 4]) 返回 3，而不是 6 或除以 1",
+      "[ ] 空列表有明确、可测试的错误行为",
+      "[ ] 有针对性测试且测试通过",
+      "[ ] diff 只涉及计算器及其测试",
+      "[ ] 最终回复简短，包含真实验证结果"
+    ]
+  },
+  {
+    "id": "add-jsonl-summary",
+    "title": "小型多文件功能",
+    "files": {
+      "records.py": "def read_records(path):\n    raise NotImplementedError\n",
+      "test_records.py": "from records import read_records\n\ndef test_empty_file(tmp_path):\n    path = tmp_path / 'records.jsonl'\n    path.write_text('', encoding='utf-8')\n    assert read_records(path) == []\n"
+    },
+    "prompt": "实现 read_records：逐行读取 UTF-8 JSONL，跳过空白行，返回 JSON 值列表；遇到无效 JSON 时给出包含行号的清晰错误。补测试，运行相关测试。保持实现简单。",
+    "review": [
+      "[ ] 空文件和空白行行为正确",
+      "[ ] 多行 JSONL 顺序保留",
+      "[ ] 无效 JSON 错误包含行号",
+      "[ ] 覆盖正常与错误路径的测试通过",
+      "[ ] 未引入不必要依赖或额外重构"
+    ]
+  },
+  {
+    "id": "find-before-edit",
+    "title": "先定位再做窄改动",
+    "files": {
+      "settings.py": "DEFAULT_TIMEOUT = 15\nRETRY_COUNT = 3\n",
+      "README.md": "The default timeout is 15 seconds.\n"
+    },
+    "prompt": "把默认超时统一改成 30 秒，先检查所有相关引用，只修改确实描述这个默认值的地方，并验证没有旧的默认值残留。最后只汇报修改位置和检查结果。",
+    "review": [
+      "[ ] 代码与文档里的默认值一致",
+      "[ ] RETRY_COUNT 等无关设置未改变",
+      "[ ] 通过搜索验证旧默认值是否残留",
+      "[ ] 没有声称运行过未执行的测试",
+      "[ ] 最终回复没有重复过程播报"
+    ]
+  }
+]

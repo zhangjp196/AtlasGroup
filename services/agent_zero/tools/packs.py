@@ -124,6 +124,8 @@ PACKS: Tuple[ToolPack, ...] = (
 STANDALONE_TOOLS: Tuple[str, ...] = (
     "shell",
     "workspace",
+    # 浏览器要作用于用户可见的活动页面，独立保留操作名与参数。
+    "browser",
     # ask_user 是通用的人机交互，不属于任何工具包。
     "ask_user",
     # session_manage 是会话级指令（清空上下文 / 新建 / 重命名…），

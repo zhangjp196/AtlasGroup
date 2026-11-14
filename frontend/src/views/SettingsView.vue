@@ -12,8 +12,10 @@ import { THEMES, type ThemeId, type ThemeSchedule } from '@/lib/theme'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 import PageHeader from '@/components/PageHeader.vue'
-import ModelFlow from '@/components/ModelFlow.vue'
 import BotsSettings from '@/components/BotsSettings.vue'
+import UsageSettings from '@/components/settings/UsageSettings.vue'
+import MagpieSettings from '@/components/settings/MagpieSettings.vue'
+import type { UsagePeriodKey, UsageStats, UsageTotals } from '@/types/usage'
 
 const app = useAppStore()
 const data = useDataStore()
@@ -44,70 +46,12 @@ const tabs: Array<{ id: Tab; label: string }> = [
   { id: 'workspaces', label: '工作区' },
 ]
 
-interface UsageTotals {
-  prompt_tokens?: number
-  completion_tokens?: number
-  total_tokens?: number
-  cached_tokens?: number
-  messages?: number
-  rounds?: number
-  llm_ms?: number
-  cache_rate?: number
-  avg_tokens_per_message?: number
-  avg_tokens_per_day?: number
-  tokens_per_second?: number
-  active_days?: number
-  max_context_tokens?: number
-}
-
-interface UsageRow {
-  name?: string
-  total_tokens?: number
-  prompt_tokens?: number
-  completion_tokens?: number
-  cache_rate?: number
-  messages?: number
-  share?: number
-  tokens_per_second?: number
-}
-
-interface UsageDay {
-  date: string
-  prompt_tokens: number
-  completion_tokens: number
-  total_tokens: number
-  messages: number
-}
-
-interface UsagePeriod {
-  days?: number
-  totals?: UsageTotals
-  top_model?: UsageRow | null
-  peak_day?: { date?: string; total_tokens?: number } | null
-  models?: UsageRow[]
-  channels?: UsageRow[]
-}
-
-interface UsageStats {
-  generated_at?: string
-  periods?: Record<string, UsagePeriod>
-  daily?: UsageDay[]
-}
-
 const usage = ref<UsageStats | null>(null)
 const usageLoading = ref(false)
-const usagePeriod = ref<'1d' | '7d' | '30d' | 'all'>('7d')
-const usagePeriods = [
-  { key: '1d', label: '1 天' },
-  { key: '7d', label: '7 天' },
-  { key: '30d', label: '30 天' },
-  { key: 'all', label: '全部' },
-] as const
+const usagePeriod = ref<UsagePeriodKey>('7d')
 
 const usageSummary = computed(() => usage.value?.periods?.[usagePeriod.value] || null)
 const usageTotals = computed<UsageTotals>(() => usageSummary.value?.totals || {})
-const usageDaily = computed(() => usage.value?.daily || [])
-const usageMax = computed(() => Math.max(1, ...usageDaily.value.map((day) => Number(day.total_tokens || 0))))
 
 // ── Magpie 本机脱敏 ────────────────────────────────────────
 const magpie = ref<MagpieStatus | null>(null)
@@ -122,26 +66,10 @@ const magpieForm = reactive({
   pii: true,
   paths: true,
 })
-const KIND_LABELS: Record<string, string> = {
-  SECRET: '密钥', JWT: 'JWT', PRIVATEKEY: '私钥', EMAIL: '邮箱',
-  PHONE: '手机号', ID: '身份证', IP: 'IP', PATH: '本机路径',
-}
-
-const magpieRuleCount = computed(() => [
-  magpieForm.secrets, magpieForm.pii, magpieForm.paths,
-].filter(Boolean).length)
-
 function openMagpie(): void {
   tab.value = 'magpie'
   if (!magpie.value) void loadMagpie()
   if (!usage.value) void loadUsage()
-}
-
-function kindSummary(byKind?: Record<string, number>): string {
-  return Object.entries(byKind || {})
-    .filter(([, count]) => Number(count) > 0)
-    .map(([kind, count]) => `${KIND_LABELS[kind] || kind} ${count}`)
-    .join(' · ')
 }
 
 async function loadMagpie(): Promise<void> {
@@ -189,21 +117,6 @@ async function testMagpie(): Promise<void> {
   } finally {
     magpieTesting.value = false
   }
-}
-
-function fmtTokens(value?: number): string {
-  const n = Number(value || 0)
-  if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(2)} 亿`
-  if (n >= 10_000) return `${(n / 10_000).toFixed(1)} 万`
-  return String(Math.round(n))
-}
-
-function fmtNumber(value?: number): string {
-  return Number(value || 0).toLocaleString('zh-CN')
-}
-
-function barHeight(day: UsageDay): string {
-  return `${Math.max(2, Math.round(Number(day.total_tokens || 0) / usageMax.value * 100))}%`
 }
 
 async function loadUsage(): Promise<void> {
@@ -1391,172 +1304,30 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
       </template>
 
       <template v-else-if="tab === 'usage'">
-        <div v-if="usageLoading && !usage" class="detail-section"><div class="empty">加载用量…</div></div>
-        <template v-else>
-          <div class="detail-section">
-            <div class="toolbar" style="margin-bottom:0">
-              <h3 style="margin:0">用量</h3>
-              <span class="role-line">{{ usage?.generated_at ? `统计于 ${usage.generated_at}` : '本地用量统计' }}</span>
-              <div class="usage-periods">
-                <button
-                  v-for="period in usagePeriods"
-                  :key="period.key"
-                  class="work-filter"
-                  :class="{ on: usagePeriod === period.key }"
-                  type="button"
-                  @click="usagePeriod = period.key"
-                >
-                  {{ period.label }}
-                </button>
-              </div>
-              <el-button size="small" style="margin-left:auto" @click="openMagpie">本机脱敏</el-button>
-              <el-button size="small" :loading="usageLoading" @click="loadUsage">刷新</el-button>
-            </div>
-          </div>
-
-          <div class="usage-grid">
-            <div class="usage-stat"><span>总 Tokens</span><b>{{ fmtTokens(usageTotals.total_tokens) }}</b><small>{{ fmtNumber(usageTotals.total_tokens) }}</small></div>
-            <div class="usage-stat"><span>输入 Tokens</span><b>{{ fmtTokens(usageTotals.prompt_tokens) }}</b><small>{{ fmtNumber(usageTotals.prompt_tokens) }}</small></div>
-            <div class="usage-stat"><span>输出 Tokens</span><b>{{ fmtTokens(usageTotals.completion_tokens) }}</b><small>{{ fmtNumber(usageTotals.completion_tokens) }}</small></div>
-            <div class="usage-stat"><span>缓存命中率</span><b>{{ usageTotals.cache_rate ?? 0 }}%</b><small>{{ fmtTokens(usageTotals.cached_tokens) }} 缓存</small></div>
-            <div class="usage-stat"><span>消息数</span><b>{{ fmtNumber(usageTotals.messages) }}</b><small>平均 {{ fmtNumber(usageTotals.avg_tokens_per_message) }} tok/条</small></div>
-            <div class="usage-stat"><span>平均每日</span><b>{{ fmtTokens(usageTotals.avg_tokens_per_day) }}</b><small>活跃 {{ usageTotals.active_days ?? 0 }} 天</small></div>
-            <div class="usage-stat"><span>轮次</span><b>{{ fmtNumber(usageTotals.rounds) }}</b><small>累计调用</small></div>
-            <div class="usage-stat"><span>生成速度</span><b>{{ usageTotals.tokens_per_second ?? 0 }} tok/s</b><small>{{ fmtNumber(usageTotals.llm_ms) }} ms</small></div>
-          </div>
-
-          <div class="usage-coverage">
-            <div class="usage-cover"><span>覆盖模型</span><b>{{ usageSummary?.top_model?.name || '—' }}</b><small>{{ usageSummary?.top_model ? `${fmtTokens(usageSummary.top_model.total_tokens)} · ${usageSummary.top_model.share ?? 0}%` : '还没有调用记录' }}</small></div>
-            <div class="usage-cover"><span>最近活跃</span><b>{{ usageSummary?.peak_day?.date || '—' }}</b><small>{{ usageSummary?.peak_day ? `${fmtTokens(usageSummary.peak_day.total_tokens)} tokens` : '还没有活跃记录' }}</small></div>
-            <div class="usage-cover"><span>活跃天数</span><b>{{ usageTotals.active_days ?? 0 }} 天</b><small>按有调用记录的日期统计</small></div>
-          </div>
-
-          <div class="detail-section">
-            <div class="toolbar" style="margin-bottom:8px">
-              <h3 style="margin:0">最近 30 天</h3>
-              <span class="role-line" style="margin-left:auto">输入 / 输出合计</span>
-            </div>
-            <div class="usage-chart">
-              <div v-for="(day, index) in usageDaily" :key="day.date" class="usage-bar-col">
-                <div class="usage-bar" :style="{ height: barHeight(day) }" :title="`${day.date} · ${fmtNumber(day.total_tokens)} tokens`" />
-                <small v-if="index % 5 === 0 || index === usageDaily.length - 1">{{ day.date.slice(5) }}</small>
-              </div>
-              <div v-if="!usageDaily.length" class="empty">还没有用量记录</div>
-            </div>
-          </div>
-
-          <div class="detail-section">
-            <div class="toolbar" style="margin-bottom:8px">
-              <h3 style="margin:0">模型排行</h3>
-              <span class="role-line" style="margin-left:auto">{{ (usageSummary?.models || []).length }} 个模型</span>
-            </div>
-            <div class="usage-rank-list">
-              <div v-for="row in usageSummary?.models || []" :key="row.name" class="usage-rank-row">
-                <b>{{ row.name || '未知模型' }}</b>
-                <span>{{ fmtTokens(row.total_tokens) }}</span>
-                <small>{{ row.share ?? 0 }}% · 缓存 {{ row.cache_rate ?? 0 }}%</small>
-              </div>
-              <div v-if="!(usageSummary?.models || []).length" class="empty">还没有调用记录</div>
-            </div>
-          </div>
-        </template>
+        <UsageSettings
+          :usage="usage"
+          :loading="usageLoading"
+          :period="usagePeriod"
+          @update:period="usagePeriod = $event"
+          @refresh="loadUsage"
+          @open-magpie="openMagpie"
+        />
       </template>
 
       <template v-else-if="tab === 'magpie'">
-        <div v-if="magpieLoading && !magpie" class="detail-section"><div class="empty">加载本机脱敏状态…</div></div>
-        <template v-else>
-          <section class="magpie-head">
-            <div class="magpie-head-main">
-              <div class="magpie-eyebrow">本机脱敏 · MAGPIE</div>
-              <h2>敏感信息不出这台电脑</h2>
-              <p>
-                请求出站前，把密钥、邮箱 / 手机号 / 身份证 / IP、本机绝对路径替换为 ⟦MG_…⟧ 占位符；
-                模型回复与工具参数在本机还原。模型只看到占位符。
-              </p>
-              <div class="magpie-hero-stats">
-                <span><b>{{ magpieRuleCount }}</b> 类规则已启用</span>
-                <span>规则全部在本机执行</span>
-                <span>{{ magpieForm.enabled ? '脱敏已开启' : '脱敏已关闭' }}</span>
-              </div>
-            </div>
-            <div class="magpie-head-side">
-              <span class="magpie-state" :class="{ on: magpieForm.enabled }">
-                {{ magpieForm.enabled ? '已开启' : '已关闭' }}
-              </span>
-              <el-switch v-model="magpieForm.enabled" :loading="magpieSaving" @change="saveMagpie" />
-            </div>
-          </section>
-
-          <ModelFlow
-            :total-tokens="Number(usageTotals.total_tokens || 0)"
-            :model-name="usageSummary?.top_model?.name || ''"
-            :model-tokens="Number(usageSummary?.top_model?.total_tokens || 0)"
-            :redacted="Number(magpie?.stats?.redacted_total || 0)"
-            :enabled="magpieForm.enabled"
-          />
-
-          <div class="magpie-grid">
-            <section class="detail-section magpie-rules">
-              <div class="toolbar">
-                <h3 style="margin:0">脱敏规则</h3>
-                <span class="role-line">分类开关</span>
-              </div>
-              <p class="hintline">关闭某类后，对应信息会按原文发送给模型。</p>
-              <div class="magpie-rule-list">
-                <div class="magpie-rule">
-                  <div>
-                    <b>密钥 / Token</b>
-                    <small>sk-… / ghp_… / JWT / Bearer / 私钥块 / password=…</small>
-                  </div>
-                  <el-switch v-model="magpieForm.secrets" :disabled="!magpieForm.enabled" @change="saveMagpie" />
-                </div>
-                <div class="magpie-rule">
-                  <div>
-                    <b>个人信息</b>
-                    <small>邮箱 / 手机号 / 18 位身份证 / IPv4</small>
-                  </div>
-                  <el-switch v-model="magpieForm.pii" :disabled="!magpieForm.enabled" @change="saveMagpie" />
-                </div>
-                <div class="magpie-rule">
-                  <div>
-                    <b>本机绝对路径</b>
-                    <small>/Users/… / /home/… / C:\Users\…</small>
-                  </div>
-                  <el-switch v-model="magpieForm.paths" :disabled="!magpieForm.enabled" @change="saveMagpie" />
-                </div>
-              </div>
-            </section>
-
-            <section class="detail-section magpie-preview-card">
-              <div class="toolbar">
-                <h3 style="margin:0">脱敏预览</h3>
-                <span class="role-line">只在本机执行，不写入统计</span>
-              </div>
-              <el-input
-                v-model="magpieTestText"
-                type="textarea"
-                :rows="4"
-                :disabled="!magpieForm.enabled"
-                placeholder="粘贴一段包含密钥 / 邮箱 / 路径的文本…"
-              />
-              <div class="magpie-preview-actions">
-                <el-button size="small" type="primary" :loading="magpieTesting" :disabled="!magpieForm.enabled" @click="testMagpie">
-                  预览脱敏
-                </el-button>
-                <span v-if="magpieTestResult" class="role-line">
-                  已脱敏 {{ magpieTestResult.redacted }} 处 · {{ kindSummary(magpieTestResult.by_kind) }}
-                </span>
-              </div>
-              <pre v-if="magpieTestResult" class="magpie-preview">{{ magpieTestResult.masked }}</pre>
-              <div v-else class="empty" style="padding:18px 8px">预览结果会显示在这里</div>
-            </section>
-          </div>
-
-          <p class="hintline magpie-foot">
-            占位符映射只在本次 LLM 调用的内存里，不落库。正则识别是尽力而为，
-            不保证覆盖所有敏感信息，也不替代隔离环境；脱敏失败时按原文发送并记录日志。
-          </p>
-        </template>
+        <MagpieSettings
+          v-model:form="magpieForm"
+          v-model:test-text="magpieTestText"
+          :status="magpie"
+          :saving="magpieSaving"
+          :testing="magpieTesting"
+          :result="magpieTestResult"
+          :total-tokens="Number(usageTotals.total_tokens || 0)"
+          :model-name="usageSummary?.top_model?.name || ''"
+          :model-tokens="Number(usageSummary?.top_model?.total_tokens || 0)"
+          @save="saveMagpie"
+          @test="testMagpie"
+        />
       </template>
 
       <template v-else-if="tab === 'appearance'">
@@ -1717,8 +1488,8 @@ async function toggleWorkspace(ws: Workspace): Promise<void> {
         <div class="detail-section">
           <h3>限制</h3>
           <dl class="kv">
-            <dt>并发 run</dt><dd>{{ data.info?.limits?.max_concurrent_runs ?? '—' }}</dd>
-            <dt>单群成员并行</dt><dd>{{ data.info?.limits?.max_parallel_member_runs ?? '—' }}</dd>
+            <dt>全局并发 run（含子代理）</dt><dd>{{ data.info?.limits?.max_concurrent_runs ?? '—' }}</dd>
+            <dt>单会话成员 run 子上限</dt><dd>{{ data.info?.limits?.max_parallel_member_runs ?? '—' }}</dd>
             <dt>上下文压缩阈值</dt><dd>{{ data.info?.limits?.context_compress_percent ?? '—' }}%</dd>
             <dt>自主运行上限</dt><dd>{{ data.info?.limits?.autonomous_run_max_seconds ?? '—' }}s</dd>
           </dl>

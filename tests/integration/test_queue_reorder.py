@@ -113,17 +113,23 @@ def test_worker_picks_moved_order(client):
 
 
 def test_edit_queued_message_keeps_position(client):
-    """编辑排队消息会换一条新 run：位置（序号）不变。"""
-    from services.agent_zero.task_layer import run_service
+    """真实编辑排队消息会换一条新 run：内容和位置（序号）都正确。"""
+    from services.agent_zero.task_layer import conversation, run_service
 
     cid = _conv(client)
-    a, b, c = _enqueue(cid, "一", "二", "三")
+    a, b = _enqueue(cid, "一", "二")
+    message = conversation.send_message(cid, "三", "tester", queued=True)
+    queued_run = run_service.create_run(
+        cid, "tester", content="三", queued_msg_id=message["id"])
+    c = queued_run["id"]
     _move(client, cid, c, "up")          # [a, c, b]，序号 0/1/2
 
-    # edit_message 的实际做法：丢弃旧 run，用原 queue_pos 建新 run
-    assert run_service.discard_run(c) is True
-    new_id = run_service.create_run(cid, "tester", content="三（改过）",
-                                    queue_pos=1)["id"]
+    result = conversation.edit_message(cid, message["id"], "三（改过）")
+    new_id = result["run"]["id"]
+    assert result["replaced"] is True
+    assert result["message"]["content"] == "三（改过）"
+    assert (conversation.get_message_node(cid, message["id"]) or {})[
+        "props"]["content"] == "三（改过）"
     assert _ids(_queue(client, cid)) == [a, new_id, b]
 
 

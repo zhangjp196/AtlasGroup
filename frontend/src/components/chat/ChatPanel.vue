@@ -26,6 +26,11 @@ import AskCard from './AskCard.vue'
 import Composer from './Composer.vue'
 import ConversationSettingsDrawer from './ConversationSettingsDrawer.vue'
 import LinkPreview from './LinkPreview.vue'
+import BrowserPanel from './BrowserPanel.vue'
+import TerminalSession from './TerminalSession.vue'
+import SessionFilesPanel from './SessionFilesPanel.vue'
+import { appendWorkspaceFileReference } from '@/lib/workspaceReference'
+import { continuationPrompt } from '@/lib/continuationPrompt'
 import GroupSettingsDrawer from '@/components/GroupSettingsDrawer.vue'
 import GlobalInbox from './GlobalInbox.vue'
 import LiveMessage from './LiveMessage.vue'
@@ -77,6 +82,7 @@ const isDraft = computed(() => !props.conversationId
   && Boolean(props.draftRoleId || props.draftTeamId))
 
 const draft = ref('')
+const composerRef = ref<InstanceType<typeof Composer> | null>(null)
 const selectedModel = ref('')
 const perm = ref('once')
 const thinking = ref('')
@@ -115,6 +121,61 @@ function initialLaneWidth(): number {
 const laneWidth = ref(initialLaneWidth())
 const laneResizing = ref(false)
 let laneResizeStart: { pointerId: number; x: number; width: number } | null = null
+const RIGHT_PANEL_WIDTH_KEY = 'atlasx.chat-right-panel.width.v1'
+const DEFAULT_RIGHT_PANEL_WIDTH = 420
+const MIN_RIGHT_PANEL_WIDTH = 280
+const MAX_RIGHT_PANEL_WIDTH = 760
+function initialRightPanelWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(RIGHT_PANEL_WIDTH_KEY))
+    if (Number.isFinite(saved) && saved >= MIN_RIGHT_PANEL_WIDTH && saved <= MAX_RIGHT_PANEL_WIDTH) return saved
+  } catch { /* storage may be disabled */ }
+  return DEFAULT_RIGHT_PANEL_WIDTH
+}
+const rightPanelWidth = ref(initialRightPanelWidth())
+const rightPanelResizing = ref(false)
+let rightPanelResizeStart: { pointerId: number; x: number; width: number } | null = null
+function maxRightPanelWidth(): number {
+  const panelWidth = chatPanelEl.value?.clientWidth || window.innerWidth
+  return Math.max(MIN_RIGHT_PANEL_WIDTH, Math.min(MAX_RIGHT_PANEL_WIDTH, Math.floor(panelWidth * 0.65), panelWidth - 360))
+}
+function applyRightPanelWidth(width: number): void {
+  rightPanelWidth.value = Math.min(maxRightPanelWidth(), Math.max(MIN_RIGHT_PANEL_WIDTH, width))
+}
+function saveRightPanelWidth(): void {
+  try { localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(Math.round(rightPanelWidth.value))) } catch { /* storage may be disabled */ }
+}
+function setRightPanelWidth(width: number): void {
+  applyRightPanelWidth(width)
+  saveRightPanelWidth()
+}
+function startRightPanelResize(event: PointerEvent): void {
+  if (event.button !== 0) return
+  event.preventDefault()
+  rightPanelResizeStart = { pointerId: event.pointerId, x: event.clientX, width: rightPanelWidth.value }
+  rightPanelResizing.value = true
+  window.addEventListener('pointermove', onRightPanelResize)
+  window.addEventListener('pointerup', endRightPanelResize)
+  window.addEventListener('pointercancel', endRightPanelResize)
+}
+function onRightPanelResize(event: PointerEvent): void {
+  if (!rightPanelResizeStart || event.pointerId !== rightPanelResizeStart.pointerId) return
+  applyRightPanelWidth(rightPanelResizeStart.width + rightPanelResizeStart.x - event.clientX)
+}
+function endRightPanelResize(event: PointerEvent): void {
+  if (!rightPanelResizeStart || event.pointerId !== rightPanelResizeStart.pointerId) return
+  rightPanelResizeStart = null
+  rightPanelResizing.value = false
+  saveRightPanelWidth()
+  window.removeEventListener('pointermove', onRightPanelResize)
+  window.removeEventListener('pointerup', endRightPanelResize)
+  window.removeEventListener('pointercancel', endRightPanelResize)
+}
+function resizeRightPanelByKeyboard(event: KeyboardEvent): void {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+  event.preventDefault()
+  setRightPanelWidth(rightPanelWidth.value + (event.key === 'ArrowLeft' ? 16 : -16))
+}
 function maxLaneWidth(): number {
   const panelWidth = chatPanelEl.value?.clientWidth || window.innerWidth
   return Math.max(120, Math.min(MAX_LANE_WIDTH, Math.floor(panelWidth * 0.45)))
@@ -168,34 +229,6 @@ const laneFilterOptions = [
   { value: 'unread', label: '未读', title: '只显示有未读消息的栏目' },
   { value: 'archived', label: '归档', title: '只显示已归档栏目' },
 ] as const
-type BoundSessionBot = {
-  id: string
-  bot_id: string
-  conversation_id: string
-  session_root_id?: string
-  lane_id?: string
-  bound: boolean
-}
-const sessionBots = ref<BoundSessionBot[]>([])
-function laneBotLabels(lane: ChatTabState): string[] {
-  return sessionBots.value
-    .filter((bot) => bot.bound && (bot.session_root_id || bot.conversation_id) === props.sessionRootId
-      && (bot.lane_id || bot.conversation_id) === lane.conversationId)
-    .map((bot) => bot.bot_id).filter(Boolean)
-}
-async function loadSessionBots(): Promise<void> {
-  if (!props.sessionRootId) {
-    sessionBots.value = []
-    return
-  }
-  try {
-    const out = await api<{ items: BoundSessionBot[] }>('/bots')
-    sessionBots.value = out.items || []
-  } catch {
-    sessionBots.value = []
-  }
-}
-watch(() => props.sessionRootId, () => { void loadSessionBots() }, { immediate: true })
 function laneDateKey(tab: ChatTabState): string {
   const raw = tab.updatedAt || tab.createdAt
   if (!raw) return 'unknown'
@@ -218,7 +251,7 @@ const filteredLanes = computed(() => {
     if (laneFilter.value === 'unread' && Number(lane.unread || 0) <= 0) return false
     if (laneFilter.value === 'archived' && !lane.archived) return false
     if (!query) return true
-    return `${lane.title || ''} ${laneBotLabels(lane).join(' ')}`.toLocaleLowerCase().includes(query)
+    return `${lane.title || ''}`.toLocaleLowerCase().includes(query)
   })
 })
 const lanePages = computed(() => Math.max(1, Math.ceil(filteredLanes.value.length / LANE_PAGE_SIZE)))
@@ -357,6 +390,10 @@ async function refreshLanes(manual = false): Promise<void> {
 function onVisibilityChange(): void {
   if (lanesVisible()) void refreshLanes()
 }
+function insertWorkspaceFileReference(path: string): void {
+  draft.value = appendWorkspaceFileReference(draft.value, path)
+  sessionFilesOpen.value = false
+}
 function lanesVisible(): boolean {
   if (document.hidden) return false
   // 标签页形态下，只有当前激活的会话标签才需要轮询。
@@ -403,7 +440,8 @@ function showEarlierMessages(): void {
 }
 const tempOpen = ref(false)
 const tempForm = reactive({ name: '', expertise: '', persona: '' })
-const taskCenterOpen = ref(false)
+type RightPanel = 'browser' | 'terminal' | 'tasks'
+const activeRightPanel = ref<RightPanel | null>(null)
 const settingsOpen = ref(false)
 const participantsOpen = ref(false)
 const groupInfoOpen = ref(false)
@@ -649,11 +687,10 @@ onMounted(() => {
     // 否则要等用户手动刷新才能看到角色继续输出的内容。
     if (!chat.streaming.value) void chat.resumeRunning()
   }, 4000)
-  // 栏目自动刷新：机器人在别处新建栏目、其他窗口改名 / 删除时，不用重开窗口。
+  // 栏目自动刷新：其他窗口新建 / 改名 / 删除时，不用重开窗口。
   laneTimer = window.setInterval(() => {
     if (lanesVisible()) {
       void refreshLanes()
-      void loadSessionBots()
     }
   }, 5000)
   if (!msgsEl.value || typeof ResizeObserver === 'undefined') return
@@ -672,6 +709,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointermove', onLaneResize)
   window.removeEventListener('pointerup', endLaneResize)
   window.removeEventListener('pointercancel', endLaneResize)
+  rightPanelResizeStart = null
+  rightPanelResizing.value = false
+  window.removeEventListener('pointermove', onRightPanelResize)
+  window.removeEventListener('pointerup', endRightPanelResize)
+  window.removeEventListener('pointercancel', endRightPanelResize)
   window.removeEventListener('resize', updateViewport)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.clearInterval(taskTimer)
@@ -830,7 +872,13 @@ async function loadBackgroundTasks(): Promise<void> {
 
 function openTaskCenter(): void {
   if (!convId.value) return
-  taskCenterOpen.value = true
+  toggleRightPanel('tasks')
+}
+
+function toggleRightPanel(panel: RightPanel): void {
+  if (panel === 'terminal' && (!terminalAvailable.value || workspaceSwitching.value)) return
+  if (panel === 'tasks' && !convId.value) return
+  activeRightPanel.value = activeRightPanel.value === panel ? null : panel
 }
 
 async function continueTaskNow(): Promise<void> {
@@ -1185,6 +1233,12 @@ async function sendDraft(): Promise<void> {
   }
 }
 
+function continueInterruptedMessage(message: { interrupted?: boolean; error?: string }): void {
+  const prompt = continuationPrompt(message)
+  draft.value = draft.value.trim() ? `${draft.value.trim()}\n\n${prompt}` : prompt
+  void nextTick(() => composerRef.value?.focus())
+}
+
 function createConversation(): void {
   // 「新会话」在会话窗口里 = 新栏目：挂在当前会话根下，独立消息 / 上下文。
   if (props.sessionRootId) {
@@ -1418,25 +1472,11 @@ async function onGroupDeleted(): Promise<void> {
   await refreshConversation()
 }
 const previewLink = ref<ConversationLink | null>(null)
-const terminalOpening = ref(false)
+const sessionFilesOpen = ref(false)
 const terminalWorkspace = computed(() => isDraft.value ? draftWorkspace.value : conversation.value?.workspace_id || '')
+const sessionWorkspace = computed(() => data.workspaces.find((item) => item.id === terminalWorkspace.value) || null)
 const terminalAvailable = computed(() => Boolean(terminalWorkspace.value
   && !data.workspaces.find((item) => item.id === terminalWorkspace.value)?.chat_only))
-
-async function openTerminal(): Promise<void> {
-  if (!terminalAvailable.value || terminalOpening.value || workspaceSwitching.value) return
-  terminalOpening.value = true
-  try {
-    await api('/local/terminal', {
-      method: 'POST',
-      body: { conversation_id: props.conversationId, workspace_id: terminalWorkspace.value },
-    })
-  } catch (error) {
-    app.toast(error instanceof Error ? error.message : String(error), 'bad')
-  } finally {
-    terminalOpening.value = false
-  }
-}
 
 watch(() => props.conversationId, () => {
   previewLink.value = null
@@ -1482,9 +1522,9 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
   <div
     ref="chatPanelEl"
     class="chat-panel"
-    :class="floating ? 'ga-win' : presentation === 'drawer' ? 'chat-shell' : 'chat-tab-panel'"
-    :style="[popupStyle, { '--lanes-width': `${laneWidth}px` }]"
-    :data-dragging="(dragging || resizing || laneResizing) || undefined"
+    :class="[floating ? 'ga-win' : presentation === 'drawer' ? 'chat-shell' : 'chat-tab-panel', { 'right-panel-resizing': rightPanelResizing }]"
+    :style="[popupStyle, { '--lanes-width': `${laneWidth}px`, '--right-panel-width': `${rightPanelWidth}px` }]"
+    :data-dragging="(dragging || resizing || laneResizing || rightPanelResizing) || undefined"
     :data-lane-resizing="laneResizing || undefined"
     @click.capture="onConversationLink"
     @auxclick.capture="onConversationLink"
@@ -1559,9 +1599,12 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
           @click="openTempRole"
         >＋</button>
         <button v-if="!isDraft" class="head-btn" title="会话管理（角色 / 参与角色）" @click="settingsOpen = true">⚙</button>
-        <button v-if="terminalAvailable" class="head-btn" type="button" title="在工作区打开终端"
-          aria-label="在工作区打开终端" :disabled="terminalOpening || workspaceSwitching" @click="openTerminal">›_</button>
-        <button v-if="!isDraft" class="head-btn task-btn" title="任务中心（执行 / 工单）" aria-label="任务中心" @click="openTaskCenter">
+        <button v-if="terminalAvailable" class="head-btn" :class="{ active: activeRightPanel === 'terminal' }" type="button" title="切换工作区终端面板"
+          aria-label="工作区终端" :disabled="workspaceSwitching" @click="toggleRightPanel('terminal')">›_</button>
+        <button class="head-btn" type="button" title="浏览会话工作区文件" aria-label="浏览会话工作区文件"
+          :disabled="!terminalWorkspace || workspaceSwitching" @click="sessionFilesOpen = true">▤</button>
+        <button class="head-btn" :class="{ active: activeRightPanel === 'browser' }" type="button" title="切换浏览器面板" aria-label="浏览器" @click="toggleRightPanel('browser')">🌐</button>
+        <button v-if="!isDraft" class="head-btn task-btn" :class="{ active: activeRightPanel === 'tasks' }" title="任务中心（执行 / 工单）" aria-label="任务中心" @click="openTaskCenter">
           ◎<span v-if="taskCenterCount" class="head-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span>
         </button>
         <button class="head-btn close-btn" title="关闭窗口" aria-label="关闭窗口"
@@ -1569,6 +1612,8 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
       </div>
     </header>
 
+    <div class="chat-workspace" :class="{ 'right-panel-open': activeRightPanel }">
+    <div class="chat-main">
     <div class="chat-body">
       <aside v-if="showLanes" class="lanes" aria-label="栏目">
         <div class="lanes-head">
@@ -1584,7 +1629,7 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
           </div>
         </div>
         <div class="lane-filters">
-          <input v-model="laneQuery" class="input lane-search" type="search" placeholder="筛选栏目 / 机器人" aria-label="筛选栏目或机器人" />
+          <input v-model="laneQuery" class="input lane-search" type="search" placeholder="筛选栏目" aria-label="筛选栏目" />
           <div class="lane-filter-group" role="group" aria-label="栏目状态筛选">
             <button v-for="option in laneFilterOptions" :key="option.value" type="button"
               :class="{ active: laneFilter === option.value }" :aria-pressed="laneFilter === option.value"
@@ -1602,9 +1647,6 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
               <span class="lane-body">
                 <span class="lane-name" :class="{ muted: !lane.title }">
                   {{ lane.title || laneTime(lane) || '新栏目' }}
-                </span>
-                <span v-for="botId in laneBotLabels(lane)" :key="`${lane.key}:${botId}`" class="lane-robot-tag">
-                  机器人 · {{ botId }}
                 </span>
                 <span v-if="lane.archived" class="lane-archived">已归档</span>
                 <span v-if="lane.title && laneTime(lane)" class="lane-time">{{ laneTime(lane) }}</span>
@@ -1666,7 +1708,7 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
           <span>还有 {{ hiddenMessages }} 条历史消息</span>
         </button>
 
-        <MessageItem v-for="(message, index) in visibleMessages" :key="message.id || `m-${index + hiddenMessages}`" :message="message" :data-mid="message.id || ''" @continue-task="chat.continueTask" @fork="forkAtMessage" />
+        <MessageItem v-for="(message, index) in visibleMessages" :key="message.id || `m-${index + hiddenMessages}`" :message="message" :data-mid="message.id || ''" @continue-task="chat.continueTask" @continue-message="continueInterruptedMessage(message)" @fork="forkAtMessage" />
 
         <LiveMessage
           v-if="chat.streaming.value || chat.entries.value.length"
@@ -1733,6 +1775,7 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
     </div>
 
     <Composer
+      ref="composerRef"
       v-show="(!globalAgent || globalTab === 'chat')"
       v-model:draft="draft"
       :streaming="chat.streaming.value"
@@ -1758,25 +1801,47 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
       </div>
     </div>
 
-    <ChatTaskCenter
-      :open="taskCenterOpen"
-      :conversation-id="convId"
-      :title="title"
-      @close="taskCenterOpen = false; loadBackgroundTasks()"
-      @changed="loadBackgroundTasks"
-    />
+    </div>
+
+    <div v-if="activeRightPanel" class="right-panel-resizer" role="separator" aria-orientation="vertical"
+      aria-label="调整右侧面板宽度" :aria-valuemin="MIN_RIGHT_PANEL_WIDTH" :aria-valuemax="maxRightPanelWidth()"
+      :aria-valuenow="rightPanelWidth" tabindex="0" @pointerdown.stop="startRightPanelResize"
+      @keydown="resizeRightPanelByKeyboard" />
+
+    <aside v-if="activeRightPanel" class="right-panel-dock" :aria-label="activeRightPanel === 'browser' ? '浏览器面板' : activeRightPanel === 'terminal' ? '终端面板' : '协作中心面板'">
+      <nav class="right-panel-tabs" aria-label="右侧面板切换">
+        <button type="button" :class="{ active: activeRightPanel === 'browser' }" :aria-pressed="activeRightPanel === 'browser'" @click="toggleRightPanel('browser')">🌐 浏览器</button>
+        <button v-if="terminalAvailable" type="button" :class="{ active: activeRightPanel === 'terminal' }" :aria-pressed="activeRightPanel === 'terminal'" @click="toggleRightPanel('terminal')">›_ 终端</button>
+        <button v-if="!isDraft" type="button" :class="{ active: activeRightPanel === 'tasks' }" :aria-pressed="activeRightPanel === 'tasks'" @click="toggleRightPanel('tasks')">◎ 协作中心<span v-if="taskCenterCount" class="dock-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span></button>
+        <button class="dock-collapse" type="button" title="收起右侧面板" aria-label="收起右侧面板" @click="activeRightPanel = null">×</button>
+      </nav>
+      <div class="right-panel-content">
+        <BrowserPanel v-if="activeRightPanel === 'browser'" :open="true" @close="activeRightPanel = null" />
+        <TerminalSession v-else-if="activeRightPanel === 'terminal' && terminalWorkspace" :key="terminalWorkspace" :workspace-id="terminalWorkspace" />
+        <ChatTaskCenter v-else-if="activeRightPanel === 'tasks'" :open="true" :conversation-id="convId" :title="title"
+          @close="activeRightPanel = null; loadBackgroundTasks()"
+          @changed="loadBackgroundTasks"
+          @reference="(path) => { activeRightPanel = null; insertWorkspaceFileReference(path) }" />
+      </div>
+    </aside>
+    </div>
 
     <LinkPreview :link="previewLink" @close="previewLink = null" @link-click="onConversationLink" />
+    <SessionFilesPanel
+      :open="sessionFilesOpen"
+      :workspace-id="terminalWorkspace"
+      :workspace-name="sessionWorkspace?.name || ''"
+      :chat-only="sessionWorkspace?.chat_only"
+      @close="sessionFilesOpen = false"
+      @reference="insertWorkspaceFileReference"
+    />
     <ConversationSettingsDrawer
       :open="settingsOpen"
       :conversation="conversation"
-      :bot-conversation-id="sessionRootId || conversation?.id || ''"
-      :bot-lane-id="conversation?.id || ''"
       @close="settingsOpen = false"
       @saved="onConversationSaved"
       @deleted="onConversationDeleted"
       @open="openBranchConversation"
-      @bots-changed="loadSessionBots"
     />
 
     <GroupSettingsDrawer

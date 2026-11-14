@@ -248,56 +248,62 @@ def create_app(*, config_yaml: str, web_dir: str, logs_dir: str) -> FastAPI:
         finally:
             bot_task.cancel()
             await asyncio.gather(bot_task, return_exceptions=True)
-            await app.state.bot_manager.close()
-
-        if mcp_reaper_task:
-            mcp_reaper_task.cancel()
             try:
-                await mcp_reaper_task
-            except asyncio.CancelledError:
-                pass
+                await app.state.bot_manager.close()
             except Exception:
-                logger.debug("停止 MCP 空闲回收任务失败", exc_info=True)
-        if conv_worker_task:
-            try:
-                conv_worker_task.cancel()
+                logger.warning("关闭机器人连接失败", exc_info=True)
 
+            if mcp_reaper_task:
+                mcp_reaper_task.cancel()
                 try:
-                    await conv_worker_task
+                    await mcp_reaper_task
                 except asyncio.CancelledError:
                     pass
-            except Exception:
-                logger.warning("对话运行 worker 停止失败", exc_info=True)
-        if schedule_ticker_task:
+                except Exception:
+                    logger.debug("停止 MCP 空闲回收任务失败", exc_info=True)
+            if conv_worker_task:
+                try:
+                    conv_worker_task.cancel()
+
+                    try:
+                        await conv_worker_task
+                    except asyncio.CancelledError:
+                        pass
+                except Exception:
+                    logger.warning("对话运行 worker 停止失败", exc_info=True)
+            if schedule_ticker_task:
+                try:
+                    from services.agent_zero.services import schedule_service
+
+                    await schedule_service.stop_ticker()
+                except Exception:
+                    logger.debug("停止定时任务 ticker 失败", exc_info=True)
+            from services.agent_zero.task_layer import tool_jobs
+
             try:
-                from services.agent_zero.services import schedule_service
-
-                await schedule_service.stop_ticker()
+                await tool_jobs.stop_manual_jobs()
             except Exception:
-                logger.debug("停止定时任务 ticker 失败", exc_info=True)
-        from services.agent_zero.task_layer import tool_jobs
+                logger.warning("停止手动工具任务失败", exc_info=True)
+            try:
+                from services.agent_zero.services import mcp_service
 
-        await tool_jobs.stop_manual_jobs()
-        try:
-            from services.agent_zero.services import mcp_service
+                # 常驻 MCP 进程必须显式停：否则关掉应用还会留下子进程。
+                await mcp_service.shutdown_all()
+            except Exception:
+                logger.debug("关闭常驻 MCP 进程失败", exc_info=True)
+            try:
+                from services.agent_zero.runtime.zero import llm as llm_mod
 
-            # 常驻 MCP 进程必须显式停：否则关掉应用还会留下子进程。
-            await mcp_service.shutdown_all()
-        except Exception:
-            logger.debug("关闭常驻 MCP 进程失败", exc_info=True)
-        try:
-            from services.agent_zero.runtime.zero import llm as llm_mod
+                await llm_mod.close_llm_clients()
+            except Exception:
+                logger.debug("关闭 LLM 连接池失败", exc_info=True)
+            try:
+                from services.agent_zero.services.events import log_event
 
-            await llm_mod.close_llm_clients()
-        except Exception:
-            logger.debug("关闭 LLM 连接池失败", exc_info=True)
-        try:
-            from services.agent_zero.services.events import log_event
-
-            log_event("app.stop", version=APP_VERSION)
-        except Exception:
-            pass
-        logger.info("%s 已关闭", APP_NAME)
+                log_event("app.stop", version=APP_VERSION)
+            except Exception:
+                pass
+            logger.info("%s 已关闭", APP_NAME)
 
     app = FastAPI(
         title=APP_NAME,

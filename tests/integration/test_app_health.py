@@ -88,4 +88,12 @@ def test_process_panel_end_to_end(client):
         assert client.post(f"{API}/processes/job-nope/stop").status_code == 404
         assert client.get(f"{API}/conversations/conv-nope/processes").status_code == 404
     finally:
+        # adopt() schedules _watch() on this loop. Drive cancellation through
+        # both the tool task and its monitor before closing the loop, otherwise
+        # asyncio reports the monitor coroutine as never awaited.
+        pending = asyncio.all_tasks(loop)
+        for pending_task in pending:
+            pending_task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         loop.close()

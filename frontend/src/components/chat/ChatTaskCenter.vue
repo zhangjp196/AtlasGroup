@@ -10,13 +10,18 @@ import { hasUsage } from '@/lib/usage'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 import AgentCanvas from './AgentCanvas.vue'
+import WorkspaceChangesPanel from './WorkspaceChangesPanel.vue'
 
 const props = defineProps<{ open: boolean; conversationId: string; title?: string }>()
-const emit = defineEmits<{ (e: 'close'): void; (e: 'changed'): void }>()
+const emit = defineEmits<{
+  (e: 'close'): void
+  (e: 'changed'): void
+  (e: 'reference', path: string): void
+}>()
 
 const app = useAppStore()
 const dataStore = useDataStore()
-const tab = ref<'runs' | 'work'>('runs')
+const tab = ref<'runs' | 'changes' | 'work'>('runs')
 const workItems = ref<WorkItem[]>([])
 const conv = ref<Conversation | null>(null)
 const workLoading = ref(false)
@@ -170,6 +175,10 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <span class="tc-tab-dot work" />工单
         <span v-if="openItems.length" class="tc-tab-count">{{ openItems.length }}</span>
       </button>
+      <button class="tc-tab" :class="{ on: tab === 'changes' }" type="button" role="tab"
+        :aria-selected="tab === 'changes'" @click="tab = 'changes'">
+        <span class="tc-tab-dot changes" />改动
+      </button>
     </div>
 
     <div class="tc-body">
@@ -179,6 +188,13 @@ onBeforeUnmount(() => window.clearInterval(timer))
         embedded
         :conversation-id="conversationId"
         @close="tab = 'work'"
+      />
+
+      <WorkspaceChangesPanel
+        v-else-if="tab === 'changes'"
+        :open="open"
+        :conversation-id="conversationId"
+        @reference="emit('reference', $event)"
       />
 
       <div v-else class="tc-work">
@@ -251,7 +267,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 </template>
 
 <style scoped>
-.task-center { position: absolute; inset: 0; z-index: 18; display: flex; flex-direction: column; background: var(--bg); border-radius: inherit; overflow: hidden; animation: tcIn .18s ease; }
+.task-center { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; animation: tcIn .18s ease; }
 @keyframes tcIn { from { opacity: 0; transform: translateY(6px) scale(.995); } to { opacity: 1; transform: none; } }
 .tc-head { flex: none; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line-soft); background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, var(--panel)), var(--bg-2)); }
 .tc-mark { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 9px; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); font-size: 15px; }
@@ -268,6 +284,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 .tc-tab-dot { width: 6px; height: 6px; border-radius: 50%; }
 .tc-tab-dot.run { background: var(--accent); }
 .tc-tab-dot.work { background: var(--ok); }
+.tc-tab-dot.changes { background: var(--warn, #d89a35); }
 .tc-tab-count { min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--bg-2); color: var(--dim); font-size: 9px; line-height: 15px; }
 .tc-body { flex: 1; min-height: 0; display: flex; }
 .tc-work { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }

@@ -1,4 +1,4 @@
-"""全局机器人配置：连接、单会话绑定与聊天路由。"""
+"""全局机器人配置：连接、角色 / 群组绑定与外部聊天对话。"""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr
 
 from services.agent_zero.routes.local_tools_routes import require_local_request
+from services.agent_zero.services import team_service
 from services.agent_zero.services.conversation_bots import BotManager
-from services.agent_zero.task_layer import conversation
+from services.agent_zero.stores import zero_store
 
 router = APIRouter(prefix="/bots", dependencies=[Depends(require_local_request)])
 
@@ -21,8 +22,12 @@ class BotBody(BaseModel):
 
 
 class BindBody(BaseModel):
-    conversation_id: str = Field(min_length=1, max_length=160)
-    lane_id: str = Field("", max_length=160)
+    target_type: Literal["role", "group"]
+    target_id: str = Field(min_length=1, max_length=160)
+
+
+class CreateConversationBody(BaseModel):
+    title: str = Field("", max_length=200)
 
 
 def _manager(request: Request) -> BotManager:
@@ -48,23 +53,17 @@ async def add_bot(request: Request, body: BotBody):
 
 @router.post("/{bot_id}/bind")
 async def bind_bot(request: Request, bot_id: str, body: BindBody):
-    conv = conversation.get_conversation(body.conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    # 机器人绑定会话根，同时只路由到选中的一个栏目。
-    conversation_id = str(conv.get("session_root_id") or conv.get("session_id")
-                          or conv.get("id") or body.conversation_id)
-    target_lane_id = str(body.lane_id or body.conversation_id)
-    lane = conversation.get_conversation(target_lane_id)
-    if not lane:
-        raise HTTPException(status_code=404, detail="栏目不存在")
-    lane_root_id = str(lane.get("session_root_id") or lane.get("session_id") or lane.get("id") or "")
-    if lane_root_id != conversation_id:
-        raise HTTPException(status_code=400, detail="目标栏目不属于该会话")
-    if lane.get("archived"):
-        raise HTTPException(status_code=400, detail="不能绑定到已归档栏目")
+    if body.target_type == "role":
+        target = zero_store.get_role(body.target_id)
+        if (not target or target.get("scope") == "temporary"
+                or body.target_id == zero_store.GLOBAL_ROLE_ID):
+            raise HTTPException(status_code=404, detail="角色不存在或不可用于机器人")
+    else:
+        target = team_service.get_team(body.target_id)
+        if not target or str(target.get("kind") or "group") != "group":
+            raise HTTPException(status_code=404, detail="群组不存在或不可用于机器人")
     try:
-        binding = await _manager(request).bind(bot_id, conversation_id, target_lane_id)
+        binding = await _manager(request).bind(bot_id, body.target_type, body.target_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if binding is None:
@@ -75,8 +74,26 @@ async def bind_bot(request: Request, bot_id: str, body: BindBody):
 @router.delete("/{bot_id}/route")
 async def unbind_bot(request: Request, bot_id: str):
     if not await _manager(request).unbind(bot_id):
-        raise HTTPException(status_code=404, detail="机器人尚未绑定会话")
+        raise HTTPException(status_code=404, detail="机器人不存在")
     return {"code": 0, "data": {"deleted": bot_id}}
+
+
+@router.get("/{bot_id}/conversations")
+async def list_bot_conversations(request: Request, bot_id: str):
+    if not any(item["id"] == bot_id for item in await _manager(request).list()):
+        raise HTTPException(status_code=404, detail="机器人不存在")
+    return {"code": 0, "data": {"items": await _manager(request).conversations(bot_id)}}
+
+
+@router.post("/{bot_id}/conversations")
+async def create_bot_conversation(request: Request, bot_id: str, body: CreateConversationBody):
+    try:
+        conv = await _manager(request).create_conversation(bot_id, body.title)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if conv is None:
+        raise HTTPException(status_code=404, detail="机器人不存在")
+    return {"code": 0, "data": conv}
 
 
 @router.delete("/{bot_id}")

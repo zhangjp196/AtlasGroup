@@ -2,6 +2,7 @@
 import { ElButton } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 import Avatar from '@/components/Avatar.vue'
+import BotTargetBindings from '@/components/BotTargetBindings.vue'
 import ListPager from '@/components/ListPager.vue'
 import Markdown from '@/components/chat/Markdown.vue'
 import SessionList from '@/components/chat/SessionList.vue'
@@ -28,7 +29,7 @@ const emit = defineEmits<{
 const app = useAppStore()
 const data = useDataStore()
 // 详情按「栏目」分页：概览 / 会话 / 能力 / 信息，避免所有内容堆在一个滚动区里。
-const tab = ref<'overview' | 'sessions' | 'ability' | 'info'>('overview')
+const tab = ref<'overview' | 'sessions' | 'ability' | 'info' | 'bots'>('overview')
 const tools = ref<ToolItem[]>([])
 const skills = ref<Skill[]>([])
 const skillsLoading = ref(false)
@@ -330,14 +331,16 @@ async function removeRole(): Promise<void> {
         </button>
       </header>
 
-      <div v-if="role" class="side-drawer-body">
+      <div v-if="role" class="side-drawer-body tabbed-drawer-body">
         <div class="seg drawer-tabs" role="tablist" aria-label="角色详情栏目">
           <button class="seg-btn" :class="{ on: tab === 'overview' }" type="button" @click="tab = 'overview'">概览</button>
           <button v-if="!temporary" class="seg-btn" :class="{ on: tab === 'sessions' }" type="button" @click="tab = 'sessions'">会话</button>
           <button class="seg-btn" :class="{ on: tab === 'ability' }" type="button" @click="tab = 'ability'">能力</button>
           <button class="seg-btn" :class="{ on: tab === 'info' }" type="button" @click="tab = 'info'">信息</button>
+          <button v-if="!temporary" class="seg-btn" :class="{ on: tab === 'bots' }" type="button" @click="tab = 'bots'">机器人</button>
         </div>
 
+        <div class="drawer-tab-content">
         <template v-if="tab === 'overview'">
         <div class="group-identity">
           <Avatar :name="role.name || '角'" :avatar="role.avatar" round :size="48" />
@@ -378,7 +381,7 @@ async function removeRole(): Promise<void> {
         </section>
         </template>
 
-        <section v-if="tab === 'sessions' && !temporary" class="group-section">
+        <section v-if="tab === 'sessions' && !temporary" class="group-section drawer-tab-fill">
           <div class="group-section-head">
             <h3>会话</h3>
             <span>这个角色的历史会话</span>
@@ -387,6 +390,7 @@ async function removeRole(): Promise<void> {
           <SessionList
             :role-id="role.id"
             :page-size="6"
+            class="fill-height"
             empty-text="还没有会话。点「新会话」开始第一条。"
             @open="emit('session', $event)"
           />
@@ -476,6 +480,8 @@ async function removeRole(): Promise<void> {
           <p class="group-mode-hint" style="margin:0">只删除角色本身，已有会话保留；临时角色删除后不可恢复。</p>
           <button class="btn danger" type="button" :disabled="deleting" @click="removeRole">{{ deleting ? '删除中…' : '删除角色' }}</button>
         </section>
+        <BotTargetBindings v-if="tab === 'bots' && !temporary" target-type="role" :target-id="role.id" />
+        </div>
       </div>
 
       <footer class="side-drawer-foot">

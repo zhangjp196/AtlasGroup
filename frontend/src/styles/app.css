@@ -827,6 +827,14 @@ details[open] > .activity-summary .activity-caret{transform:rotate(45deg)}
 .side-drawer-head p{margin:3px 0 0;font-size:10.5px;color:var(--faint)}
 .side-drawer-head .iconbtn{margin-left:auto;flex:none}
 .side-drawer-body{flex:1;min-height:0;overflow:auto;padding:16px 18px 20px;display:flex;flex-direction:column;gap:16px}
+.side-drawer-body.tabbed-drawer-body{overflow:hidden;gap:12px}
+.tabbed-drawer-body>.drawer-tabs{flex:none;margin-bottom:0}
+.drawer-tab-content{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:12px;padding:0 2px 2px}
+.drawer-tab-content>.group-section,.drawer-tab-content>.group-identity{flex:1 0 auto;min-height:0}
+.drawer-tab-content>.drawer-tab-fill{flex:1 1 0;min-height:0}
+.drawer-tab-fill .group-member-list{flex:1;min-height:0;max-height:none}
+.session-list.fill-height{flex:1;min-height:0}
+.session-list.fill-height>.group-member-list{flex:1;min-height:0;max-height:none;overflow:auto}
 .side-drawer-foot{flex:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 18px;border-top:1px solid var(--line-soft);background:var(--bg-2)}
 .side-drawer-foot .spacer{flex:1}
 .group-identity{display:flex;gap:12px;align-items:flex-start}
@@ -1009,6 +1017,24 @@ body.ga-open .ga-fab{display:none}
 .chat-panel .win-head{flex:none}
 .chat-panel .win-body{flex:1;min-height:0;overflow:auto}
 .chat-panel .composer{flex:none}
+.chat-workspace{display:grid;grid-template-columns:minmax(0,1fr) 0;flex:1;min-width:0;min-height:0;overflow:hidden;transition:grid-template-columns .18s ease}
+.chat-workspace.right-panel-open{grid-template-columns:minmax(0,1fr) 8px minmax(280px,var(--right-panel-width,420px))}
+.right-panel-resizing .chat-workspace{transition:none}
+.chat-workspace>.chat-main{min-width:0;min-height:0;overflow:hidden}
+.right-panel-resizer{position:relative;z-index:3;display:block;min-width:8px;cursor:col-resize;touch-action:none;outline:none}
+.right-panel-resizer::after{content:"";position:absolute;inset:0 3px;width:2px;margin:auto;background:transparent;transition:background .15s ease}
+.right-panel-resizer:hover::after,.right-panel-resizer:focus-visible::after,.right-panel-resizing .right-panel-resizer::after{background:var(--accent)}
+.right-panel-resizing{user-select:none;cursor:col-resize}
+.right-panel-dock{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;border-left:1px solid var(--line);background:var(--bg)}
+.right-panel-tabs{flex:none;display:flex;align-items:center;gap:4px;min-height:40px;padding:5px 7px;border-bottom:1px solid var(--line-soft);background:var(--bg-2)}
+.right-panel-tabs button{display:flex;align-items:center;gap:5px;min-width:0;padding:6px 8px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--faint);font-size:10px;white-space:nowrap;cursor:pointer}
+.right-panel-tabs button:hover{background:var(--panel);color:var(--text)}
+.right-panel-tabs button.active{background:var(--panel);border-color:var(--line);color:var(--text)}
+.right-panel-tabs .dock-collapse{margin-left:auto;padding-inline:7px;font-size:16px}
+.dock-badge{padding:1px 5px;border-radius:8px;background:color-mix(in srgb,var(--accent) 18%,var(--panel));color:var(--accent);font-size:9px}
+.right-panel-content{position:relative;flex:1;min-width:0;min-height:0;overflow:hidden}
+.right-panel-content>.browser-panel,.right-panel-content>.terminal-session{height:100%;min-height:0}
+@media(max-width:720px){.chat-workspace.right-panel-open{position:relative;grid-template-columns:minmax(0,1fr)}.right-panel-resizer{position:absolute;inset-block:0;right:calc(100% - min(var(--right-panel-width,420px),88%));width:8px}.right-panel-dock{position:absolute;inset:0 0 0 auto;width:min(var(--right-panel-width,420px),88%);box-shadow:-16px 0 32px color-mix(in srgb,#000 22%,transparent)}.right-panel-tabs{gap:2px;padding-inline:4px}.right-panel-tabs button{padding-inline:5px;font-size:9px}}
 /* 栏目：会话窗口左侧的一列独立对话 */
 .chat-body{display:flex;flex:1;min-height:0;min-width:0}
 .chat-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0}

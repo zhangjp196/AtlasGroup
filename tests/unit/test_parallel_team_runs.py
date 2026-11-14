@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 from services.agent_zero.services import graph_service
 from services.agent_zero.services import team_service as ts
@@ -46,6 +47,33 @@ def test_member_runs_claim_in_parallel_but_coordinator_stays_single(app_env):
     assert queued_member["id"] in [
         item["id"] for item in run_service.conversation_queue(conv["id"], include_member=True)
     ]
+
+
+def test_subagents_share_global_run_capacity(app_env, monkeypatch):
+    ws = _init(app_env)
+    from services.agent_zero import config
+
+    monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(
+        max_concurrent_conversation_runs=2,
+        max_parallel_member_runs=4,
+    ))
+    parent_conv = conversation.create_conversation(ws, "local")
+    other_conv = conversation.create_conversation(ws, "local")
+    parent = run_service.create_run(parent_conv["id"], "local", content="父任务")
+    assert run_service.claim_run(parent["id"]) is True
+
+    slot = run_service.reserve_subagent_slot(parent["id"])
+    assert slot
+    assert run_service.active_capacity_count() == 2
+    # 父 run + 子代理正好占满全局额度，包括其他会话的 run。
+    assert run_service.reserve_subagent_slot(parent["id"]) is None
+    competing = run_service.create_run(other_conv["id"], "local", content="竞争任务")
+    assert run_service.claim_run(competing["id"]) is False
+
+    assert run_service.release_subagent_slot(slot) is True
+    assert run_service.claim_run(competing["id"]) is True
+    run_service.finish_run(parent["id"], run_service.STATUS_DONE)
+    run_service.finish_run(competing["id"], run_service.STATUS_DONE)
 
 
 def test_call_team_batch_dispatches_all_assignments(app_env):

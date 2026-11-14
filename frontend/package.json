@@ -13,6 +13,7 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "test:unit": "vitest run",
+    "test:e2e:workspace": "node e2e/workspace-flow.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

@@ -1717,14 +1717,16 @@ async def runtime_status():
     running = int(stats.get("running") or 0)
     queued = int(stats.get("queued") or 0)
     live = int(stats.get("live") or 0)
+    capacity_used = max(int(stats.get("capacity_used") or 0), live)
     slots_max = int(stats.get("slots_max") or settings.max_concurrent_conversation_runs)
     return {"code": 0, "data": {
         "scheduler": {
             "backend": "in-process",
             "queued": queued,
             "running": running,
+            "slots_used": capacity_used,
             "slots_max": slots_max,
-            "slots_available": max(0, slots_max - max(running, live)),
+            "slots_available": max(0, slots_max - capacity_used),
         },
         "worker": {"is_running": bool(stats.get("is_running"))},
         "sessions": _session_counts(),

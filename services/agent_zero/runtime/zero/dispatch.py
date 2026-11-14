@@ -387,6 +387,17 @@ class ToolDispatcher:
 
             return await tool_jobs.handle(
                 str(task.get("conversation_id") or ""), args)
+        if canon == "browser":
+            from services.agent_zero.services import browser_service
+
+            op = str(args.get("op") or "")
+            if op not in {"navigate", "back", "forward", "reload", "click", "fill", "read_text", "title", "url"}:
+                return {"error": "不支持的浏览器操作"}
+            return await browser_service.automate(
+                op, url=str(args.get("url") or ""),
+                selector=str(args.get("selector") or ""),
+                value=str(args.get("value") or ""),
+            )
         if canon == "web":
             return await self._act_web(task, config, node, args)
         if canon in SKILL_TOOL_CODES:

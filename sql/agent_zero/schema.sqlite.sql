@@ -119,7 +119,9 @@ CREATE TABLE conversation_bots (
 	provider TEXT NOT NULL,
 	bot_id TEXT NOT NULL,
 	secret TEXT NOT NULL,
-	peer_id TEXT NOT NULL
+	peer_id TEXT NOT NULL,
+	target_type TEXT,
+	target_id TEXT
 );
 CREATE UNIQUE INDEX uq_conversation_bots_account ON conversation_bots (provider, bot_id);
 CREATE INDEX ix_conversation_bots_conversation_id ON conversation_bots (conversation_id);
@@ -131,7 +133,7 @@ CREATE TABLE bot_routes (
 	peer_id TEXT NOT NULL,
 	created_at DATETIME DEFAULT (datetime('now','localtime')) NOT NULL
 );
-CREATE UNIQUE INDEX uq_bot_routes_bot ON bot_routes (bot_id);
+CREATE UNIQUE INDEX uq_bot_routes_bot_peer ON bot_routes (bot_id, peer_id);
 CREATE INDEX ix_bot_routes_conversation_id ON bot_routes (conversation_id);
 
 CREATE TABLE gdag_edges (

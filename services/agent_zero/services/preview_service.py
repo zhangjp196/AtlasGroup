@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import html
+import csv
+import io
 import logging
 import mimetypes
 import zipfile
@@ -412,6 +414,24 @@ def preview_path(target: Path, name: str) -> Dict[str, Any]:
     if ext in PDF_EXT:
         result["kind"] = "pdf"
         result["render"] = "pdf"
+        return result
+
+    if ext in {".csv", ".tsv"}:
+        with target.open("rb") as stream:
+            data = stream.read(MAX_PREVIEW_BYTES)
+        text = data.decode("utf-8-sig", errors="replace")
+        delimiter = "\t" if ext == ".tsv" else ","
+        try:
+            rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))[:MAX_TABLE_ROWS]
+        except csv.Error:
+            rows = []
+        rows = [row[:MAX_TABLE_COLS] for row in rows]
+        result["kind"] = "table"
+        result["render"] = "html"
+        result["rows"] = rows
+        result["html"] = _table_html(rows)
+        result["text"] = text[:MAX_TEXT_CHARS]
+        result["truncated"] = size > MAX_PREVIEW_BYTES or len(rows) >= MAX_TABLE_ROWS or len(text) > MAX_TEXT_CHARS
         return result
 
     if mime.startswith(("video/", "audio/")):

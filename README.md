@@ -94,6 +94,8 @@ scripts/init_db.py     手动初始化数据库
 doc/                   设计与分析文档
 ```
 
+AI 开发入口见 [AGENTS.md](AGENTS.md)；模块地图与检查命令见 [doc/development.md](doc/development.md)。
+
 ## 快速开始
 
 ```bash
@@ -135,7 +137,9 @@ npm run build
 
 ```bash
 bash devops/dev.sh env-dev   # 安装测试/CI 依赖
-bash devops/dev.sh ci        # compileall + ruff + pytest
+bash devops/dev.sh check:fast  # ruff + 前端类型检查
+bash devops/dev.sh smoke       # 核心应用与工作区 API
+bash devops/dev.sh check:full  # 完整前后端检查
 ```
 
 ## macOS 桌面端
@@ -201,7 +205,10 @@ open dist/AtlasX.app
   诊断后重试。用户主动停止的任务不自动重启；有待授权 / 待回答的会话先停下等人。
 - **一个角色并行多项任务**：角色会话里用 `background_task` 的 `tasks` 数组一次派发多条
   互不依赖的任务，每条各自建一条后台任务 / 成员 run，由 worker 并行执行（受
-  `max_parallel_member_runs` 与模型并发槽位约束）；群组会话里主持也可以把本角色的独立
+  全局 `max_concurrent_conversation_runs` 与单会话 `max_parallel_member_runs` 约束）；
+  普通 run、团队成员 run、子代理（包括角色委派与角色讨论）共用全局执行额度，每个
+  活动中的子代理也占一个槽位；模型档案并发上限仍作为模型服务侧的额外保护；
+  群组会话里主持也可以把本角色的独立
   工作放到后台，成员之间 / 同一成员的多条 assignment 同样并行。任务中心、执行画布与
   工单面板会逐条展示。
 - **任务内子代理**：单个后台任务 / 团队成员任务在执行中可以用
@@ -258,6 +265,16 @@ open dist/AtlasX.app
 - 引用以 `@路径` chip 显示在输入框上方，可逐个移除；消息发送后 transcript 里也会
   显示引用 chip。
 - 引用随用户消息进入模型上下文，格式为 `[引用文件: path1, path2/]`。
+
+## 内置工作区工具
+
+- 会话头部的文件按钮可浏览当前会话工作区，按需展开目录并预览文件；隐藏文件默认不显示。
+- 会话头部的终端在应用内连接到当前工作区 shell；终端会话关闭时结束对应 shell。
+- 桌面端内置浏览器使用系统 WebView 窗口，用户可直接查看和操作网页；角色获得
+  `browser` 工具后，Agent 可导航、点击、填写表单并读取页面文本，操作在可见页面中发生。
+- 工作区预览支持常见文本与代码文件、Markdown、CSV / TSV、HTML / SVG、图片、PDF、
+  Office 文档和音视频。UTF-8 文本与 Markdown 可在预览中修改并保存；二进制 Office
+  文件保持只读，避免以文本方式破坏文件结构。
 
 ## 代码图谱 / CodeGraph
 

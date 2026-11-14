@@ -181,6 +181,7 @@ class AtlasXApi:
         self.home = home
         self.url = url
         self.window = None
+        self.browser_window = None
 
     def bind(self, window) -> None:
         self.window = window
@@ -213,6 +214,76 @@ class AtlasXApi:
             webbrowser.open(target)
             return True
         return False
+
+    @staticmethod
+    def _browser_url(url: str) -> str:
+        target = str(url or "").strip()
+        if not target:
+            return "https://www.google.com"
+        if not target.startswith(("http://", "https://")):
+            target = "https://" + target
+        if not target.startswith(("http://", "https://")):
+            raise ValueError("仅支持 http / https 网页")
+        return target
+
+    def open_browser(self, url: str = "") -> bool:
+        """打开应用内置 WebView 浏览器，可从主窗口继续控制和自动化。"""
+        import webview
+
+        target = self._browser_url(url)
+        if self.browser_window is not None:
+            try:
+                self.browser_window.load_url(target)
+                self.browser_window.show()
+                return True
+            except Exception:
+                self.browser_window = None
+        self.browser_window = webview.create_window(
+            "AtlasX 浏览器", target, width=1200, height=840,
+            min_size=(720, 520), resizable=True, text_select=True,
+            zoomable=True, confirm_close=False,
+        )
+        browser = self.browser_window
+        browser.events.closed += lambda *_args: setattr(self, "browser_window", None)
+        return True
+
+    def browser_navigate(self, url: str) -> bool:
+        if self.browser_window is None:
+            self.open_browser(url)
+            return True
+        self.browser_window.load_url(self._browser_url(url))
+        self.browser_window.show()
+        return True
+
+    def browser_action(self, action: str, selector: str = "", value: str = ""):
+        """对可见浏览器当前页面执行小范围 DOM 自动化。"""
+        browser = self.browser_window
+        if browser is None:
+            raise RuntimeError("内置浏览器尚未打开")
+        import json as _json
+
+        selector_js = _json.dumps(str(selector or ""))
+        value_js = _json.dumps(str(value or ""))
+        if action == "back":
+            script = "history.back(); true"
+        elif action == "forward":
+            script = "history.forward(); true"
+        elif action == "reload":
+            script = "location.reload(); true"
+        elif action == "click":
+            script = f"""(() => {{ const e=document.querySelector({selector_js}); if(!e) throw new Error('未找到匹配元素'); e.click(); return true; }})()"""
+        elif action == "fill":
+            script = f"""(() => {{ const e=document.querySelector({selector_js}); if(!e) throw new Error('未找到匹配元素'); e.focus(); if(e.isContentEditable) e.textContent={value_js}; else {{ const setter=Object.getOwnPropertyDescriptor(e.constructor.prototype,'value')?.set; if(setter) setter.call(e,{value_js}); else e.value={value_js}; }} e.dispatchEvent(new Event('input',{{bubbles:true}})); e.dispatchEvent(new Event('change',{{bubbles:true}})); return true; }})()"""
+        elif action == "text":
+            script = f"""(() => {{ const e={selector_js}?document.querySelector({selector_js}):document.body; if(!e) throw new Error('未找到匹配元素'); return (e.innerText||e.textContent||'').slice(0,20000); }})()"""
+        elif action == "title":
+            script = "document.title"
+        elif action == "url":
+            script = "location.href"
+        else:
+            raise ValueError("不支持的浏览器自动化操作")
+        result = browser.evaluate_js(script)
+        return {"action": action, "result": result}
 
     def info(self) -> dict:
         return {

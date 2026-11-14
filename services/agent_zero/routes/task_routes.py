@@ -604,6 +604,7 @@ class RewindBody(BaseModel):
     files: bool = True
     conversation: bool = True
     delete_added: bool = True
+    paths: Optional[List[str]] = Field(default=None, max_length=200)
 
 
 class CheckpointBody(BaseModel):
@@ -697,6 +698,10 @@ async def rewind_file_checkpoint(conv_id: str, checkpoint_id: str,
     cp = _owned_checkpoint(conv, checkpoint_id)
     if not body.files and not body.conversation:
         raise HTTPException(status_code=400, detail="至少选择回退文件或对话")
+    if body.paths is not None and body.conversation:
+        raise HTTPException(status_code=400, detail="按文件回退时不能同时截断对话")
+    if body.paths is not None and not body.paths:
+        raise HTTPException(status_code=400, detail="回退文件列表不能为空")
     if run_service.running_run(conv_id):
         raise HTTPException(status_code=400,
                             detail="当前有运行正在执行，请先停止后再回退")
@@ -725,7 +730,8 @@ async def rewind_file_checkpoint(conv_id: str, checkpoint_id: str,
         try:
             files_result = await asyncio.to_thread(
                 svc.restore, ws_id, checkpoint_id,
-                delete_added=bool(body.delete_added))
+                delete_added=bool(body.delete_added),
+                paths=body.paths)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except OSError as e:
@@ -741,7 +747,8 @@ async def rewind_file_checkpoint(conv_id: str, checkpoint_id: str,
         "local", "checkpoint_rewind",
         args={"conversation_id": conv_id, "checkpoint_id": checkpoint_id,
               "files": bool(body.files), "conversation": bool(body.conversation),
-              "delete_added": bool(body.delete_added)},
+              "delete_added": bool(body.delete_added),
+              "paths": list(body.paths or [])},
         result={"files": files_result, "conversation": conv_result},
     )
     return {"code": 0, "data": {"files": files_result,

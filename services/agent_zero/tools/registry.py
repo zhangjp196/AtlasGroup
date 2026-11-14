@@ -248,6 +248,23 @@ TOOL_DEFS: List[ToolDef] = [
         }, ["url"]),
     ),
     ToolDef(
+        "browser", (),
+        name="内置浏览器",
+        description=(
+            "控制用户可见的桌面内置浏览器，页面会实时显示，用户也能直接接管操作。"
+            "op=navigate 打开网页；back/forward/reload 导航；click 点击 CSS 选择器；"
+            "fill 对输入框或可编辑元素填值；read_text 读取页面或所选元素文本；"
+            "title/url 读取标题或当前网址。每次操作都在可见网页中执行。"
+        ),
+        parameters=_obj({
+            "op": {"type": "string", "enum": ["navigate", "back", "forward", "reload", "click", "fill", "read_text", "title", "url"], "description": "浏览器操作"},
+            "url": {"type": "string", "description": "navigate 时的 http(s) 网址"},
+            "selector": {"type": "string", "description": "目标 CSS 选择器；read_text 留空时读取整页"},
+            "value": {"type": "string", "description": "fill 时填入的文本"},
+        }, ["op"]),
+        risk="medium",
+    ),
+    ToolDef(
         "todo_write", ("todo", "task_list", "todo_list"),
         name="任务清单",
         description=(

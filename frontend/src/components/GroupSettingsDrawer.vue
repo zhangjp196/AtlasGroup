@@ -4,6 +4,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Avatar from '@/components/Avatar.vue'
 import AvatarField from '@/components/AvatarField.vue'
+import BotTargetBindings from '@/components/BotTargetBindings.vue'
 import Modal from '@/components/Modal.vue'
 import WorkEditorDialog, { type WorkSeed } from '@/components/WorkEditorDialog.vue'
 import SessionList from '@/components/chat/SessionList.vue'
@@ -34,7 +35,7 @@ const app = useAppStore()
 const data = useDataStore()
 const router = useRouter()
 // 详情按栏目分页：基本 / 成员 / 会话 / 授权 / 危险操作。
-const tab = ref<'basic' | 'members' | 'sessions' | 'grants' | 'danger'>('basic')
+const tab = ref<'basic' | 'members' | 'sessions' | 'grants' | 'danger' | 'bots'>('basic')
 const saving = ref(false)
 const removing = ref(false)
 const grants = ref<ScopeGrant[]>([])
@@ -348,15 +349,17 @@ function onWorkSaved(): void {
         </button>
       </header>
 
-      <div class="side-drawer-body">
+      <div class="side-drawer-body tabbed-drawer-body">
         <div class="seg drawer-tabs" role="tablist" aria-label="群组栏目">
           <button class="seg-btn" :class="{ on: tab === 'basic' }" type="button" @click="tab = 'basic'">基本</button>
           <button class="seg-btn" :class="{ on: tab === 'members' }" type="button" @click="tab = 'members'">成员 {{ totalPeople }}</button>
           <button class="seg-btn" :class="{ on: tab === 'sessions' }" type="button" @click="tab = 'sessions'">会话 {{ boundConversations.length }}</button>
           <button class="seg-btn" :class="{ on: tab === 'grants' }" type="button" @click="tab = 'grants'">授权</button>
+          <button class="seg-btn" :class="{ on: tab === 'bots' }" type="button" @click="tab = 'bots'">机器人</button>
           <button class="seg-btn" :class="{ on: tab === 'danger' }" type="button" @click="tab = 'danger'">危险</button>
         </div>
 
+        <div class="drawer-tab-content">
         <div v-if="tab === 'basic'" class="group-mode-hint">
           群组是所有群聊会话共享的花名册：改成员 / 协作方式 / 工作区会同步到
           {{ boundConversations.length }} 条已绑定会话；不会影响单聊和其他群组。
@@ -376,7 +379,7 @@ function onWorkSaved(): void {
           </div>
         </div>
 
-        <section v-if="tab === 'members'" class="group-section">
+        <section v-if="tab === 'members'" class="group-section drawer-tab-fill">
           <div class="group-section-head">
             <h3>群成员</h3>
             <span>{{ totalPeople }} / 13 人 · 群主 1 人</span>
@@ -432,7 +435,7 @@ function onWorkSaved(): void {
           <div class="group-mode-hint">{{ modeHint }}</div>
         </section>
 
-        <section v-if="tab === 'sessions'" class="group-section">
+        <section v-if="tab === 'sessions'" class="group-section drawer-tab-fill">
           <div class="group-section-head">
             <h3>群聊会话</h3>
             <span>{{ boundConversations.length }} 条 · {{ compactNumber(groupTokens) }} tokens</span>
@@ -443,6 +446,7 @@ function onWorkSaved(): void {
             v-if="team"
             :team-id="team.id"
             :page-size="6"
+            class="fill-height"
             empty-text="还没有群聊会话。点「新会话」开始第一条。"
             @open="openConversation"
             @changed="onSessionsChanged"
@@ -473,6 +477,8 @@ function onWorkSaved(): void {
           <p class="group-mode-hint" style="margin:0">删除群组后，绑定会话会退回单聊；群成员角色本身不会被删除。</p>
           <button class="btn danger" type="button" :disabled="removing" @click="removeTeam">{{ removing ? '解散中…' : '解散群聊' }}</button>
         </section>
+        <BotTargetBindings v-if="tab === 'bots' && team" target-type="group" :target-id="team.id" />
+        </div>
       </div>
 
       <footer class="side-drawer-foot">

@@ -12,6 +12,7 @@ import ProcessList from './ProcessList.vue'
 const props = defineProps<{ message: Message }>()
 const emit = defineEmits<{
   (e: 'continue-task', taskId: string): void
+  (e: 'continue-message'): void
   (e: 'fork', message: Message): void
 }>()
 const data = useDataStore()
@@ -23,6 +24,7 @@ const isSystem = computed(() => by.value === 'system')
 // 历史用户消息的 by 是 local / user 两种写法；只有 assistant 是模型侧。
 const isUser = computed(() => by.value !== 'assistant' && by.value !== 'system')
 const isClear = computed(() => props.message.kind === 'clear_context')
+const canContinueMessage = computed(() => Boolean(props.message.interrupted || props.message.error))
 // 头像以角色当前值为准，消息里的 role_avatar 只是回复那一刻的快照。
 const avatarSrc = computed(() => data.roleAvatar(
   props.message.role_id, props.message.role_avatar || ''))
@@ -121,6 +123,9 @@ const turnUsage = computed(() => {
       <Attachments :items="message.attachments" />
       <div v-if="message.error" class="run-error">{{ message.error }}</div>
       <div v-if="message.id" class="msg-ops">
+        <button v-if="canContinueMessage" class="msg-op" type="button" @click="emit('continue-message')">
+          放入续办提示
+        </button>
         <button class="msg-op" type="button" title="复制到此消息为止，另起一条分支会话" @click="emit('fork', message)">
           从此处分支
         </button>

@@ -273,11 +273,13 @@ class ConversationRunWorker:
         try:
             queued = run_service.count_runs(status=run_service.STATUS_QUEUED)
             running = run_service.count_runs(status=run_service.STATUS_RUNNING)
+            capacity_used = run_service.active_capacity_count()
         except Exception:
-            queued = running = 0
+            queued = running = capacity_used = 0
         age = (round(time.time() - self._last_cycle_at, 1)
                if self._last_cycle_at else None)
         return {"queued": queued, "running": running,
+                "capacity_used": capacity_used,
                 "live": len(self._live),
                 "is_running": self._started,
                 "last_cycle_at": self._last_cycle_at or None,
@@ -333,14 +335,13 @@ class ConversationRunWorker:
         self._reap_orphans()
         global_limit = max(0, int(get_settings().max_concurrent_conversation_runs))
         try:
-            running_count = run_service.count_runs(status=run_service.STATUS_RUNNING)
+            capacity_used = run_service.active_capacity_count()
         except Exception:
-            logger.exception("读取全局运行数失败；本轮不派发新任务")
+            logger.exception("读取全局并发额度失败；本轮不派发新任务")
             return
-        # `running_count` spans every session and team member in SQLite, including
-        # work claimed by another worker instance. `_live` also counts tasks that
-        # have been scheduled locally but have not reached their atomic DB claim yet.
-        capacity = global_limit - max(len(self._live), running_count)
+        # `capacity_used` spans normal runs and child reservations in SQLite;
+        # `_live` also counts local tasks that have not reached their DB claim.
+        capacity = global_limit - max(len(self._live), capacity_used)
         if capacity <= 0:
             return
         try:
@@ -812,19 +813,12 @@ def get_worker() -> ConversationRunWorker:
 
 
 def start_worker() -> asyncio.Task:
-    """启动对话运行 worker（main lifespan 调用；返回任务句柄供取消）。"""
+    """启动对话运行 worker（main lifespan 已先完成持久化运行恢复）。"""
     w = get_worker()
     if w._started:
         return w._cycle_task  # type: ignore[return-value]
     w._started = True
     w._loop = asyncio.get_running_loop()
-    # 启动恢复：上一进程遗留的 running run 已无执行者，收尾为失败（否则永远「进行中」）
-    try:
-        n = run_service.recover_running_runs()
-        if n:
-            logger.warning("对话运行启动恢复：%d 条中断的运行已收尾为失败", n)
-    except Exception:
-        logger.exception("对话运行启动恢复失败（不影响启动）")
     w._cycle_task = asyncio.create_task(w._run_forever())
     return w._cycle_task
 

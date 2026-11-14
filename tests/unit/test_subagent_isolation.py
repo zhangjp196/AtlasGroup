@@ -6,6 +6,8 @@ import json
 
 from services.agent_zero.task_layer import conversation
 from services.agent_zero.task_layer import prompt_builder
+from services.agent_zero.task_layer import run_service
+from services.agent_zero.stores import zero_store
 
 
 def test_subagent_messages_only_include_explicit_context():
@@ -26,7 +28,14 @@ def test_subagent_prompt_marks_isolation():
     assert "看不到父对话历史" in prompt_builder.SUBAGENT
 
 
-def test_exec_subagent_runs_isolated(monkeypatch):
+def test_exec_subagent_runs_isolated(app_env, monkeypatch):
+    from services.agent_zero import database
+
+    database.init_database()
+    zero_store.ensure_defaults()
+    conv = conversation.create_conversation(zero_store.DEFAULT_WORKSPACE_ID, "local")
+    parent = run_service.create_run(conv["id"], "local", content="父任务")
+    assert run_service.claim_run(parent["id"]) is True
     captured = {}
 
     async def fake_stream(conv, user, role, sink, **kwargs):
@@ -39,9 +48,10 @@ def test_exec_subagent_runs_isolated(monkeypatch):
     role = {"id": "r1", "name": "Atlas",
             "envelope": {"tools": ["read_file"]}}
     out = asyncio.run(conversation._exec_call_subagent(
-        {"id": "conv1", "workspace_id": "ws1"}, "local", role,
+        conv, "local", role,
         {"goal": "检查配置", "instructions": "只看只读文件",
-         "context": "配置文件在 config.yaml"}, 0))
+         "context": "配置文件在 config.yaml"}, 0,
+        parent_run_id=parent["id"]))
     payload = json.loads(out)
     assert payload["output"] == "子代理结论"
     assert captured["isolated"] is True
@@ -50,6 +60,63 @@ def test_exec_subagent_runs_isolated(monkeypatch):
     assert "检查配置" in text
     assert "只看只读文件" in text
     assert "配置文件在 config.yaml" in text
+
+
+def test_call_agent_uses_and_releases_shared_capacity(app_env, monkeypatch):
+    from services.agent_zero import database
+
+    database.init_database()
+    zero_store.ensure_defaults()
+    conv = conversation.create_conversation(zero_store.DEFAULT_WORKSPACE_ID, "local")
+    parent = run_service.create_run(conv["id"], "local", content="父任务")
+    assert run_service.claim_run(parent["id"]) is True
+    captured = {}
+
+    async def fake_stream(_conv, _user, _role, sink, **kwargs):
+        captured.update(kwargs)
+        sink["text"] = "角色结论"
+        if False:  # pragma: no cover
+            yield {}
+
+    monkeypatch.setattr(conversation, "_stream_role", fake_stream)
+    out = asyncio.run(conversation._exec_call_agent(
+        conv, "local", {"id": "r1", "name": "父角色", "envelope": {}},
+        {"goal": "检查问题"}, 0, parent_run_id=parent["id"]))
+    assert json.loads(out)["output"] == "角色结论"
+    assert captured["run_id"] == parent["id"]
+    # 子代理结束后槽位已经归还。
+    slot = run_service.reserve_subagent_slot(parent["id"])
+    assert slot
+    assert run_service.release_subagent_slot(slot)
+
+
+def test_call_agent_waits_when_shared_capacity_is_full(app_env, monkeypatch):
+    from types import SimpleNamespace
+
+    from services.agent_zero import config, database
+
+    database.init_database()
+    zero_store.ensure_defaults()
+    conv = conversation.create_conversation(zero_store.DEFAULT_WORKSPACE_ID, "local")
+    monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(
+        max_concurrent_conversation_runs=1,
+        max_parallel_member_runs=4,
+    ))
+    parent = run_service.create_run(conv["id"], "local", content="父任务")
+    assert run_service.claim_run(parent["id"]) is True
+    called = False
+
+    async def fake_stream(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        yield {}
+
+    monkeypatch.setattr(conversation, "_stream_role", fake_stream)
+    out = asyncio.run(conversation._exec_call_agent(
+        conv, "local", {"id": "r1", "name": "父角色", "envelope": {}},
+        {"goal": "检查问题"}, 0, parent_run_id=parent["id"]))
+    assert "全局并发额度已满" in json.loads(out)["error"]
+    assert called is False
 
 
 def test_exec_team_member_dispatches_background_run(monkeypatch):

@@ -37,6 +37,7 @@ export default defineConfig({
       '/api': {
         target: process.env.ATLAS_API || 'http://127.0.0.1:10210',
         changeOrigin: true,
+        ws: true,
       },
     },
   },

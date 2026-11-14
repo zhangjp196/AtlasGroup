@@ -226,7 +226,7 @@ class Conversation(Base):
 
 
 class ConversationBot(Base):
-    """机器人长连接（全局资源）。聊天到会话的路由见 `BotRoute`。
+    """机器人长连接（全局资源）及其唯一角色 / 群组目标。
 
     `conversation_id` / `peer_id` 是旧版「一个机器人绑定一个会话、一个聊天」
     留下的列，只为兼容已有库保留，不再参与路由：conversation_id 写全局 Agent
@@ -241,15 +241,13 @@ class ConversationBot(Base):
     bot_id: Mapped[str] = mapped_column(Text, nullable=False)
     secret: Mapped[str] = mapped_column(Text, nullable=False)
     peer_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    target_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     __table_args__ = (Index("uq_conversation_bots_account", "provider", "bot_id", unique=True),)
 
 
 class BotRoute(Base):
-    """机器人当前绑定的会话（一个机器人同时只绑定一个）。
-
-    `peer_id` 只记录最近一次收到消息的聊天，用于设置页展示；路由只按
-    `bot_id` 查，不按聊天分流。
-    """
+    """外部聊天到内部对话的映射；机器人绑定目标本身不存会话 id。"""
 
     __tablename__ = "bot_routes"
 
@@ -261,13 +259,12 @@ class BotRoute(Base):
         Text, ForeignKey("conversations.id", ondelete="CASCADE"), index=True
     )
     peer_id: Mapped[str] = mapped_column(Text, nullable=False)
-    # 机器人当前使用的栏目：绑定会话根时，机器人消息默认落到这里，而不是根会话；
-    # /new 换栏目时只改这一列，绑定关系（会话根）不变。
+    # 旧版本的栏目 id，保留列以兼容既有数据库；新逻辑不读取。
     lane_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[object] = mapped_column(
         DateTime, server_default=text("datetime('now','localtime')"), nullable=False
     )
-    __table_args__ = (Index("uq_bot_routes_bot", "bot_id", unique=True),)
+    __table_args__ = (Index("uq_bot_routes_bot_peer", "bot_id", "peer_id", unique=True),)
 
 
 class ConversationRun(Base):
@@ -373,6 +370,21 @@ class TeamTask(Base):
             "status IN ('running','paused','done','failed','stopped')",
             name="ck_team_tasks_status",
         ),
+    )
+
+
+class ConversationRunReservation(Base):
+    """Global run-capacity slot held by a nested execution such as a subagent."""
+
+    __tablename__ = "conversation_run_reservations"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    parent_run_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("conversation_runs.id", ondelete="CASCADE"), nullable=False,
+        index=True,
+    )
+    created_at: Mapped[object] = mapped_column(
+        DateTime, server_default=text("datetime('now','localtime')"), nullable=False
     )
 
 

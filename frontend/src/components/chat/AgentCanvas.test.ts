@@ -1,6 +1,6 @@
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VueFlow } from '@vue-flow/core'
 import { api } from '@/api/client'
 import AgentCanvas from './AgentCanvas.vue'
@@ -8,6 +8,14 @@ import AgentCanvas from './AgentCanvas.vue'
 vi.mock('@/api/client', () => ({ api: vi.fn() }))
 
 describe('AgentCanvas', () => {
+  beforeEach(() => {
+    vi.stubGlobal('CSS', { escape: (value: string) => value })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('retains completed nodes while removing completed tasks from active controls', async () => {
     const root = { id: 'root', name: '主持', status: 'running' }
     const subagent = { id: 'sub-1', name: '子代理', status: 'running' }

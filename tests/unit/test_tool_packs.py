@@ -51,7 +51,7 @@ def test_catalog_lists_every_standalone_tool_even_without_workspace():
     full_codes = [s["code"] for s in full["standalone"]]
     chat_codes = [s["code"] for s in chat["standalone"]]
     assert full_codes == chat_codes, "纯聊天工作区把独立工具从目录里删掉了"
-    assert {"shell", "workspace", "ask_user"} <= set(chat_codes)
+    assert {"shell", "workspace", "ask_user", "browser"} <= set(chat_codes)
     assert all(s["available"] for s in full["standalone"])
     # 纯聊天工作区：只有需要用户文件夹的 workspace 置灰，shell / ask_user 仍可用
     unavailable = {s["code"] for s in chat["standalone"] if not s["available"]}
@@ -66,7 +66,7 @@ def test_dev_tools_are_packed_shell_stays_standalone():
     assert dev.ops["vcs"] == "vcs"
     assert dev.ops["graph"] == "codegraph"
     standalone = set(packs.unpacked_codes(registry.known_codes()))
-    assert {"shell", "workspace", "ask_user"} <= standalone
+    assert {"shell", "workspace", "ask_user", "browser"} <= standalone
     assert not ({"tool_job", "vcs", "codegraph"} & standalone)
     # shell 不进任何包：审批预览要能看到完整命令
     assert "shell" not in {code for p in packs.PACKS for code in p.ops.values()}
@@ -149,7 +149,7 @@ def test_pack_specs_keep_workspace_tools_without_dir():
     assert {"net", "memory", "plan", "dev", "skill", "mcp"} <= names
     # 独立工具：shell / ask_user / session_manage 仍在，workspace 被过滤
     chat_only = packs.unpacked_codes(registry.known_codes(), has_working_dir=False)
-    assert chat_only == ["shell", "ask_user", "session_manage"]
+    assert chat_only == ["shell", "browser", "ask_user", "session_manage"]
     # dev 包在纯聊天工作区里动作齐全（job / vcs / graph）
     dev = next(s for s in specs if s["function"]["name"] == "dev")
     assert set(dev["function"]["parameters"]["properties"]["op"]["enum"]) == {

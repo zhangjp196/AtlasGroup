@@ -4,8 +4,9 @@ import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ListPager from '@/components/ListPager.vue'
 import Modal from '@/components/Modal.vue'
+import WorkspaceFileContent, { type WorkspaceFilePreviewData } from '@/components/WorkspaceFileContent.vue'
 import WorkEditorDialog, { type WorkSeed } from '@/components/WorkEditorDialog.vue'
-import { api } from '@/api/client'
+import { api, apiUrl } from '@/api/client'
 import type { Workspace } from '@/api/types'
 import { bytes } from '@/lib/format'
 import { DEFAULT_PAGE_SIZE, pageSlice } from '@/lib/paging'
@@ -32,9 +33,11 @@ const router = useRouter()
 
 const path = ref('.')
 const items = ref<FileEntry[]>([])
-const file = ref<{ path: string; text?: string; content?: string; size: number; truncated?: boolean } | null>(null)
+const file = ref<WorkspaceFilePreviewData | null>(null)
 const loading = ref(false)
 const busy = ref(false)
+const editingFile = ref(false)
+const editText = ref('')
 const renameOpen = ref(false)
 const renameName = ref('')
 const workOpen = ref(false)
@@ -42,7 +45,16 @@ const workSeed = ref<WorkSeed | null>(null)
 
 const pathLabel = computed(() => path.value === '.' ? '/' : `/${path.value}`)
 const breadcrumbs = computed(() => path.value === '.' ? [] : path.value.split('/').filter(Boolean))
-const fileText = computed(() => file.value?.text ?? file.value?.content ?? '')
+const fileText = computed(() => file.value?.text ?? '')
+const fileDirty = computed(() => editingFile.value && editText.value !== fileText.value)
+const editableFile = computed(() => Boolean(file.value && ['text', 'markdown'].includes(file.value.kind || '')))
+const mediaUrl = computed(() => {
+  const ws = props.workspace
+  const current = file.value
+  return ws && current
+    ? apiUrl(`/workspace/file/download?workspace_id=${encodeURIComponent(ws.id)}&path=${encodeURIComponent(current.path)}`)
+    : ''
+})
 const boundRoles = computed(() => data.persistentRoles.filter(
   (role) => String(role.workspace_id || '') === String(props.workspace?.id || ''),
 ))
@@ -53,11 +65,19 @@ const pagedBoundRoles = computed(
 )
 watch(boundRoles, () => { rolePage.value = 1 })
 
+function discardFileChanges(): boolean {
+  if (!fileDirty.value) return true
+  if (!window.confirm('当前文件有未保存的修改，确定丢弃吗？')) return false
+  cancelFileEdit()
+  return true
+}
+
 watch(() => props.workspace?.id, (id, old) => {
   if (!props.open || !id) return
   if (id === old) return
   path.value = '.'
   file.value = null
+  editingFile.value = false
   items.value = []
   void loadDir()
 }, { immediate: true })
@@ -67,6 +87,7 @@ watch(() => props.open, (open) => {
 })
 
 async function loadDir(): Promise<void> {
+  if (!discardFileChanges()) return
   const ws = props.workspace
   if (!ws) return
   loading.value = true
@@ -82,6 +103,7 @@ async function loadDir(): Promise<void> {
 }
 
 async function openEntry(entry: FileEntry): Promise<void> {
+  if (!discardFileChanges()) return
   const ws = props.workspace
   if (!ws) return
   if (entry.type === 'dir') {
@@ -90,9 +112,44 @@ async function openEntry(entry: FileEntry): Promise<void> {
     return
   }
   try {
-    file.value = await api(`/workspace/file?workspace_id=${encodeURIComponent(ws.id)}&path=${encodeURIComponent(entry.path)}`)
+    const preview = await api<WorkspaceFilePreviewData>(`/workspace/file/preview?workspace_id=${encodeURIComponent(ws.id)}&path=${encodeURIComponent(entry.path)}`)
+    file.value = preview
+    editingFile.value = false
+    editText.value = preview.text || ''
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  }
+}
+
+function startFileEdit(): void {
+  if (!file.value || !editableFile.value || file.value.truncated) return
+  editText.value = file.value.text || ''
+  editingFile.value = true
+}
+
+function cancelFileEdit(): void {
+  editText.value = file.value?.text || ''
+  editingFile.value = false
+}
+
+async function saveFileEdit(): Promise<void> {
+  const ws = props.workspace
+  const current = file.value
+  if (!ws || !current || busy.value) return
+  busy.value = true
+  try {
+    await api('/workspace/file', {
+      method: 'PUT',
+      body: { workspace_id: ws.id, path: current.path, content: editText.value },
+    })
+    file.value = await api<WorkspaceFilePreviewData>(`/workspace/file/preview?workspace_id=${encodeURIComponent(ws.id)}&path=${encodeURIComponent(current.path)}`)
+    editText.value = file.value.text || ''
+    editingFile.value = false
+    app.toast('文件已保存')
+  } catch (error) {
+    app.toast(error instanceof Error ? error.message : String(error), 'bad')
+  } finally {
+    busy.value = false
   }
 }
 
@@ -104,6 +161,7 @@ async function up(): Promise<void> {
 }
 
 function close(): void {
+  if (!discardFileChanges()) return
   emit('close')
 }
 
@@ -265,11 +323,15 @@ function openRole(id: string): void {
                 <div class="ws-preview-head">
                   <b>{{ file.path }}</b>
                   <span>{{ bytes(file.size) }}</span>
+                  <button v-if="editingFile" class="mini-link" type="button" :disabled="busy" @click="cancelFileEdit">取消</button>
+                  <button v-if="editingFile" class="mini-link" type="button" :disabled="busy" @click="saveFileEdit">{{ busy ? '保存中…' : '保存' }}</button>
+                  <button v-else-if="editableFile" class="mini-link" type="button" :disabled="file.truncated" @click="startFileEdit">编辑</button>
+                  <a v-if="['pdf', 'binary'].includes(file.kind || '')" class="mini-link" :href="mediaUrl" target="_blank" rel="noopener">下载 / 打开</a>
                   <button class="mini-link" type="button" @click="file = null">关闭</button>
                 </div>
-                <pre>{{ fileText }}{{ file.truncated ? '\n\n…（已截断）' : '' }}</pre>
+                <WorkspaceFileContent v-model="editText" :preview="file" :workspace-id="workspace.id" :editing="editingFile" />
               </template>
-              <div v-else class="ws-empty">选择左侧文件查看只读预览</div>
+              <div v-else class="ws-empty">选择左侧文件查看或编辑</div>
             </article>
           </div>
         </section>

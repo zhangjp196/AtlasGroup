@@ -10,7 +10,10 @@
 #   bash devops/dev.sh restart   # 重启后端
 #   bash devops/dev.sh status    # 查看实际监听地址（端口被占用时会自动顺延）
 #   bash devops/dev.sh logs      # 跟踪后端日志
-#   bash devops/dev.sh ci        # 本地质量门禁：compile + ruff + pytest
+#   bash devops/dev.sh check:fast  # Python lint + 前端类型检查
+#   bash devops/dev.sh check:e2e   # 真实 Chrome 工作区交互回归
+#   bash devops/dev.sh smoke       # 核心应用与工作区 API 冒烟检查
+#   bash devops/dev.sh check:full  # 完整前后端质量门禁
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
@@ -82,6 +85,13 @@ case "${1:-}" in
   env)      cmd_env ;;
   env-dev)  cmd_env_dev ;;
   ci)       bash "${ROOT}/devops/ci.sh" ;;
+  check:fast) bash "${ROOT}/devops/ci.sh" fast ;;
+  check:e2e)  bash "${ROOT}/devops/ci.sh" e2e ;;
+  check:full) bash "${ROOT}/devops/ci.sh" full ;;
+  smoke)
+    [[ -x "$PY" ]] || { echo "缺少环境，先运行: bash devops/dev.sh env-dev" >&2; exit 1; }
+    "$PY" -m pytest -q tests/integration/test_app_health.py tests/integration/test_workspace_delete.py
+    ;;
   dev)      cmd_dev ;;
   start)    bash "${ROOT}/devops/start.sh" ;;
   stop)     bash "${ROOT}/devops/stop.sh" ;;
@@ -89,7 +99,7 @@ case "${1:-}" in
   status)   cmd_status ;;
   logs)     cmd_logs ;;
   *)
-    sed -n '2,12p' "$0"
+    sed -n '2,15p' "$0"
     exit 1
     ;;
 esac

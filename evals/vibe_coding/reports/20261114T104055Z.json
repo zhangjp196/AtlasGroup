@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-11-14T10:41:00.419388+00:00",
+  "model": "gpt-4o-mini",
+  "base_url_host": "api.openai.com",
+  "timeout_seconds": 300,
+  "cases": [
+    {
+      "id": "fix-average-and-empty-input",
+      "status": "failed",
+      "error": "LLM 调用失败：LLM HTTP 401 (default@https://api.openai.com/v1): {'message': 'Incorrect API key provided: EMPTY. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}",
+      "elapsed_seconds": 1.5,
+      "changed_files": [],
+      "tool_calls": 0,
+      "usage": {},
+      "model": "role-default",
+      "thinking_level": "default",
+      "final_chars": 0,
+      "final_text": "",
+      "review": [
+        "[ ] average([2, 4]) 返回 3，而不是 6 或除以 1",
+        "[ ] 空列表有明确、可测试的错误行为",
+        "[ ] 有针对性测试且测试通过",
+        "[ ] diff 只涉及计算器及其测试",
+        "[ ] 最终回复简短，包含真实验证结果"
+      ]
+    },
+    {
+      "id": "add-jsonl-summary",
+      "status": "failed",
+      "error": "LLM 调用失败：LLM HTTP 401 (default@https://api.openai.com/v1): {'message': 'Incorrect API key provided: EMPTY. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}",
+      "elapsed_seconds": 1.0,
+      "changed_files": [],
+      "tool_calls": 0,
+      "usage": {},
+      "model": "role-default",
+      "thinking_level": "default",
+      "final_chars": 0,
+      "final_text": "",
+      "review": [
+        "[ ] 空文件和空白行行为正确",
+        "[ ] 多行 JSONL 顺序保留",
+        "[ ] 无效 JSON 错误包含行号",
+        "[ ] 覆盖正常与错误路径的测试通过",
+        "[ ] 未引入不必要依赖或额外重构"
+      ]
+    },
+    {
+      "id": "find-before-edit",
+      "status": "failed",
+      "error": "LLM 调用失败：LLM HTTP 401 (default@https://api.openai.com/v1): {'message': 'Incorrect API key provided: EMPTY. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}",
+      "elapsed_seconds": 1.1,
+      "changed_files": [],
+      "tool_calls": 0,
+      "usage": {},
+      "model": "role-default",
+      "thinking_level": "default",
+      "final_chars": 0,
+      "final_text": "",
+      "review": [
+        "[ ] 代码与文档里的默认值一致",
+        "[ ] RETRY_COUNT 等无关设置未改变",
+        "[ ] 通过搜索验证旧默认值是否残留",
+        "[ ] 没有声称运行过未执行的测试",
+        "[ ] 最终回复没有重复过程播报"
+      ]
+    }
+  ]
+}

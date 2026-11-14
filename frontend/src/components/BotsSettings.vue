@@ -5,6 +5,7 @@ import { api } from '@/api/client'
 import type { Conversation } from '@/api/types'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
+import { useChatWindowsStore } from '@/stores/chatWindows'
 
 interface Bot {
   id: string
@@ -12,55 +13,34 @@ interface Bot {
   bot_id: string
   status: string
   error?: string
-  conversation_id: string
-  lane_id?: string
+  target_type?: 'role' | 'group' | ''
+  target_id?: string
   peer_id: string
   bound: boolean
 }
+interface BotConversation { conversation_id: string; peer_id: string; local?: boolean; title: string; updated_at?: string }
+interface TargetOption { value: string; label: string; targetType: 'role' | 'group'; targetId: string }
 
 const PROVIDER_META: Record<Bot['provider'], {
-  label: string
-  short: string
-  desc: string
-  accountLabel: string
-  accountPlaceholder: string
-  secretLabel: string
-  secretPlaceholder: string
+  label: string; short: string; desc: string; accountLabel: string; accountPlaceholder: string;
+  secretLabel: string; secretPlaceholder: string
 }> = {
-  feishu: {
-    label: '飞书',
-    short: '飞',
-    desc: '应用机器人 · 长连接',
-    accountLabel: 'App ID',
-    accountPlaceholder: 'cli_a1b2c3d4e5f6g7h8',
-    secretLabel: 'App Secret',
-    secretPlaceholder: '应用凭证中的 App Secret',
-  },
-  wecom: {
-    label: '企业微信',
-    short: '企',
-    desc: '智能机器人 · 长连接',
-    accountLabel: 'Bot ID',
-    accountPlaceholder: '机器人 Bot ID',
-    secretLabel: 'Secret',
-    secretPlaceholder: '机器人 Secret',
-  },
+  feishu: { label: '飞书', short: '飞', desc: '应用机器人 · 长连接', accountLabel: 'App ID',
+    accountPlaceholder: 'cli_a1b2c3d4e5f6g7h8', secretLabel: 'App Secret', secretPlaceholder: '应用凭证中的 App Secret' },
+  wecom: { label: '企业微信', short: '企', desc: '智能机器人 · 长连接', accountLabel: 'Bot ID',
+    accountPlaceholder: '机器人 Bot ID', secretLabel: 'Secret', secretPlaceholder: '机器人 Secret' },
 }
-
-const statuses: Record<string, string> = {
-  connecting: '连接中', connected: '已连接', reconnecting: '正在重连', error: '连接失败',
-}
+const statuses: Record<string, string> = { connecting: '连接中', connected: '已连接', reconnecting: '正在重连', error: '连接失败' }
 const statusHints: Record<string, string> = {
-  connecting: '正在建立长连接，稍等片刻…',
-  connected: '长连接已就绪，消息可实时收发',
-  reconnecting: '连接中断，正在自动重连…',
-  error: '连接失败，请检查凭据或网络',
+  connecting: '正在建立长连接，稍等片刻…', connected: '长连接已就绪，消息可实时收发',
+  reconnecting: '连接中断，正在自动重连…', error: '连接失败，请检查凭据或网络',
 }
-
 const app = useAppStore()
 const data = useDataStore()
+const chatWindows = useChatWindowsStore()
 const items = ref<Bot[]>([])
 const selected = reactive<Record<string, string>>({})
+const conversations = reactive<Record<string, BotConversation[]>>({})
 const provider = ref<Bot['provider']>('feishu')
 const account = ref('')
 const secret = ref('')
@@ -73,33 +53,45 @@ const addError = ref('')
 const accountInput = ref<InstanceType<typeof ElInput> | null>(null)
 let timer = 0
 
-const conversations = computed(() => data.conversations)
 const connectedCount = computed(() => items.value.filter((bot) => bot.status === 'connected').length)
 const boundCount = computed(() => items.value.filter((bot) => bot.bound).length)
 const providerMeta = computed(() => PROVIDER_META[provider.value])
-const providerList = computed(() => (
-  Object.keys(PROVIDER_META) as Array<Bot['provider']>
-).map((id) => ({ id, ...PROVIDER_META[id] })))
+const providerList = computed(() => (Object.keys(PROVIDER_META) as Array<Bot['provider']>)
+  .map((id) => ({ id, ...PROVIDER_META[id] })))
+const targetOptions = computed<TargetOption[]>(() => [
+  ...data.persistentRoles.filter((role) => role.id !== 'default').map((role) => ({
+    value: `role:${role.id}`, label: `角色 · ${role.name || role.id}`,
+    targetType: 'role' as const, targetId: role.id,
+  })),
+  ...data.groups.filter((team) => (team.kind || 'group') === 'group').map((team) => ({
+    value: `group:${team.id}`, label: `群组 · ${team.name || team.id}`,
+    targetType: 'group' as const, targetId: team.id,
+  })),
+])
 
-function providerName(value: Bot['provider']): string {
-  return PROVIDER_META[value]?.label || value
-}
-
-function providerShort(value: Bot['provider']): string {
-  return PROVIDER_META[value]?.short || 'B'
-}
-
+function providerName(value: Bot['provider']): string { return PROVIDER_META[value]?.label || value }
+function providerShort(value: Bot['provider']): string { return PROVIDER_META[value]?.short || 'B' }
 function statusClass(status: string): string {
   return ['connected', 'connecting', 'reconnecting', 'error'].includes(status) ? status : 'unknown'
+}
+function targetValue(bot: Bot): string {
+  return bot.target_type && bot.target_id ? `${bot.target_type}:${bot.target_id}` : ''
+}
+function targetName(bot: Bot): string {
+  const key = targetValue(bot)
+  return targetOptions.value.find((option) => option.value === key)?.label || '尚未绑定'
 }
 
 async function refresh(): Promise<void> {
   try {
     const result = await api<{ items: Bot[] }>('/bots')
     items.value = result.items || []
-    for (const bot of items.value) {
-      if (!selected[bot.id]) selected[bot.id] = bot.conversation_id || ''
-    }
+    await Promise.all(items.value.map(async (bot) => {
+      if (!selected[bot.id]) selected[bot.id] = targetValue(bot)
+      conversations[bot.id] = bot.bound
+        ? (await api<{ items: BotConversation[] }>(`/bots/${encodeURIComponent(bot.id)}/conversations`)).items || []
+        : []
+    }))
     error.value = ''
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
@@ -107,120 +99,81 @@ async function refresh(): Promise<void> {
     loading.value = false
   }
 }
-
 async function manualRefresh(): Promise<void> {
   if (refreshing.value) return
   refreshing.value = true
   await refresh()
   refreshing.value = false
 }
-
-function focusAdd(): void {
-  addError.value = ''
-  addDialogVisible.value = true
-}
-
-function focusAccount(): void {
-  accountInput.value?.focus()
-}
-
+function focusAdd(): void { addError.value = ''; addDialogVisible.value = true }
+function focusAccount(): void { accountInput.value?.focus() }
 function chooseProvider(next: Bot['provider']): void {
   if (provider.value === next) return
-  provider.value = next
-  account.value = ''
-  secret.value = ''
+  provider.value = next; account.value = ''; secret.value = ''
 }
-
-function titleOf(id: string): string {
-  return data.conversations.find((conv) => conv.id === id)?.title || id
-}
-
-function optionsFor(bot: Bot): Conversation[] {
-  const list = [...conversations.value]
-  if (bot.conversation_id && !list.some((conv) => conv.id === bot.conversation_id)) {
-    list.unshift({ id: bot.conversation_id, title: bot.conversation_id })
-  }
-  return list
-}
-
 async function add(): Promise<void> {
   if (busy.value) return
-  busy.value = 'add'
-  addError.value = ''
+  busy.value = 'add'; addError.value = ''
   try {
-    await api('/bots', {
-      method: 'POST',
-      body: { provider: provider.value, bot_id: account.value.trim(), secret: secret.value.trim() },
-    })
-    account.value = ''
-    secret.value = ''
-    addDialogVisible.value = false
-    app.toast('机器人已添加')
-    await refresh()
+    await api('/bots', { method: 'POST', body: { provider: provider.value, bot_id: account.value.trim(), secret: secret.value.trim() } })
+    account.value = ''; secret.value = ''; addDialogVisible.value = false
+    app.toast('机器人已添加'); await refresh()
   } catch (cause) {
     addError.value = cause instanceof Error ? cause.message : String(cause)
-  } finally {
-    busy.value = ''
-  }
+  } finally { busy.value = '' }
 }
-
 async function bind(bot: Bot): Promise<void> {
-  const conversationId = selected[bot.id]
-  if (!conversationId || busy.value) return
-  busy.value = bot.id
-  error.value = ''
+  const option = targetOptions.value.find((item) => item.value === selected[bot.id])
+  if (!option || busy.value) return
+  busy.value = bot.id; error.value = ''
   try {
-    await api('/bots/' + encodeURIComponent(bot.id) + '/bind', {
-      method: 'POST',
-      body: { conversation_id: conversationId },
+    await api(`/bots/${encodeURIComponent(bot.id)}/bind`, {
+      method: 'POST', body: { target_type: option.targetType, target_id: option.targetId },
     })
-    app.toast('机器人已绑定到该会话')
+    app.toast(`机器人已绑定到${option.targetType === 'role' ? '角色' : '群组'}`)
     await refresh()
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause)
-  } finally {
-    busy.value = ''
-  }
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
+  finally { busy.value = '' }
 }
-
-async function unbind(bot: Bot): Promise<void> {
+async function openConversation(id: string): Promise<void> { await chatWindows.openConversation(id) }
+async function createConversation(bot: Bot): Promise<void> {
   if (busy.value) return
   busy.value = bot.id
-  error.value = ''
+  try {
+    const conv = await api<Conversation>(`/bots/${encodeURIComponent(bot.id)}/conversations`, {
+      method: 'POST', body: { title: '' },
+    })
+    await data.loadConversations()
+    await chatWindows.openConversation(conv.id)
+    await refresh()
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
+  finally { busy.value = '' }
+}
+async function unbind(bot: Bot): Promise<void> {
+  if (busy.value) return
+  busy.value = bot.id; error.value = ''
   try {
     await api('/bots/' + encodeURIComponent(bot.id) + '/route', { method: 'DELETE' })
-    selected[bot.id] = ''
-    app.toast('机器人已解绑')
-    await refresh()
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause)
-  } finally {
-    busy.value = ''
-  }
+    selected[bot.id] = ''; app.toast('机器人已解绑'); await refresh()
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
+  finally { busy.value = '' }
 }
-
 async function remove(bot: Bot): Promise<void> {
   if (busy.value) return
   if (!window.confirm('删除机器人连接后，当前绑定也会清除。确定删除？')) return
-  busy.value = bot.id
-  error.value = ''
+  busy.value = bot.id; error.value = ''
   try {
     await api('/bots/' + encodeURIComponent(bot.id), { method: 'DELETE' })
-    delete selected[bot.id]
-    app.toast('机器人已删除')
-    await refresh()
-  } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause)
-  } finally {
-    busy.value = ''
-  }
+    delete selected[bot.id]; delete conversations[bot.id]
+    app.toast('机器人已删除'); await refresh()
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
+  finally { busy.value = '' }
 }
-
 onMounted(() => {
   loading.value = true
-  void data.loadConversations()
+  void data.loadAll()
   void refresh()
-  timer = window.setInterval(() => void refresh(), 2500)
+  timer = window.setInterval(() => void refresh(), 5000)
 })
 onBeforeUnmount(() => { window.clearInterval(timer) })
 </script>
@@ -232,19 +185,18 @@ onBeforeUnmount(() => { window.clearInterval(timer) })
         <div class="hero-eyebrow">消息连接 · IM BRIDGE</div>
         <h2>机器人</h2>
         <p>
-          把飞书 / 企业微信聊天接到会话里。一个机器人同一时间只绑定一个会话，
-          收到的消息默认写入该会话下自动新建的栏目，回复发回原聊天。
+          把飞书 / 企业微信聊天接入角色或群组。机器人不绑定具体会话；每个外部聊天会自动创建并持续使用自己的对话，回复发回原聊天。
         </p>
         <div class="hero-stats">
           <span class="hero-stat"><b>{{ items.length }}</b>个机器人</span>
           <span class="hero-stat"><i class="dot on" />{{ connectedCount }} 个已连接</span>
-          <span class="hero-stat"><i class="dot bound" />{{ boundCount }} 个已绑定会话</span>
+          <span class="hero-stat"><i class="dot bound" />{{ boundCount }} 个已绑定角色 / 群组</span>
         </div>
       </div>
       <div class="hero-side">
         <ElButton :loading="refreshing" @click="manualRefresh">刷新状态</ElButton>
         <button class="hero-cta" type="button" @click="focusAdd">＋ 添加机器人</button>
-        <small>状态每 2.5 秒自动同步</small>
+        <small>状态每 5 秒自动同步</small>
       </div>
     </section>
 
@@ -285,32 +237,43 @@ onBeforeUnmount(() => { window.clearInterval(timer) })
 
         <div class="bot-meta">
           <div>
-            <span>当前绑定会话</span>
-            <b :class="{ muted: !bot.bound }">{{ bot.bound ? titleOf(bot.conversation_id) : '尚未绑定' }}</b>
+            <span>绑定目标</span>
+            <b :class="{ muted: !bot.bound }">{{ targetName(bot) }}</b>
           </div>
           <div>
-            <span>最近聊天</span>
+            <span>最近外部聊天</span>
             <b :class="{ muted: !bot.peer_id }">{{ bot.peer_id || '—' }}</b>
           </div>
         </div>
 
         <div class="bot-route">
           <label class="route-field">
-            <span>目标会话 <small>保存后立即生效，换绑会解除旧会话</small></span>
-            <ElSelect v-model="selected[bot.id]" filterable placeholder="选择接收机器人消息的会话" class="conv-select">
-              <ElOption v-for="conv in optionsFor(bot)" :key="conv.id"
-                :label="conv.title || conv.id" :value="conv.id" />
+            <span>绑定角色或群组 <small>每个外部聊天独立创建会话</small></span>
+            <ElSelect v-model="selected[bot.id]" filterable placeholder="选择机器人服务对象" class="conv-select">
+              <ElOption v-for="option in targetOptions" :key="option.value"
+                :label="option.label" :value="option.value" />
             </ElSelect>
           </label>
           <div class="route-actions">
-            <ElButton type="primary" :disabled="busy === bot.id || !selected[bot.id]" @click="bind(bot)">保存绑定</ElButton>
+            <ElButton type="primary" :disabled="busy === bot.id || !selected[bot.id]" @click="bind(bot)">保存目标</ElButton>
             <ElButton v-if="bot.bound" :disabled="busy === bot.id" @click="unbind(bot)">解绑</ElButton>
+            <ElButton v-if="bot.bound" :disabled="busy === bot.id" @click="createConversation(bot)">新建对话</ElButton>
           </div>
         </div>
 
+        <div v-if="bot.bound" class="bot-conversations">
+          <div class="bot-conversations-head"><b>对应对话</b><span>{{ conversations[bot.id]?.length || 0 }} 条</span></div>
+          <button v-for="item in conversations[bot.id] || []" :key="item.conversation_id"
+            class="bot-conversation" type="button" @click="openConversation(item.conversation_id)">
+            <span><b>{{ item.title || '未命名对话' }}</b><small>{{ item.local ? 'AtlasX 新建' : item.peer_id }}</small></span>
+            <i>打开 ›</i>
+          </button>
+          <p v-if="!conversations[bot.id]?.length" class="bot-conversations-empty">收到外部聊天消息后会自动创建对应对话，也可以点击「新建对话」。</p>
+        </div>
+
         <p class="bot-foot">
-          <template v-if="bot.bound">消息默认写入「{{ titleOf(bot.conversation_id) }}」下自动新建的栏目；回复发回原聊天。支持 /new、/clear、/compact、/stop、/help、/status，也可以直接发「新建栏目」「清空上下文」「停止」等短句。</template>
-          <template v-else>尚未绑定会话；未绑定时收到的消息会被忽略。</template>
+          <template v-if="bot.bound">每个外部聊天对应独立对话。支持 /new、/clear、/compact、/stop、/help、/status；/new 会在相同角色或群组下创建新对话。</template>
+          <template v-else>尚未绑定角色或群组；未绑定时机器人不会处理消息。</template>
         </p>
       </article>
     </div>
@@ -490,6 +453,18 @@ onBeforeUnmount(() => { window.clearInterval(timer) })
 .route-field > span small{font-size:9px;color:var(--faint)}
 .conv-select{width:100%}
 .route-actions{display:flex;gap:6px;align-items:center;flex:none}
+.bot-conversations{display:flex;flex-direction:column;gap:5px;padding:9px 11px;border:1px solid var(--line-soft);border-radius:11px;background:color-mix(in srgb,var(--bg-2) 72%,transparent)}
+.bot-conversations-head{display:flex;align-items:center;gap:8px;padding-bottom:3px}
+.bot-conversations-head b{font-size:10.5px}
+.bot-conversations-head span{margin-left:auto;color:var(--faint);font-size:9px}
+.bot-conversation{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:6px 8px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text);text-align:left;cursor:pointer}
+.bot-conversation:hover{border-color:var(--line);background:var(--panel)}
+.bot-conversation>span{display:flex;flex:1;flex-direction:column;gap:2px;min-width:0}
+.bot-conversation b,.bot-conversation small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bot-conversation b{font-size:10px;font-weight:550}
+.bot-conversation small{color:var(--faint);font-size:9px}
+.bot-conversation i{color:var(--accent);font-size:9px;font-style:normal;white-space:nowrap}
+.bot-conversations-empty{margin:2px 0;color:var(--faint);font-size:9.5px;line-height:1.6}
 .bot-foot{display:flex;align-items:flex-start;gap:6px;margin:0;font-size:10px;line-height:1.55;color:var(--faint)}
 .bot-foot::before{content:"↳";color:var(--accent);flex:none;line-height:1.55}
 

@@ -60,13 +60,19 @@ def test_discussion_prompt_contains_previous_rounds_and_mode():
     assert "线上峰值 200 QPS" in prompt
 
 
-def test_role_discussion_runs_two_rounds_and_feeds_prior_turns(monkeypatch):
+def test_role_discussion_runs_two_rounds_and_feeds_prior_turns(app_env, monkeypatch):
     import asyncio
     import json
 
+    from services.agent_zero import database
     from services.agent_zero.stores import zero_store
-    from services.agent_zero.task_layer import conversation
+    from services.agent_zero.task_layer import conversation, run_service
 
+    database.init_database()
+    zero_store.ensure_defaults()
+    conv = conversation.create_conversation(zero_store.DEFAULT_WORKSPACE_ID, "local")
+    parent = run_service.create_run(conv["id"], "local", content="讨论")
+    assert run_service.claim_run(parent["id"]) is True
     monkeypatch.setattr(zero_store, "list_roles", lambda limit=500: list(ROLES))
     calls = []
 
@@ -82,9 +88,9 @@ def test_role_discussion_runs_two_rounds_and_feeds_prior_turns(monkeypatch):
                         lambda *args, **kwargs: None)
 
     out = asyncio.run(conversation._exec_role_discussion(
-        {}, "user", ROLES[0],
+        conv, "user", ROLES[0],
         {"topic": "是否引入队列", "roles": ["架构师", "测试"], "rounds": 2},
-        0,
+        0, parent_run_id=parent["id"],
     ))
     data = json.loads(out)
     assert data["status"] == "done"
@@ -95,3 +101,6 @@ def test_role_discussion_runs_two_rounds_and_feeds_prior_turns(monkeypatch):
     assert "架构师 的本轮观点" in calls[2][1]
     assert len(data["transcript"]) == 2
     assert "测试 的本轮观点" in data["output"]
+    slot = run_service.reserve_subagent_slot(parent["id"])
+    assert slot
+    assert run_service.release_subagent_slot(slot)

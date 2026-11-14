@@ -1,13 +1,7 @@
-"""机器人长连接与全局绑定。
+"""机器人长连接、角色 / 群组目标和外部聊天对话映射。
 
-机器人连接和它对会话的绑定都放在全局设置里：
-
-- 一份 App ID / Secret 只建一条长连接；
-- 一个机器人同一时间只绑定一个会话，并路由到其中一个栏目；
-- 机器人收到的聊天消息进入当前栏目，回复发回原聊天。
-
-聊天身份（peer_id）只用于展示「最近活跃的聊天」，不参与路由，因此换绑会话
-不需要重新配对。
+每个机器人账号只建立一条长连接，并绑定一个持久角色或共享群组。每个外部聊天
+按 peer_id 映射到自己的会话；首次来消息或显式新建时创建，回复发回原聊天。
 """
 
 from __future__ import annotations
@@ -15,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
@@ -36,6 +30,8 @@ class Binding:
     provider: str
     bot_id: str
     secret: str
+    target_type: str = ""
+    target_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -44,48 +40,109 @@ class Route:
     bot_id: str
     conversation_id: str
     peer_id: str
-    lane_id: str = ""
 
 
 def _bindings() -> list[Binding]:
     statement = select(ConversationBot).order_by(ConversationBot.provider, ConversationBot.bot_id)
     with get_session_local()() as db:
-        return [Binding(row.id, row.provider, row.bot_id, row.secret)
+        return [Binding(row.id, row.provider, row.bot_id, row.secret,
+                        row.target_type or "", row.target_id or "")
                 for row in db.scalars(statement)]
 
 
-def _route_for(bot_id: str) -> Route | None:
+def _route_for(bot_id: str, peer_id: str) -> Route | None:
     with get_session_local()() as db:
-        row = db.scalar(select(BotRoute).where(BotRoute.bot_id == bot_id))
-        return (Route(row.id, row.bot_id, row.conversation_id, row.peer_id, row.lane_id or "")
+        row = db.scalar(select(BotRoute).where(
+            BotRoute.bot_id == bot_id, BotRoute.peer_id == peer_id))
+        return (Route(row.id, row.bot_id, row.conversation_id, row.peer_id)
                 if row else None)
 
 
-def _bind(bot_id: str, conversation_id: str, lane_id: str = "") -> Route:
-    """把机器人绑定到会话根及一个目标栏目；旧绑定自动切换到新目标。"""
+def _peer_routes(bot_id: str) -> list[dict]:
+    with get_session_local()() as db:
+        rows = db.execute(select(BotRoute, Conversation)
+                          .join(Conversation, Conversation.id == BotRoute.conversation_id)
+                          .where(BotRoute.bot_id == bot_id)
+                          .order_by(BotRoute.created_at.desc()))
+        return [{"conversation_id": route.conversation_id, "peer_id": route.peer_id,
+                 "local": route.peer_id.startswith("atlasx:"),
+                 "title": conv.title or route.conversation_id,
+                 "updated_at": conv.updated_at.isoformat() if conv.updated_at else ""}
+                for route, conv in rows]
+
+
+def _bind_target(bot_id: str, target_type: str, target_id: str) -> Binding | None:
+    """绑定角色或共享群组；外部聊天的对话映射仍按 peer 独立保存。"""
     with get_session_local()() as db:
         bot = db.get(ConversationBot, bot_id)
         if bot is None:
-            raise ValueError("机器人不存在")
-        row = db.scalar(select(BotRoute).where(BotRoute.bot_id == bot_id))
-        if row is not None:
+            return None
+        if bot.target_type != target_type or bot.target_id != target_id:
+            db.execute(delete(BotRoute).where(BotRoute.bot_id == bot_id))
+        bot.target_type = target_type
+        bot.target_id = target_id
+        db.commit()
+        return Binding(bot.id, bot.provider, bot.bot_id, bot.secret,
+                       target_type, target_id)
+
+
+def _bind_peer(bot_id: str, peer_id: str, conversation_id: str) -> Route:
+    with get_session_local()() as db:
+        row = db.scalar(select(BotRoute).where(
+            BotRoute.bot_id == bot_id, BotRoute.peer_id == peer_id))
+        if row is None:
+            row = BotRoute(id=zero_store.new_id("botr"), bot_id=bot_id,
+                           conversation_id=conversation_id, peer_id=peer_id)
+            db.add(row)
+        else:
             row.conversation_id = conversation_id
-            row.lane_id = lane_id or None
+            row.lane_id = None
+        db.commit()
+        return Route(row.id, bot_id, conversation_id, peer_id)
+
+
+def _set_peer_conversation(route_id: str, conversation_id: str) -> None:
+    with get_session_local()() as db:
+        db.execute(update(BotRoute).where(BotRoute.id == route_id)
+                   .values(conversation_id=conversation_id, lane_id=None))
+        db.commit()
+
+
+def _create_target_conversation(target_type: str, target_id: str, provider: str,
+                                title: str = "") -> dict:
+    if target_type == "role":
+        role = zero_store.get_role(target_id)
+        if not role or role.get("scope") == "temporary" or target_id == zero_store.GLOBAL_ROLE_ID:
+            raise ValueError("绑定角色不存在或不可用于机器人")
+        conv = conversation.create_conversation(
+            str(role.get("workspace_id") or ""), f"bot:{provider}",
+            role_id=target_id, source="bot")
+    elif target_type == "group":
+        from services.agent_zero.services import team_service
+
+        team = team_service.get_team(target_id)
+        if not team or str(team.get("kind") or "group") != "group":
+            raise ValueError("绑定群组不存在或不可用于机器人")
+        conv = conversation.create_conversation(
+            str(team.get("workspace_id") or ""), f"bot:{provider}",
+            team_id=target_id, source="bot")
+    else:
+        raise ValueError("机器人只能绑定角色或群组")
+    name = str(title or "").strip()[:200]
+    if name:
+        with get_session_local()() as db:
+            db.execute(update(Conversation).where(Conversation.id == conv["id"])
+                       .values(title=name, title_source="user"))
             db.commit()
-            return Route(row.id, row.bot_id, row.conversation_id, row.peer_id, lane_id)
-        identifier = zero_store.new_id("botr")
-        try:
-            db.add(BotRoute(id=identifier, bot_id=bot_id, conversation_id=conversation_id,
-                            peer_id=bot.peer_id or "", lane_id=lane_id or None))
-            db.commit()
-        except IntegrityError as exc:
-            raise ValueError("机器人绑定失败，请重试") from exc
-        return Route(identifier, bot_id, conversation_id, bot.peer_id or "", lane_id)
+        conv["title"] = name
+    return conv
 
 
 def _unbind(bot_id: str) -> bool:
     with get_session_local()() as db:
-        result = db.execute(delete(BotRoute).where(BotRoute.bot_id == bot_id))
+        result = db.execute(update(ConversationBot).where(ConversationBot.id == bot_id)
+                            .values(target_type=None, target_id=None))
+        db.execute(delete(BotRoute).where(BotRoute.bot_id == bot_id))
         db.commit()
         return bool(result.rowcount)
 
@@ -95,34 +152,22 @@ def _touch_peer(bot_id: str, peer_id: str) -> None:
     with get_session_local()() as db:
         db.execute(update(ConversationBot).where(ConversationBot.id == bot_id)
                    .values(peer_id=peer_id))
-        db.execute(update(BotRoute).where(BotRoute.bot_id == bot_id).values(peer_id=peer_id))
         db.commit()
 
 
 def _store(provider: str, bot_id: str, secret: str) -> str:
     identifier = zero_store.new_id("bot")
-    # 旧库 conversation_bots.conversation_id 带外键；填全局 Agent 会话满足约束，
-    # 新库不再依赖这个列，绑定关系只看 bot_routes。
-    owner = ""
-    try:
-        owner = str(conversation.ensure_global_agent_conversation("local").get("id") or "")
-    except Exception:
-        logger.debug("获取全局 Agent 会话失败，机器人归属改用已有会话", exc_info=True)
-    if not owner:
-        with get_session_local()() as db:
-            owner = str(db.scalar(select(Conversation.id).limit(1)) or "")
-    if not owner:
-        raise ValueError("请先创建一个会话，再添加机器人")
     with get_session_local()() as db:
         existing = db.scalar(select(ConversationBot.id)
                              .where(ConversationBot.provider == provider,
                                     ConversationBot.bot_id == bot_id))
         if existing:
-            raise ValueError("此机器人已添加，可在下方直接绑定会话。")
+            raise ValueError("此机器人已添加，可在下方绑定角色或群组。")
         if secret_store.set_secret(identifier, secret):
             secret = secret_store.PREFIX + identifier
         try:
-            db.add(ConversationBot(id=identifier, conversation_id=owner, provider=provider,
+            # conversation_id 是旧版遗留字段；不再通过它绑定会话。
+            db.add(ConversationBot(id=identifier, conversation_id="", provider=provider,
                                    bot_id=bot_id, secret=secret, peer_id=""))
             db.commit()
         except IntegrityError as exc:
@@ -143,50 +188,7 @@ def _remove_bot(bot_id: str) -> bool:
     return True
 
 
-def _session_root(conversation_id: str) -> str:
-    conv = conversation.get_conversation(conversation_id) or {}
-    return str(conv.get("session_root_id") or conv.get("session_id") or conv.get("id") or "")
-
-
-def _set_lane(route_id: str, lane_id: str) -> None:
-    with get_session_local()() as db:
-        db.execute(update(BotRoute).where(BotRoute.id == route_id)
-                   .values(lane_id=lane_id or None))
-        db.commit()
-
-
-def _create_lane(session_id: str, provider: str, title: str = "") -> str:
-    """在会话根下新建一个栏目；机器人默认就落在新栏目里。"""
-    root_conv = conversation.get_conversation(session_id) or {}
-    if not root_conv or root_conv.get("archived"):
-        return ""
-    if str(root_conv.get("zone") or "") in (conversation.GLOBAL_AGENT_ZONE,
-                                            conversation.GLOBAL_CHAT_ZONE):
-        return ""
-    root_id = str(root_conv.get("session_root_id") or root_conv.get("id") or "")
-    if not root_id:
-        return ""
-    try:
-        created = conversation.create_conversation(
-            "", f"bot:{provider}", source="bot", session_id=root_id)
-    except Exception:
-        logger.exception("机器人新建栏目失败 session=%s", root_id)
-        return ""
-    lane_id = str(created.get("id") or "")
-    if not lane_id:
-        return ""
-    # 不预置「飞书机器人」这类固定标题：首条消息会先写 fallback，再由
-    # title_service 用 LLM 生成正式标题；显式 /new <标题> 才直接写 user。
-    name = str(title or "").strip()[:200]
-    if name:
-        with get_session_local()() as db:
-            db.execute(update(Conversation).where(Conversation.id == lane_id)
-                       .values(title=name, title_source="user"))
-            db.commit()
-    return lane_id
-
-
-def _rename_lane(lane_id: str, title: str) -> bool:
+def _rename_conversation(lane_id: str, title: str) -> bool:
     name = str(title or "").strip()[:200]
     if not lane_id or not name:
         return False
@@ -195,62 +197,6 @@ def _rename_lane(lane_id: str, title: str) -> bool:
                             .values(title=name, title_source="user"))
         db.commit()
         return bool(result.rowcount)
-
-
-_PLACEHOLDER_TITLES = {"新栏目", "飞书机器人", "企业微信机器人", "机器人"}
-
-
-def _repair_placeholder_title(lane: dict) -> None:
-    """清掉旧版机器人写死的占位标题，让下一轮由 LLM 生成正式标题。"""
-    lane_id = str(lane.get("id") or "")
-    if not lane_id or str(lane.get("source") or "") != "bot":
-        return
-    if str(lane.get("title_source") or "") != "user":
-        return
-    if str(lane.get("title") or "").strip() not in _PLACEHOLDER_TITLES:
-        return
-    with get_session_local()() as db:
-        db.execute(update(Conversation).where(Conversation.id == lane_id)
-                   .values(title=None, title_source="fallback"))
-        db.commit()
-    lane["title"] = ""
-    lane["title_source"] = "fallback"
-
-
-def _resolve_lane(route: Route, provider: str, *, create: bool = False) -> str:
-    """机器人当前使用的栏目。
-
-    绑定在会话根上时默认新建一个栏目（`create=True`）；绑定在某个栏目上时
-    直接用那个栏目。旧栏目被删 / 归档后重新兜底。
-    """
-    conv = conversation.get_conversation(route.conversation_id) or {}
-    if not conv:
-        return ""
-    if conv.get("archived"):
-        return ""
-    root_id = str(conv.get("session_root_id") or conv.get("id") or "")
-    # 全局 Agent / 全局对话是单面板，没有栏目列：消息仍进原会话。
-    if str(conv.get("zone") or "") in (conversation.GLOBAL_AGENT_ZONE,
-                                       conversation.GLOBAL_CHAT_ZONE):
-        return str(conv.get("id") or "")
-    lane_id = str(route.lane_id or "")
-    if lane_id:
-        lane = conversation.get_conversation(lane_id) or {}
-        if lane and not lane.get("archived") \
-                and str(lane.get("session_root_id") or lane.get("id")) == root_id:
-            _repair_placeholder_title(lane)
-            return lane_id
-    # 绑定本身就是栏目：沿用用户指定的那一条。
-    if str(conv.get("id") or "") != root_id:
-        lane_id = str(conv.get("id") or "")
-        _repair_placeholder_title(conv)
-    elif create:
-        lane_id = _create_lane(root_id, provider)
-    else:
-        lane_id = ""
-    if lane_id:
-        _set_lane(route.id, lane_id)
-    return lane_id
 
 
 def _enqueue(conversation_id: str, text: str, provider: str) -> str:
@@ -277,19 +223,21 @@ class BotConnection:
         self.error = ""
         self.seen: OrderedDict[str, None] = OrderedDict()
         self.pending: set[asyncio.Task] = set()
-        self.lane_lock = asyncio.Lock()
+        self.peer_locks: dict[str, asyncio.Lock] = {}
         self.task = asyncio.create_task(self.connect())
 
     def public(self) -> dict:
-        binding = asdict(self.binding)
-        binding.pop("secret")
-        route = _route_for(self.binding.id)
-        return {**binding, "status": self.status, "error": self.error,
-                "conversation_id": route.conversation_id if route else "",
-                "session_root_id": _session_root(route.conversation_id) if route else "",
-                "lane_id": route.lane_id if route else "",
-                "peer_id": route.peer_id if route else "",
-                "bound": route is not None}
+        with get_session_local()() as db:
+            row = db.get(ConversationBot, self.binding.id)
+            if row is None:
+                return {"id": self.binding.id, "provider": self.binding.provider,
+                        "bot_id": self.binding.bot_id, "status": self.status,
+                        "error": self.error, "target_type": "", "target_id": "",
+                        "peer_id": "", "bound": False}
+            return {"id": row.id, "provider": row.provider, "bot_id": row.bot_id,
+                    "target_type": row.target_type or "", "target_id": row.target_id or "",
+                    "peer_id": row.peer_id or "", "bound": bool(row.target_type and row.target_id),
+                    "status": self.status, "error": self.error}
 
     def connected(self) -> None:
         self.status = "connected"
@@ -332,38 +280,39 @@ class BotConnection:
 
     async def handle(self, message: bot_transports.IncomingMessage) -> None:
         try:
-            route = await asyncio.to_thread(_route_for, self.binding.id)
-            if route is None:
-                # 未绑定会话时静默忽略，避免机器人在无关群里刷屏。
+            if not self.binding.target_type or not self.binding.target_id:
+                # 未绑定时忽略，以免在不相关的外部聊天中刷提示。
                 return
-            if route.peer_id != message.peer:
-                await asyncio.to_thread(_touch_peer, self.binding.id, message.peer)
+            await asyncio.to_thread(_touch_peer, self.binding.id, message.peer)
             provider = self.binding.provider
             command = bot_commands.parse(message.text)
             if command and command.name == "help":
                 await message.reply(bot_commands.help_text())
                 return
-            # 栏目解析 / 新建放在同一把锁里：并发消息不会各建一个默认栏目。
-            async with self.lane_lock:
+            lock = self.peer_locks.setdefault(message.peer, asyncio.Lock())
+            async with lock:
+                route = await asyncio.to_thread(_route_for, self.binding.id, message.peer)
                 if command and command.name == "new":
-                    root_id = await asyncio.to_thread(_session_root, route.conversation_id)
-                    lane_id = await asyncio.to_thread(
-                        _create_lane, root_id, provider, command.arg) if root_id else ""
-                    if not lane_id:
-                        await message.reply("该会话不能新建栏目（全局面板或会话已归档）。")
-                        return
-                    await asyncio.to_thread(_set_lane, route.id, lane_id)
-                else:
-                    lane_id = await asyncio.to_thread(
-                        _resolve_lane, route, provider, create=command is None)
-            if not lane_id:
-                if command:
-                    await message.reply("当前会话还没有栏目，先发一条消息，或发送 /new 新建一个栏目。")
-                else:
-                    await message.reply("AtlasX 会话已归档或不可用。")
-                return
+                    conv = await asyncio.to_thread(
+                        _create_target_conversation, self.binding.target_type,
+                        self.binding.target_id, provider, command.arg)
+                    if route:
+                        await asyncio.to_thread(_set_peer_conversation, route.id, str(conv["id"]))
+                    else:
+                        route = await asyncio.to_thread(
+                            _bind_peer, self.binding.id, message.peer, str(conv["id"]))
+                    await message.reply(f"已新建对话：{conv.get('title') or '新对话'}")
+                    return
+                conv = conversation.get_conversation(route.conversation_id) if route else None
+                if not conv or conv.get("archived"):
+                    conv = await asyncio.to_thread(
+                        _create_target_conversation, self.binding.target_type,
+                        self.binding.target_id, provider)
+                    route = await asyncio.to_thread(
+                        _bind_peer, self.binding.id, message.peer, str(conv["id"]))
+            conversation_id = str(route.conversation_id)
             if command:
-                await message.reply(await self.run_command(command, lane_id))
+                await message.reply(await self.run_command(command, conversation_id))
                 return
             if message.acknowledge:
                 try:
@@ -371,7 +320,7 @@ class BotConnection:
                 except Exception as exc:
                     logger.info("机器人 %s 未能发送处理中提示 (%s)", self.binding.id, type(exc).__name__)
             run_id = await asyncio.to_thread(
-                _enqueue, lane_id, message.text, provider)
+                _enqueue, conversation_id, message.text, provider)
             if not run_id:
                 await message.reply("AtlasX 会话已归档或不可用。")
                 return
@@ -391,24 +340,23 @@ class BotConnection:
         if name == "help":
             return bot_commands.help_text()
         if name == "new":
-            lane = await asyncio.to_thread(conversation.get_conversation, lane_id) or {}
-            return f"已新建栏目：{lane.get('title') or command.arg or '新栏目'}"
+            return "新建对话失败，请重试。"
         if name == "status":
             lane = await asyncio.to_thread(conversation.get_conversation, lane_id) or {}
             running = await asyncio.to_thread(run_service.running_run, lane_id)
-            title = lane.get("title") or "未命名栏目"
-            return (f"当前栏目：{title}\n"
+            title = lane.get("title") or "未命名对话"
+            return (f"当前对话：{title}\n"
                     f"状态：{'运行中' if running else '空闲'}\n"
                     f"ID：{lane_id}")
         if name == "clear":
             ok = await asyncio.to_thread(conversation.clear_context, lane_id)
-            return ("已清空当前栏目的上下文（历史消息保留）。" if ok
-                    else "当前栏目不存在，无法清空。")
+            return ("已清空当前对话的上下文（历史消息保留）。" if ok
+                    else "当前对话不存在，无法清空。")
         if name == "compact":
             try:
                 result = await conversation.compact_context(lane_id)
             except RuntimeError:
-                return "当前栏目正在执行，先 /stop 再压缩。"
+                return "当前对话正在执行，先 /stop 再压缩。"
             except Exception as exc:
                 logger.warning("机器人压缩失败 lane=%s: %s", lane_id, exc)
                 return "压缩失败，请到 AtlasX 查看详情。"
@@ -419,9 +367,9 @@ class BotConnection:
         if name == "stop":
             run = await asyncio.to_thread(run_service.running_run, lane_id)
             if not run:
-                return "当前栏目没有正在执行的任务。"
+                return "当前对话没有正在执行的任务。"
             ok = await asyncio.to_thread(run_service.request_stop, run["id"])
-            return "已停止当前栏目正在执行的任务。" if ok else "停止请求未能发送。"
+            return "已停止当前对话正在执行的任务。" if ok else "停止请求未能发送。"
         return bot_commands.help_text()
 
     async def reply_when_finished(self, run_id: str, message: bot_transports.IncomingMessage,
@@ -468,15 +416,16 @@ class BotConnection:
                 continue
             seen.add((name, arg))
             if name == "new":
-                new_id = await asyncio.to_thread(
-                    _create_lane, lane_id, self.binding.provider, arg or "")
-                if not new_id:
-                    notes.append("新建栏目失败。")
+                try:
+                    created = await asyncio.to_thread(
+                        _create_target_conversation, self.binding.target_type,
+                        self.binding.target_id, self.binding.provider, arg or "")
+                except ValueError:
+                    notes.append("新建对话失败。")
                     continue
-                await asyncio.to_thread(_set_lane, route.id, new_id)
-                lane = await asyncio.to_thread(conversation.get_conversation, new_id) or {}
-                notes.append(f"已在当前会话下新建栏目「{lane.get('title') or '新栏目'}」。")
-                lane_id = new_id
+                await asyncio.to_thread(_set_peer_conversation, route.id, str(created["id"]))
+                notes.append(f"已新建对话「{created.get('title') or '新对话'}」。")
+                lane_id = str(created["id"])
             elif name == "compact":
                 try:
                     result = await conversation.compact_context(lane_id)
@@ -490,8 +439,8 @@ class BotConnection:
                     else:
                         notes.append(f"无需压缩（{result.get('reason') or '上下文很短'}）。")
             elif name == "rename":
-                if await asyncio.to_thread(_rename_lane, lane_id, arg):
-                    notes.append(f"已重命名当前栏目为「{arg[:80]}」。")
+                if await asyncio.to_thread(_rename_conversation, lane_id, arg):
+                    notes.append(f"已重命名当前对话为「{arg[:80]}」。")
                 else:
                     notes.append("重命名失败（缺少标题或栏目不存在）。")
             elif name == "read":
@@ -526,6 +475,8 @@ class BotManager:
                     await asyncio.to_thread(secret_store.delete_secret, identifier)
             for identifier in bindings.keys() - self.connections.keys():
                 self.connections[identifier] = BotConnection(bindings[identifier])
+            for identifier in bindings.keys() & self.connections.keys():
+                self.connections[identifier].binding = bindings[identifier]
 
     async def maintain(self) -> None:
         while True:
@@ -548,13 +499,33 @@ class BotManager:
         await self.sync()
         return self.connections[identifier].public()
 
-    async def bind(self, identifier: str, conversation_id: str, lane_id: str = "") -> dict | None:
+    async def bind(self, identifier: str, target_type: str, target_id: str) -> dict | None:
         await self.sync()
         conn = self.connections.get(identifier)
         if conn is None:
             return None
-        await asyncio.to_thread(_bind, identifier, conversation_id, lane_id)
+        binding = await asyncio.to_thread(_bind_target, identifier, target_type, target_id)
+        if binding is None:
+            return None
+        conn.binding = binding
         return conn.public()
+
+    async def conversations(self, identifier: str) -> list[dict]:
+        return await asyncio.to_thread(_peer_routes, identifier)
+
+    async def create_conversation(self, identifier: str, title: str = "") -> dict | None:
+        await self.sync()
+        conn = self.connections.get(identifier)
+        if conn is None:
+            return None
+        binding = conn.public()
+        if not binding.get("bound"):
+            raise ValueError("请先为机器人绑定角色或群组")
+        conv = await asyncio.to_thread(
+            _create_target_conversation, str(binding["target_type"]),
+            str(binding["target_id"]), conn.binding.provider, title)
+        await asyncio.to_thread(_bind_peer, identifier, f"atlasx:{conv['id']}", str(conv["id"]))
+        return conv
 
     async def unbind(self, identifier: str) -> bool:
         removed = await asyncio.to_thread(_unbind, identifier)

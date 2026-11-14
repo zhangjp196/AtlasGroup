@@ -316,6 +316,70 @@ def parallel_member_limit() -> int:
         return 4
 
 
+def _active_capacity_sql() -> str:
+    """当前占用的统一额度：running run + 其子代理的活动预留槽。"""
+    return (
+        f"((SELECT COUNT(*) FROM {_q('conversation_runs')} r "
+        f"  WHERE r.status = :running) + "
+        f"(SELECT COUNT(*) FROM {_q('conversation_run_reservations')} s "
+        f"  JOIN {_q('conversation_runs')} p ON p.id = s.parent_run_id "
+        f"  WHERE p.status = :running))"
+    )
+
+
+def active_capacity_count() -> int:
+    """返回统一额度中已占用数量（运行中的 run + 活动子代理）。"""
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        count = db.execute(
+            text(f"SELECT {_active_capacity_sql()}"),
+            {"running": STATUS_RUNNING},
+        ).scalar()
+    return int(count or 0)
+
+
+def reserve_subagent_slot(parent_run_id: str) -> Optional[str]:
+    """在全局 run 额度中为子代理原子预留一个槽位。
+
+    子代理不是独立 conversation_run，但与普通 run 共用
+    ``max_concurrent_conversation_runs``。只有父 run 仍在运行且总占用未到上限时
+    才能预留成功；数据库写入串行化这个检查，避免并发子代理同时超额。
+    """
+    if not parent_run_id:
+        return None
+    from services.agent_zero.config import get_settings
+
+    reservation_id = new_id("run-slot")
+    global_limit = max(0, int(get_settings().max_concurrent_conversation_runs))
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        result = db.execute(
+            text(f"INSERT INTO {_q('conversation_run_reservations')} (id, parent_run_id) "
+                 f"SELECT :id, :parent_id "
+                 f"WHERE EXISTS (SELECT 1 FROM {_q('conversation_runs')} p "
+                 f"              WHERE p.id = :parent_id AND p.status = :running) "
+                 f"AND {_active_capacity_sql()} < :global_limit"),
+            {"id": reservation_id, "parent_id": parent_run_id,
+             "running": STATUS_RUNNING, "global_limit": global_limit},
+        )
+        db.commit()
+        return reservation_id if result.rowcount else None
+
+
+def release_subagent_slot(reservation_id: str) -> bool:
+    """释放子代理的全局并发槽位（幂等）。"""
+    if not reservation_id:
+        return False
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        result = db.execute(
+            text(f"DELETE FROM {_q('conversation_run_reservations')} WHERE id = :id"),
+            {"id": reservation_id},
+        )
+        db.commit()
+        return bool(result.rowcount)
+
+
 def running_conversation_ids() -> set:
     """正在执行 run 的对话 id 集合（worker 调度用：同一对话只跑一条）。"""
     SessionLocal = get_session_local()
@@ -560,7 +624,7 @@ def claim_run(run_id: str) -> bool:
     """queued → running（CAS 单写，防多 worker 双跑）。成功返回 True。
 
     并发规则：
-    - 所有会话 / 成员任务共享 ``max_concurrent_conversation_runs`` 全局上限；
+    - 所有会话 / 成员任务 / 子代理共享 ``max_concurrent_conversation_runs`` 全局上限；
       在数据库 CAS 中检查，避免多个 worker 实例各自按本地槽位超额认领；
     - 同一对话**至多一条主持 run**（target_role_id 为空）；
     - 成员并行 run（target_role_id 非空）可以同时跑，上限见
@@ -577,8 +641,7 @@ def claim_run(run_id: str) -> bool:
             text(f"UPDATE {_q('conversation_runs')} "
                  f"SET status = :running, started_at = datetime('now','localtime'), updated_at = datetime('now','localtime') "
                  f"WHERE id = :id AND status = :queued "
-                 f"AND (SELECT COUNT(*) FROM {_q('conversation_runs')} rg "
-                 f"     WHERE rg.status = :running) < :global_limit "
+                 f"AND {_active_capacity_sql()} < :global_limit "
                  f"AND ( "
                  f"  (COALESCE(target_role_id, '') = '' AND NOT EXISTS ( "
                  f"    SELECT 1 FROM {_q('conversation_runs')} r2 "
@@ -609,6 +672,11 @@ def finish_run(run_id: str, status: str,
                  f"SET status = :st, error = :err, finished_at = datetime('now','localtime'), updated_at = datetime('now','localtime') "
                  f"WHERE id = :id AND status IN ('queued','running')"),
             {"id": run_id, "st": status, "err": (error or None)},
+        )
+        db.execute(
+            text(f"DELETE FROM {_q('conversation_run_reservations')} "
+                 f"WHERE parent_run_id = :id"),
+            {"id": run_id},
         )
         db.commit()
         return bool(res.rowcount)
@@ -647,18 +715,22 @@ def is_stop_silent(run_id: str) -> bool:
 
 
 def _finalize_interrupted(run_ids: List[str], reason: str) -> None:
-    """把已置为 failed 的 run 还原成部分回复，并补一条错误事件给前端。"""
+    """幂等地把中断 run 还原成部分回复，并补一条错误事件给前端。"""
     for rid in run_ids:
         try:
             from services.agent_zero.task_layer import conversation
 
+            events = list_all_events(rid)
             node_id = conversation.persist_interrupted_run(
                 rid, outcome="failed", error=reason)
             if node_id:
                 append_event(rid, "interrupted", {
                     "id": node_id, "outcome": "failed", "error": reason,
                 })
-            append_event(rid, "error", {"error": reason})
+            if not any(event.get("_kind") == "error"
+                       and str(event.get("error") or "") == reason
+                       for event in events):
+                append_event(rid, "error", {"error": reason})
         except Exception:
             logger.exception("恢复 interrupted 回复失败 run=%s", rid)
 
@@ -677,14 +749,26 @@ def recover_running_runs(reason: str = "服务重启，运行中断") -> int:
             text(f"SELECT id FROM {_q('conversation_runs')} WHERE status = :running"),
             {"running": STATUS_RUNNING},
         ).mappings().all()
+    run_ids = [str(row["id"]) for row in rows]
+    # 先持久化部分回复和终态事件，再提交 failed 状态。若此间进程退出，
+    # run 仍是 running，下次启动会重试；_finalize_interrupted 可安全重复执行。
+    _finalize_interrupted(run_ids, reason)
+
+    with SessionLocal() as db:
         res = db.execute(
             text(f"UPDATE {_q('conversation_runs')} "
                  f"SET status = :st, error = :err, finished_at = datetime('now','localtime'), updated_at = datetime('now','localtime') "
-                 f"WHERE status = :running"),
-            {"st": STATUS_FAILED, "err": reason, "running": STATUS_RUNNING},
+                 f"WHERE status = :running AND id IN (SELECT value FROM json_each(:ids))"),
+            {"st": STATUS_FAILED, "err": reason, "running": STATUS_RUNNING,
+             "ids": json.dumps(run_ids)},
+        )
+        db.execute(
+            text(f"DELETE FROM {_q('conversation_run_reservations')} "
+                 f"WHERE parent_run_id IN (SELECT id FROM {_q('conversation_runs')} "
+                 f"WHERE status <> :running)"),
+            {"running": STATUS_RUNNING},
         )
         db.commit()
-    _finalize_interrupted([str(r["id"]) for r in rows], reason)
     return int(res.rowcount or 0)
 
 
@@ -717,6 +801,12 @@ def fail_orphan_run(run_id: str, reason: str) -> bool:
                  f"WHERE id = :id AND status = :running"),
             {"id": run_id, "st": STATUS_FAILED, "err": reason, "running": STATUS_RUNNING},
         )
+        if res.rowcount:
+            db.execute(
+                text(f"DELETE FROM {_q('conversation_run_reservations')} "
+                     f"WHERE parent_run_id = :id"),
+                {"id": run_id},
+            )
         db.commit()
         changed = bool(res.rowcount)
     if changed:

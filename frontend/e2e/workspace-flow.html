@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AgentZero Workspace Flow E2E</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      let restored = false
+      window.__e2e = { restoreRequest: null }
+      window.fetch = async (input, init = {}) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href)
+        const method = String(init.method || 'GET').toUpperCase()
+        let data = null
+
+        if (url.pathname.endsWith('/workspace/list')) {
+          data = url.searchParams.get('path') === 'src'
+            ? [{ name: 'main.py', path: 'src/main.py', type: 'file', size: 12 }]
+            : [
+                { name: 'src', path: 'src', type: 'dir', size: 0 },
+                { name: 'README.md', path: 'README.md', type: 'file', size: 5 },
+              ]
+        } else if (url.pathname.endsWith('/workspace/file/preview')) {
+          const path = url.searchParams.get('path') || ''
+          data = path === 'src/main.py'
+            ? { path, kind: 'text', text: "print('nested workspace')", size: 25 }
+            : { path: 'README.md', kind: 'text', text: 'hello workspace', size: 15 }
+        } else if (url.pathname.endsWith('/conversations/conv-e2e/checkpoints')) {
+          data = { items: [{ id: 'cp-e2e', run_id: 'run-e2e' }] }
+        } else if (url.pathname.endsWith('/checkpoints/cp-e2e/diff')) {
+          data = restored
+            ? { available: true, checkpoint: { id: 'cp-e2e' }, counts: { added: 0, modified: 0, deleted: 0 }, added: [], modified: [], deleted: [], truncated: false }
+            : {
+                available: true,
+                checkpoint: { id: 'cp-e2e', run_id: 'run-e2e' },
+                counts: { added: 1, modified: 1, deleted: 0 },
+                added: [{ path: 'src/new.py' }],
+                modified: [{ path: 'src/main.py' }],
+                deleted: [], truncated: false,
+              }
+        } else if (url.pathname.endsWith('/checkpoints/cp-e2e/rewind') && method === 'POST') {
+          window.__e2e.restoreRequest = JSON.parse(String(init.body || '{}'))
+          restored = true
+          data = { restored: 1 }
+        } else {
+          return new Response(JSON.stringify({ detail: `Unmocked E2E request: ${method} ${url.pathname}` }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+
+        return new Response(JSON.stringify({ data }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      await import('./workspace-flow.ts')
+    </script>
+  </body>
+</html>

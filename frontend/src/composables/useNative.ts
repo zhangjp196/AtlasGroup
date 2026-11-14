@@ -43,3 +43,15 @@ export async function openExternal(url: string): Promise<boolean> {
     return false
   }
 }
+
+export async function navigateEmbeddedBrowser(url: string): Promise<boolean> {
+  const api = window.pywebview?.api
+  if (!api?.browser_navigate) return false
+  return Boolean(await api.browser_navigate(url))
+}
+
+export async function automateEmbeddedBrowser(action: string, selector = '', value = ''): Promise<{ action: string; result: unknown }> {
+  const api = window.pywebview?.api
+  if (!api?.browser_action) throw new Error('桌面内置浏览器不可用')
+  return await api.browser_action(action, selector, value) as { action: string; result: unknown }
+}

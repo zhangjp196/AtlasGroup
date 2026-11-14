@@ -613,7 +613,8 @@ def _remove_empty_dirs(root: Path) -> None:
 
 
 def restore(workspace_id: str, checkpoint_id: str, *,
-            delete_added: bool = True) -> Dict[str, Any]:
+            delete_added: bool = True,
+            paths: Optional[List[str]] = None) -> Dict[str, Any]:
     """把工作区文件恢复到检查点状态。
 
     - 恢复被修改 / 删除的文件；
@@ -629,7 +630,20 @@ def restore(workspace_id: str, checkpoint_id: str, *,
         raise ValueError("工作区目录已变更，无法回退")
 
     entries = {str(e.get("path") or ""): e for e in manifest.get("files") or []}
-    missing_before = [p for p, e in entries.items()
+    selected_paths: Optional[set[str]] = None
+    if paths is not None:
+        selected_paths = set()
+        for raw in paths:
+            rel = str(raw or "").strip().replace("\\", "/")
+            if not rel or rel == ".":
+                raise ValueError("回退文件列表包含空路径")
+            _safe_join(root, rel)
+            selected_paths.add(rel)
+        if not selected_paths:
+            raise ValueError("回退文件列表不能为空")
+    restore_entries = (entries if selected_paths is None else
+                       {p: e for p, e in entries.items() if p in selected_paths})
+    missing_before = [p for p, e in restore_entries.items()
                       if not _blob_path(workspace_id, str(e.get("sha") or "")).is_file()]
     if missing_before:
         raise ValueError(f"检查点数据不完整：缺少 {len(missing_before)} 个文件的内容")
@@ -640,7 +654,7 @@ def restore(workspace_id: str, checkpoint_id: str, *,
     blocked_reason = ""
     with _lock(workspace_id):
         current, _skipped, _complete = _scan_current(workspace_id, root)
-        for rel, entry in entries.items():
+        for rel, entry in restore_entries.items():
             target = _safe_join(root, rel)
             if target.is_symlink():
                 raise ValueError(f"目标已是符号链接，拒绝覆盖: {rel}")
@@ -674,6 +688,8 @@ def restore(workspace_id: str, checkpoint_id: str, *,
                 for rel, info in list(current.items()):
                     if rel in entries:
                         continue
+                    if selected_paths is not None and rel not in selected_paths:
+                        continue
                     if int(info.get("size") or 0) > MAX_FILE_BYTES:
                         continue
                     target = _safe_join(root, rel)
@@ -683,7 +699,17 @@ def restore(workspace_id: str, checkpoint_id: str, *,
                             deleted.append(rel)
                     except OSError:
                         continue
-                _remove_empty_dirs(root)
+                if selected_paths is None:
+                    _remove_empty_dirs(root)
+                else:
+                    for rel in deleted:
+                        parent = _safe_join(root, rel).parent
+                        while parent != root:
+                            try:
+                                parent.rmdir()
+                            except OSError:
+                                break
+                            parent = parent.parent
         _save_state(workspace_id, root, current)
         if restored or deleted:
             _gc_blobs(workspace_id)

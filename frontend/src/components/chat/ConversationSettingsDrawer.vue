@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { ElOption, ElSelect } from 'element-plus'
 import Avatar from '@/components/Avatar.vue'
 import ListPager from '@/components/ListPager.vue'
@@ -17,15 +17,12 @@ import { useDataStore } from '@/stores/data'
 const props = defineProps<{
   open: boolean
   conversation: Conversation | null
-  botConversationId?: string
-  botLaneId?: string
 }>()
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'saved', conversation: Conversation): void
   (e: 'deleted', id: string): void
   (e: 'open', id: string): void
-  (e: 'bots-changed'): void
 }>()
 
 const app = useAppStore()
@@ -46,31 +43,6 @@ const usageLoading = ref(false)
 const forkSource = ref<Conversation | null>(null)
 const branches = ref<Conversation[]>([])
 const forksLoading = ref(false)
-
-interface BotInfo {
-  id: string
-  provider: 'feishu' | 'wecom'
-  bot_id: string
-  status: string
-  error?: string
-  conversation_id: string
-  session_root_id?: string
-  lane_id?: string
-  peer_id: string
-  bound: boolean
-}
-
-// 机器人绑定是全局的：会话管理里只切换「本会话」，换绑会解绑旧会话。
-const bots = ref<BotInfo[]>([])
-const botsLoading = ref(false)
-const botBusy = ref('')
-const botError = ref('')
-let botTimer = 0
-const botStatuses: Record<string, string> = {
-  connecting: '连接中', connected: '已连接', reconnecting: '正在重连', error: '连接失败',
-}
-const botTargetId = computed(() => props.botConversationId || props.conversation?.id || '')
-const botTargetLaneId = computed(() => props.botLaneId || props.conversation?.id || '')
 
 const draft = reactive({
   title: '',
@@ -124,104 +96,6 @@ const participantOptions = computed(() => availableRoles.value
     tag: role.scope === 'temporary' ? '临时' : '',
   })))
 
-// 已绑定本会话的机器人排在最前，方便在抽屉里快速解绑。
-const drawerBots = computed(() => {
-  const current = botTargetId.value
-  return [...bots.value].sort((a, b) =>
-    Number((b.session_root_id || b.conversation_id) === current)
-      - Number((a.session_root_id || a.conversation_id) === current),
-  )
-})
-
-function isBoundHere(bot: BotInfo): boolean {
-  return Boolean(bot.bound) && (bot.session_root_id || bot.conversation_id) === botTargetId.value
-}
-
-function isBoundToCurrentLane(bot: BotInfo): boolean {
-  return isBoundHere(bot) && (bot.lane_id || bot.conversation_id) === botTargetLaneId.value
-}
-
-function boundLaneTitle(bot: BotInfo): string {
-  const id = bot.lane_id || bot.conversation_id
-  return data.conversations.find((conv) => conv.id === id)?.title || id
-}
-
-function boundTitle(bot: BotInfo): string {
-  const id = bot.session_root_id || bot.conversation_id
-  return data.conversations.find((conv) => conv.id === id)?.title || id
-}
-
-function botStatusClass(status: string): string {
-  if (status === 'connected') return 'tag ok'
-  if (status === 'error' || status === 'reconnecting') return 'tag tmp'
-  return 'tag'
-}
-
-async function loadBots(): Promise<void> {
-  if (!botTargetId.value) {
-    bots.value = []
-    return
-  }
-  botsLoading.value = true
-  try {
-    const out = await api<{ items: BotInfo[] }>('/bots')
-    bots.value = out.items || []
-    botError.value = ''
-  } catch (cause) {
-    bots.value = []
-    botError.value = cause instanceof Error ? cause.message : String(cause)
-  } finally {
-    botsLoading.value = false
-  }
-}
-
-function stopBotTimer(): void {
-  if (botTimer) {
-    window.clearInterval(botTimer)
-    botTimer = 0
-  }
-}
-
-async function bindBot(bot: BotInfo): Promise<void> {
-  const targetId = botTargetId.value
-  if (!targetId || botBusy.value) return
-  if (bot.bound && bot.conversation_id && (bot.session_root_id || bot.conversation_id) !== targetId) {
-    const current = boundTitle(bot)
-    if (!window.confirm(`「${bot.bot_id}」当前绑定在「${current}」，改绑后旧会话自动解绑。继续？`)) return
-  }
-  botBusy.value = bot.id
-  botError.value = ''
-  try {
-    await api(`/bots/${encodeURIComponent(bot.id)}/bind`, {
-      method: 'POST',
-      body: { conversation_id: targetId, lane_id: botTargetLaneId.value },
-    })
-    app.toast('机器人已绑定到本会话')
-    await loadBots()
-    emit('bots-changed')
-  } catch (cause) {
-    botError.value = cause instanceof Error ? cause.message : String(cause)
-  } finally {
-    botBusy.value = ''
-  }
-}
-
-async function unbindBot(bot: BotInfo): Promise<void> {
-  if (botBusy.value) return
-  botBusy.value = bot.id
-  botError.value = ''
-  try {
-    await api(`/bots/${encodeURIComponent(bot.id)}/route`, { method: 'DELETE' })
-    app.toast('机器人已解绑')
-    await loadBots()
-    emit('bots-changed')
-  } catch (cause) {
-    botError.value = cause instanceof Error ? cause.message : String(cause)
-  } finally {
-    botBusy.value = ''
-  }
-}
-
 function loadDraft(): void {
   const conv = props.conversation
   const team = data.teams.find((item) => item.id === conv?.team_id)
@@ -245,10 +119,9 @@ function onGroupChange(): void {
 
 }
 
-watch(() => [props.open, props.conversation?.id, botTargetId.value, botTargetLaneId.value], () => {
+watch(() => [props.open, props.conversation?.id], () => {
   if (!props.open) {
     tempOpen.value = false
-    stopBotTimer()
     return
   }
   loadDraft()
@@ -256,13 +129,7 @@ watch(() => [props.open, props.conversation?.id, botTargetId.value, botTargetLan
   void loadTempRoles()
   void loadUsage()
   void loadForks()
-  botError.value = ''
-  void loadBots()
-  stopBotTimer()
-  botTimer = window.setInterval(() => void loadBots(), 4000)
 }, { immediate: true })
-
-onBeforeUnmount(stopBotTimer)
 
 async function loadUsage(): Promise<void> {
   const conv = props.conversation
@@ -477,7 +344,7 @@ async function removeConversation(): Promise<void> {
         </button>
       </header>
 
-      <div class="side-drawer-body">
+      <div class="side-drawer-body tabbed-drawer-body">
         <div class="seg drawer-tabs" role="tablist" aria-label="会话管理栏目">
           <button class="seg-btn" :class="{ on: tab === 'basic' }" type="button" @click="tab = 'basic'">基本</button>
           <button v-if="!isGlobal" class="seg-btn" :class="{ on: tab === 'members' }" type="button" @click="tab = 'members'">成员与群组</button>
@@ -491,6 +358,7 @@ async function removeConversation(): Promise<void> {
           <button class="seg-btn" :class="{ on: tab === 'more' }" type="button" @click="tab = 'more'">更多</button>
         </div>
 
+        <div class="drawer-tab-content">
         <section v-if="tab === 'basic'" class="group-section">
           <div class="group-section-head">
             <h3>基本</h3>
@@ -512,7 +380,7 @@ async function removeConversation(): Promise<void> {
           </div>
         </section>
 
-        <section v-if="tab === 'branch' && (conversation?.forked_from_id || branches.length)" class="group-section">
+        <section v-if="tab === 'branch' && (conversation?.forked_from_id || branches.length)" class="group-section drawer-tab-fill">
           <div class="group-section-head">
             <h3>会话分支</h3>
             <span>{{ forksLoading ? '加载中…' : (branches.length ? `${branches.length} 条子分支` : '没有子分支') }}</span>
@@ -562,7 +430,7 @@ async function removeConversation(): Promise<void> {
           <TokenMeter :usage="usage || conversation?.usage" variant="panel" headless />
         </section>
 
-        <section v-if="tab === 'members' && !isGlobal" class="group-section">
+        <section v-if="tab === 'members' && !isGlobal" class="group-section drawer-tab-fill">
           <div class="group-section-head">
             <h3>群组</h3>
             <span>群聊成员由群组统一维护</span>
@@ -586,7 +454,7 @@ async function removeConversation(): Promise<void> {
         </section>
 
         <template v-if="tab === 'members' && !isGlobal">
-          <section v-if="!draft.team_id" class="group-section">
+          <section v-if="!draft.team_id" class="group-section drawer-tab-fill">
             <div class="group-section-head">
               <h3>角色</h3>
               <span>主持角色 + 本会话参与角色</span>
@@ -626,7 +494,7 @@ async function removeConversation(): Promise<void> {
             </div>
           </section>
 
-          <section v-if="!draft.team_id" class="group-section">
+          <section v-if="!draft.team_id" class="group-section drawer-tab-fill">
             <div class="group-section-head">
               <h3>临时角色</h3>
               <span>只属于本会话</span>
@@ -658,7 +526,7 @@ async function removeConversation(): Promise<void> {
             />
           </section>
 
-          <section v-if="draft.team_id" class="group-section">
+          <section v-if="draft.team_id" class="group-section drawer-tab-fill">
             <div class="group-section-head">
               <h3>群成员</h3>
               <span>由群组统一维护</span>
@@ -683,49 +551,9 @@ async function removeConversation(): Promise<void> {
           </section>
         </template>
 
-        <section v-if="tab === 'members' && isGlobal" class="group-section">
+        <section v-if="tab === 'members' && isGlobal" class="group-section drawer-tab-fill">
           <div class="group-section-head"><h3>全局 Agent</h3><span>AtlasX 仅在此会话使用</span></div>
           <p class="group-mode-hint" style="margin:0">全局 Agent 负责跨会话授权、未读、运行状态与组织管理；普通会话不会出现 AtlasX。</p>
-        </section>
-
-        <section v-if="tab === 'more'" class="group-section">
-          <div class="group-section-head">
-            <h3>机器人</h3>
-            <span>机器人绑定会话，并一次路由到一个栏目</span>
-          </div>
-          <p v-if="botError" class="run-error" role="alert">{{ botError }}</p>
-          <div v-if="botsLoading && !bots.length" class="group-empty">正在读取机器人状态…</div>
-          <div v-else-if="!bots.length" class="group-empty">
-            还没有机器人。到「设置 → 机器人」添加后，可绑定到本会话并选择当前栏目作为唯一消息入口。
-          </div>
-          <div v-else class="group-member-list">
-            <div v-for="bot in drawerBots" :key="bot.id" class="group-member">
-              <div class="group-member-main">
-                <div class="group-member-name">
-                  <span>{{ bot.provider === 'feishu' ? '飞书' : '企业微信' }} · {{ bot.bot_id }}</span>
-                  <span :class="botStatusClass(bot.status)" :title="bot.error || ''">{{ botStatuses[bot.status] || bot.status }}</span>
-                  <span v-if="isBoundToCurrentLane(bot)" class="tag grp">当前栏目</span>
-                  <span v-else-if="isBoundHere(bot)" class="tag">本会话</span>
-                </div>
-                <div class="group-member-sub">
-                  <template v-if="isBoundToCurrentLane(bot)">消息进入当前栏目，回复发回原聊天。</template>
-                  <template v-else-if="isBoundHere(bot)">当前路由栏目：{{ boundLaneTitle(bot) }}。绑定当前栏目会切换唯一消息入口。</template>
-                  <template v-else-if="bot.bound">当前绑定：{{ boundTitle(bot) }}；改绑后旧会话自动解绑。</template>
-                  <template v-else>尚未绑定会话；未绑定时收到的消息会被忽略。</template>
-                </div>
-              </div>
-              <div class="group-member-actions">
-                <span v-if="botBusy === bot.id" class="role-line">处理中…</span>
-                <button v-else-if="isBoundToCurrentLane(bot)" class="btn small" type="button" @click="unbindBot(bot)">解绑</button>
-                <button v-else class="btn small primary" type="button" @click="bindBot(bot)">
-                  {{ isBoundHere(bot) ? '绑定当前栏目' : '绑定会话 / 当前栏目' }}
-                </button>
-              </div>
-            </div>
-          </div>
-          <small v-if="bots.length" class="role-line">
-            一个机器人同一时间绑定一个会话，并只路由到其中一个栏目；切换会自动改绑原栏目。
-          </small>
         </section>
 
         <section v-if="tab === 'more'" class="group-section group-danger">
@@ -733,6 +561,7 @@ async function removeConversation(): Promise<void> {
           <p class="group-mode-hint" style="margin:0">删除后历史消息一并移除，且不可恢复。</p>
           <button class="btn danger" type="button" :disabled="removing" @click="removeConversation">{{ removing ? '删除中…' : '删除会话' }}</button>
         </section>
+        </div>
       </div>
 
       <footer class="side-drawer-foot">

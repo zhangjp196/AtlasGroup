@@ -224,7 +224,11 @@ def test_delegate_subagent_assignments_resolve_to_call_subagent():
     assert code == "call_team"
 
 
-def test_exec_subagent_assignments_run_in_parallel(monkeypatch):
+def test_exec_subagent_assignments_run_in_parallel(app_env, monkeypatch):
+    ws = _env(app_env)
+    conv = conversation.create_conversation(ws, "local")
+    parent = run_service.create_run(conv["id"], "local", content="父任务")
+    assert run_service.claim_run(parent["id"]) is True
     active = 0
     peak = 0
 
@@ -243,11 +247,11 @@ def test_exec_subagent_assignments_run_in_parallel(monkeypatch):
     role = {"id": "r1", "name": "父角色",
             "envelope": {"tools": ["read_file"]}}
     raw = asyncio.run(conversation._exec_call_subagent(
-        {"id": "conv1", "workspace_id": "ws1"}, "local", role,
+        conv, "local", role,
         {"assignments": [
             {"goal": "检查 A", "name": "子代理 A"},
             {"goal": "检查 B", "name": "子代理 B"},
-        ]}, 0))
+        ]}, 0, parent_run_id=parent["id"]))
     payload = json.loads(raw)
     assert peak >= 2, f"子代理没有并行执行（peak={peak}）"
     assert len(payload["outputs"]) == 2

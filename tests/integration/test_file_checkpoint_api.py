@@ -109,6 +109,44 @@ def test_file_only_rewind_keeps_conversation(env):
     assert (folder / "src" / "app.py").read_text(encoding="utf-8") == "print('one')\n"
 
 
+def test_selective_rewind_only_restores_selected_workspace_file(env):
+    client, folder = env["client"], env["folder"]
+    conv_id, ws_id = env["conv_id"], env["ws_id"]
+    msg = conversation.send_message(conv_id, "只恢复一个文件", LOCAL_USER_ID)
+    cp = file_checkpoint_service.snapshot(
+        ws_id, conversation_id=conv_id, message_id=msg["id"], label="只恢复一个文件")
+    (folder / "src" / "app.py").write_text("print('changed')\n", encoding="utf-8")
+    (folder / "created.txt").write_text("leave this file\n", encoding="utf-8")
+
+    res = client.post(
+        f"{API}/conversations/{conv_id}/checkpoints/{cp['id']}/rewind",
+        json={"files": True, "conversation": False,
+              "delete_added": True, "paths": ["src/app.py"]})
+    assert res.status_code == 200, res.text
+    assert res.json()["data"]["files"]["restored_paths"] == ["src/app.py"]
+    assert (folder / "src" / "app.py").read_text(encoding="utf-8") == "print('one')\n"
+    assert (folder / "created.txt").read_text(encoding="utf-8") == "leave this file\n"
+
+
+def test_selective_rewind_can_delete_one_added_file(env):
+    client, folder = env["client"], env["folder"]
+    conv_id, ws_id = env["conv_id"], env["ws_id"]
+    msg = conversation.send_message(conv_id, "只删除一个新增文件", LOCAL_USER_ID)
+    cp = file_checkpoint_service.snapshot(
+        ws_id, conversation_id=conv_id, message_id=msg["id"], label="只删除一个新增文件")
+    (folder / "discard.txt").write_text("remove\n", encoding="utf-8")
+    (folder / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+    res = client.post(
+        f"{API}/conversations/{conv_id}/checkpoints/{cp['id']}/rewind",
+        json={"files": True, "conversation": False,
+              "delete_added": True, "paths": ["discard.txt"]})
+    assert res.status_code == 200, res.text
+    assert res.json()["data"]["files"]["deleted_paths"] == ["discard.txt"]
+    assert not (folder / "discard.txt").exists()
+    assert (folder / "keep.txt").exists()
+
+
 def test_rewind_rejects_unknown_checkpoint(env):
     client, conv_id = env["client"], env["conv_id"]
     res = client.post(

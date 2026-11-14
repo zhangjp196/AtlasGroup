@@ -73,6 +73,14 @@ def test_legacy_db_backfills_read_watermark(client):
     _insert_assistant(cid)
     db_path = database.get_db_path()
     con = sqlite3.connect(db_path)
+    # Model an actual legacy conversation whose activity watermark includes
+    # the already persisted assistant reply. The helper inserts the GDAG row
+    # directly and therefore does not advance conversations.updated_at.
+    con.execute(
+        "UPDATE conversations SET updated_at = datetime('now', 'localtime', '+1 minute') "
+        "WHERE id = ?",
+        (cid,),
+    )
     con.execute("ALTER TABLE conversations DROP COLUMN last_read_at")
     con.commit()
     con.close()

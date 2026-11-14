@@ -32,6 +32,15 @@ def test_read_before_edit_and_verification_are_explicit():
     assert "不要顺手重构" in text
 
 
+def test_output_contract_keeps_progress_and_final_answer_compact():
+    text = pb.build(_ctx())
+    assert "不要逐步播报" in text
+    assert "长时间等待或阻塞" in text
+    assert "默认 1-3 句" in text
+    assert "代码改动最多 3 个要点" in text
+    assert "简单任务不加标题" in text
+
+
 def test_autonomous_uses_todo_list_and_drops_propose():
     text = pb.build(_ctx(autonomous=True))
     assert "# 自主执行模式（动态规划）" in text
