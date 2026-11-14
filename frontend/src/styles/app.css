@@ -1019,6 +1019,7 @@ body.ga-open .ga-fab{display:none}
 .chat-panel .composer{flex:none}
 .chat-workspace{display:grid;grid-template-columns:minmax(0,1fr) 0;flex:1;min-width:0;min-height:0;overflow:hidden;transition:grid-template-columns .18s ease}
 .chat-workspace.right-panel-open{grid-template-columns:minmax(0,1fr) 8px minmax(280px,var(--right-panel-width,420px))}
+.chat-workspace.right-panel-collapsed{grid-template-columns:minmax(0,1fr) 48px}
 .right-panel-resizing .chat-workspace{transition:none}
 .chat-workspace>.chat-main{min-width:0;min-height:0;overflow:hidden}
 .right-panel-resizer{position:relative;z-index:3;display:block;min-width:8px;cursor:col-resize;touch-action:none;outline:none}
@@ -1033,12 +1034,34 @@ body.ga-open .ga-fab{display:none}
 .right-panel-tabs .dock-collapse{margin-left:auto;padding-inline:7px;font-size:16px}
 .dock-badge{padding:1px 5px;border-radius:8px;background:color-mix(in srgb,var(--accent) 18%,var(--panel));color:var(--accent);font-size:9px}
 .right-panel-content{position:relative;flex:1;min-width:0;min-height:0;overflow:hidden}
+.right-panel-dock.collapsed .right-panel-content{display:none}
+.right-panel-tabs-spacer{flex:1;min-width:6px}
+.right-panel-large{display:grid;place-items:center;flex:none;width:29px;height:29px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--faint);cursor:pointer;font-size:16px}
+.right-panel-large:hover,.right-panel-large[aria-pressed="true"]{background:var(--panel);border-color:var(--line);color:var(--text)}
+.panel-icon{display:inline-flex;align-items:center;justify-content:center;min-width:16px;font-size:13px}
+.panel-label{white-space:nowrap}
+.right-panel-dock.collapsed .right-panel-tabs{height:100%;flex-direction:column;align-items:center;gap:6px;padding:7px 4px;border-bottom:0}
+.right-panel-dock.collapsed .right-panel-tabs button{position:relative;justify-content:center;width:38px;height:36px;padding:4px;border-color:transparent}
+.right-panel-dock.collapsed .right-panel-tabs .panel-label{display:none}
+.right-panel-dock.collapsed .right-panel-tabs .dock-badge{position:absolute;right:-2px;top:-3px;padding:0 4px;font-size:8px}
+.right-panel-dock.collapsed .right-panel-tabs-spacer{min-width:0;min-height:8px}
+.right-panel-dock.collapsed .dock-collapse{margin:0}
+.chat-panel.conversation-large-mode{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;max-width:100vw!important;max-height:100vh!important;z-index:102!important;border:0!important;border-radius:0!important}
+.chat-panel.conversation-large-mode .chat-workspace{grid-template-columns:minmax(0,1fr)!important}
+.chat-panel.conversation-large-mode .lanes,.chat-panel.conversation-large-mode .lanes-resizer,.chat-panel.conversation-large-mode .lanes-collapsed-rail,.chat-panel.conversation-large-mode .right-panel-resizer,.chat-panel.conversation-large-mode .right-panel-dock,.chat-panel.conversation-large-mode .rs{display:none!important}
+.chat-panel.conversation-large-mode .chat-body{min-width:0}
 .right-panel-content>.browser-panel,.right-panel-content>.terminal-session{height:100%;min-height:0}
-@media(max-width:720px){.chat-workspace.right-panel-open{position:relative;grid-template-columns:minmax(0,1fr)}.right-panel-resizer{position:absolute;inset-block:0;right:calc(100% - min(var(--right-panel-width,420px),88%));width:8px}.right-panel-dock{position:absolute;inset:0 0 0 auto;width:min(var(--right-panel-width,420px),88%);box-shadow:-16px 0 32px color-mix(in srgb,#000 22%,transparent)}.right-panel-tabs{gap:2px;padding-inline:4px}.right-panel-tabs button{padding-inline:5px;font-size:9px}}
+@media(max-width:720px){.chat-workspace.right-panel-open,.chat-workspace.right-panel-collapsed{position:relative;grid-template-columns:minmax(0,1fr)}.chat-workspace.right-panel-open:not(.right-panel-collapsed) .right-panel-resizer{position:absolute;inset-block:0;right:calc(100% - min(var(--right-panel-width,420px),88%));width:8px}.right-panel-dock{position:absolute;inset:0 0 0 auto;width:min(var(--right-panel-width,420px),88%);box-shadow:-16px 0 32px color-mix(in srgb,#000 22%,transparent)}.right-panel-dock.collapsed{width:48px}.right-panel-tabs{gap:2px;padding-inline:4px}.right-panel-tabs button{padding-inline:5px;font-size:9px}}
 /* 栏目：会话窗口左侧的一列独立对话 */
 .chat-body{display:flex;flex:1;min-height:0;min-width:0}
 .chat-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0}
 .lanes{flex:0 0 min(var(--lanes-width,224px),45%);width:min(var(--lanes-width,224px),45%);display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line-soft);background:var(--bg-2)}
+.lanes-collapsed-rail{display:flex;flex:none;width:34px;min-height:0;align-items:flex-start;justify-content:center;padding-top:9px;border-right:1px solid var(--line-soft);background:var(--bg-2)}
+.lanes-collapsed-rail button{display:flex;flex-direction:column;align-items:center;gap:7px;width:28px;padding:7px 3px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--faint);cursor:pointer}
+.lanes-collapsed-rail button:hover{color:var(--text);border-color:var(--line-strong)}
+.lanes-collapsed-rail svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.lanes-collapsed-rail span{writing-mode:vertical-rl;font-size:9px;letter-spacing:.08em}
+.lanes-collapsed-rail b{font-size:9px;font-weight:500}
 .lanes-resizer{position:relative;z-index:2;flex:none;width:8px;margin-inline:-4px;cursor:col-resize;touch-action:none;outline:none}
 .lanes-resizer::after{content:"";position:absolute;top:0;bottom:0;left:3px;width:2px;background:transparent;transition:background .15s ease}
 .lanes-resizer:hover::after,.lanes-resizer:focus-visible::after{background:color-mix(in srgb,var(--accent) 55%,var(--line))}
@@ -1956,6 +1979,7 @@ html[data-theme="sepia"] select.input option{background:var(--panel-2);color:var
 .chat-panel.ga-win{border-radius:15px;box-shadow:0 30px 86px color-mix(in srgb,#000 66%,transparent)}
 .chat-panel.ga-win .chat-head{border-top-left-radius:14px;border-top-right-radius:14px}
 .chat-head .head-btn{width:27px;height:27px;border-radius:8px}
+.chat-head .workspace-toggle{position:relative}
 .chat-head .head-btn:hover{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--text)}
 .chat-head .close-btn{color:var(--dim)}
 .chat-head .close-btn:hover{color:var(--danger);background:color-mix(in srgb,var(--danger) 14%,transparent)}

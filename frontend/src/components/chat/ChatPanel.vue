@@ -108,6 +108,7 @@ const activeLane = computed(() => lanes.value.find((tab) => tab.key === props.ac
 const showLanes = computed(() => !isGlobalPanel.value)
 const canAddLane = computed(() => Boolean(props.sessionRootId) && !isGlobalPanel.value)
 const LANE_WIDTH_KEY = 'atlasx.chat-lanes.width.v1'
+const LANES_COLLAPSED_KEY = 'atlasx.chat-lanes.collapsed.v1'
 const DEFAULT_LANE_WIDTH = 224
 const MIN_LANE_WIDTH = 180
 const MAX_LANE_WIDTH = 480
@@ -119,6 +120,10 @@ function initialLaneWidth(): number {
   return DEFAULT_LANE_WIDTH
 }
 const laneWidth = ref(initialLaneWidth())
+function initialLanesCollapsed(): boolean {
+  try { return localStorage.getItem(LANES_COLLAPSED_KEY) === '1' } catch { return false }
+}
+const lanesCollapsed = ref(initialLanesCollapsed())
 const laneResizing = ref(false)
 let laneResizeStart: { pointerId: number; x: number; width: number } | null = null
 const RIGHT_PANEL_WIDTH_KEY = 'atlasx.chat-right-panel.width.v1'
@@ -217,6 +222,10 @@ function resizeLaneByKeyboard(event: KeyboardEvent): void {
   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
   event.preventDefault()
   setLaneWidth(laneWidth.value + (event.key === 'ArrowRight' ? 16 : -16))
+}
+function toggleLanes(): void {
+  lanesCollapsed.value = !lanesCollapsed.value
+  try { localStorage.setItem(LANES_COLLAPSED_KEY, lanesCollapsed.value ? '1' : '0') } catch { /* storage may be disabled */ }
 }
 // 栏目分页：左侧一屏放 10 个，按最近活动时间倒序（store 已排好）。
 const LANE_PAGE_SIZE = 10
@@ -442,6 +451,9 @@ const tempOpen = ref(false)
 const tempForm = reactive({ name: '', expertise: '', persona: '' })
 type RightPanel = 'browser' | 'terminal' | 'tasks'
 const activeRightPanel = ref<RightPanel | null>(null)
+const rightPanelCollapsed = ref(false)
+const conversationLargeMode = ref(false)
+const lastRightPanel = ref<RightPanel>('tasks')
 const settingsOpen = ref(false)
 const participantsOpen = ref(false)
 const groupInfoOpen = ref(false)
@@ -594,7 +606,7 @@ const popupRect = computed(() => {
   }
 })
 const popupStyle = computed(() => {
-  if (!floating.value) return undefined
+  if (!floating.value || conversationLargeMode.value) return undefined
   const { w, h, x, y } = popupRect.value
   return { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`,
     zIndex: isGlobalPanel.value ? 104 : 102 }
@@ -646,7 +658,7 @@ function startResize(event: PointerEvent, edge: ResizeEdge): void {
 let dragStart: { x: number; y: number; baseX: number; baseY: number } | null = null
 
 function startDrag(event: PointerEvent): void {
-  if (!floating.value || event.button !== 0) return
+  if (!floating.value || conversationLargeMode.value || event.button !== 0) return
   const target = event.target as HTMLElement | null
   if (target?.closest('button, a, input, select, textarea, .chip')) return
   dragStart = { x: event.clientX, y: event.clientY, baseX: popupRect.value.x, baseY: popupRect.value.y }
@@ -870,15 +882,35 @@ async function loadBackgroundTasks(): Promise<void> {
   }
 }
 
-function openTaskCenter(): void {
-  if (!convId.value) return
-  toggleRightPanel('tasks')
-}
-
 function toggleRightPanel(panel: RightPanel): void {
   if (panel === 'terminal' && (!terminalAvailable.value || workspaceSwitching.value)) return
   if (panel === 'tasks' && !convId.value) return
-  activeRightPanel.value = activeRightPanel.value === panel ? null : panel
+  activeRightPanel.value = panel
+  lastRightPanel.value = panel
+  rightPanelCollapsed.value = false
+}
+
+function toggleRightWorkspace(): void {
+  if (conversationLargeMode.value) {
+    conversationLargeMode.value = false
+    return
+  }
+  if (!activeRightPanel.value) {
+    const preferred = lastRightPanel.value === 'terminal' && !terminalAvailable.value
+      ? (isDraft.value ? 'browser' : 'tasks')
+      : lastRightPanel.value === 'tasks' && isDraft.value ? 'browser' : lastRightPanel.value
+    toggleRightPanel(preferred)
+    return
+  }
+  rightPanelCollapsed.value = !rightPanelCollapsed.value
+}
+
+function collapseRightPanel(): void {
+  rightPanelCollapsed.value = true
+}
+
+function toggleConversationLargeMode(): void {
+  conversationLargeMode.value = !conversationLargeMode.value
 }
 
 async function continueTaskNow(): Promise<void> {
@@ -1522,7 +1554,7 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
   <div
     ref="chatPanelEl"
     class="chat-panel"
-    :class="[floating ? 'ga-win' : presentation === 'drawer' ? 'chat-shell' : 'chat-tab-panel', { 'right-panel-resizing': rightPanelResizing }]"
+    :class="[floating ? 'ga-win' : presentation === 'drawer' ? 'chat-shell' : 'chat-tab-panel', { 'right-panel-resizing': rightPanelResizing, 'conversation-large-mode': conversationLargeMode }]"
     :style="[popupStyle, { '--lanes-width': `${laneWidth}px`, '--right-panel-width': `${rightPanelWidth}px` }]"
     :data-dragging="(dragging || resizing || laneResizing || rightPanelResizing) || undefined"
     :data-lane-resizing="laneResizing || undefined"
@@ -1599,23 +1631,24 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
           @click="openTempRole"
         >＋</button>
         <button v-if="!isDraft" class="head-btn" title="会话管理（角色 / 参与角色）" @click="settingsOpen = true">⚙</button>
-        <button v-if="terminalAvailable" class="head-btn" :class="{ active: activeRightPanel === 'terminal' }" type="button" title="切换工作区终端面板"
-          aria-label="工作区终端" :disabled="workspaceSwitching" @click="toggleRightPanel('terminal')">›_</button>
         <button class="head-btn" type="button" title="浏览会话工作区文件" aria-label="浏览会话工作区文件"
           :disabled="!terminalWorkspace || workspaceSwitching" @click="sessionFilesOpen = true">▤</button>
-        <button class="head-btn" :class="{ active: activeRightPanel === 'browser' }" type="button" title="切换浏览器面板" aria-label="浏览器" @click="toggleRightPanel('browser')">🌐</button>
-        <button v-if="!isDraft" class="head-btn task-btn" :class="{ active: activeRightPanel === 'tasks' }" title="任务中心（执行 / 工单）" aria-label="任务中心" @click="openTaskCenter">
-          ◎<span v-if="taskCenterCount" class="head-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span>
+        <button class="head-btn workspace-toggle" :class="{ active: conversationLargeMode || (activeRightPanel && !rightPanelCollapsed) }" type="button"
+          :title="conversationLargeMode ? '退出会话大屏' : activeRightPanel && !rightPanelCollapsed ? '收起右侧工作区' : '展开右侧工作区'"
+          aria-label="右侧工作区" :aria-expanded="Boolean(activeRightPanel && !rightPanelCollapsed && !conversationLargeMode)"
+          @click="toggleRightWorkspace">
+          {{ conversationLargeMode ? '⛶' : activeRightPanel && !rightPanelCollapsed ? '◧' : '▣' }}
+          <span v-if="taskCenterCount" class="head-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span>
         </button>
         <button class="head-btn close-btn" title="关闭窗口" aria-label="关闭窗口"
           @pointerdown.stop @click.stop="emit('close')">×</button>
       </div>
     </header>
 
-    <div class="chat-workspace" :class="{ 'right-panel-open': activeRightPanel }">
+    <div class="chat-workspace" :class="{ 'right-panel-open': activeRightPanel, 'right-panel-collapsed': activeRightPanel && rightPanelCollapsed, 'conversation-large-mode': conversationLargeMode }">
     <div class="chat-main">
     <div class="chat-body">
-      <aside v-if="showLanes" class="lanes" aria-label="栏目">
+      <aside v-if="showLanes && !lanesCollapsed && !conversationLargeMode" class="lanes" aria-label="栏目">
         <div class="lanes-head">
           <span>栏目</span>
           <span class="lanes-count">{{ filteredLanes.length }}</span>
@@ -1626,6 +1659,9 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
             </button>
             <button class="lanes-add" type="button" title="新增栏目" aria-label="新增栏目"
               :disabled="!canAddLane" @click="addLane">＋</button>
+            <button class="lanes-refresh lanes-collapse" type="button" title="收起栏目栏" aria-label="收起栏目栏" @click="toggleLanes">
+              <svg viewBox="0 0 24 24"><path d="m14 6-6 6 6 6" /></svg>
+            </button>
           </div>
         </div>
         <div class="lane-filters">
@@ -1671,7 +1707,14 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
           ＋ 新栏目
         </button>
       </aside>
-      <div v-if="showLanes" class="lanes-resizer" role="separator" aria-orientation="vertical"
+      <aside v-if="showLanes && lanesCollapsed && !conversationLargeMode" class="lanes-collapsed-rail" aria-label="栏目栏已收起">
+        <button type="button" title="展开栏目栏" aria-label="展开栏目栏" @click="toggleLanes">
+          <svg viewBox="0 0 24 24"><path d="m10 6 6 6-6 6" /></svg>
+          <span>栏目</span>
+          <b>{{ filteredLanes.length }}</b>
+        </button>
+      </aside>
+      <div v-if="showLanes && !lanesCollapsed && !conversationLargeMode" class="lanes-resizer" role="separator" aria-orientation="vertical"
         aria-label="调整栏目栏宽度" :aria-valuemin="minLaneWidth()" :aria-valuemax="maxLaneWidth()"
         :aria-valuenow="laneWidth" tabindex="0" @pointerdown.stop="startLaneResize"
         @keydown="resizeLaneByKeyboard" />
@@ -1803,25 +1846,27 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
 
     </div>
 
-    <div v-if="activeRightPanel" class="right-panel-resizer" role="separator" aria-orientation="vertical"
+    <div v-if="activeRightPanel && !rightPanelCollapsed && !conversationLargeMode" class="right-panel-resizer" role="separator" aria-orientation="vertical"
       aria-label="调整右侧面板宽度" :aria-valuemin="MIN_RIGHT_PANEL_WIDTH" :aria-valuemax="maxRightPanelWidth()"
       :aria-valuenow="rightPanelWidth" tabindex="0" @pointerdown.stop="startRightPanelResize"
       @keydown="resizeRightPanelByKeyboard" />
 
-    <aside v-if="activeRightPanel" class="right-panel-dock" :aria-label="activeRightPanel === 'browser' ? '浏览器面板' : activeRightPanel === 'terminal' ? '终端面板' : '协作中心面板'">
-      <nav class="right-panel-tabs" aria-label="右侧面板切换">
-        <button type="button" :class="{ active: activeRightPanel === 'browser' }" :aria-pressed="activeRightPanel === 'browser'" @click="toggleRightPanel('browser')">🌐 浏览器</button>
-        <button v-if="terminalAvailable" type="button" :class="{ active: activeRightPanel === 'terminal' }" :aria-pressed="activeRightPanel === 'terminal'" @click="toggleRightPanel('terminal')">›_ 终端</button>
-        <button v-if="!isDraft" type="button" :class="{ active: activeRightPanel === 'tasks' }" :aria-pressed="activeRightPanel === 'tasks'" @click="toggleRightPanel('tasks')">◎ 协作中心<span v-if="taskCenterCount" class="dock-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span></button>
-        <button class="dock-collapse" type="button" title="收起右侧面板" aria-label="收起右侧面板" @click="activeRightPanel = null">×</button>
+    <aside v-if="activeRightPanel" class="right-panel-dock" :class="{ collapsed: rightPanelCollapsed }" :aria-label="activeRightPanel === 'browser' ? '浏览器面板' : activeRightPanel === 'terminal' ? '终端面板' : '协作中心面板'">
+      <nav class="right-panel-tabs" aria-label="右侧工作区">
+        <button type="button" title="浏览器" aria-label="浏览器" :class="{ active: activeRightPanel === 'browser' }" :aria-pressed="activeRightPanel === 'browser'" @click="toggleRightPanel('browser')"><span class="panel-icon">🌐</span><span class="panel-label">浏览器</span></button>
+        <button v-if="terminalAvailable" type="button" title="终端" aria-label="终端" :class="{ active: activeRightPanel === 'terminal' }" :aria-pressed="activeRightPanel === 'terminal'" @click="toggleRightPanel('terminal')"><span class="panel-icon">›_</span><span class="panel-label">终端</span></button>
+        <button v-if="!isDraft" type="button" title="协作中心" aria-label="协作中心" :class="{ active: activeRightPanel === 'tasks' }" :aria-pressed="activeRightPanel === 'tasks'" @click="toggleRightPanel('tasks')"><span class="panel-icon">◎</span><span class="panel-label">协作中心</span><span v-if="taskCenterCount" class="dock-badge">{{ taskCenterCount > 99 ? '99+' : taskCenterCount }}</span></button>
+        <span class="right-panel-tabs-spacer" />
+        <button v-if="!rightPanelCollapsed" class="right-panel-large" type="button" :title="conversationLargeMode ? '退出会话大屏' : '切换会话大屏模式'" :aria-pressed="conversationLargeMode" @click="toggleConversationLargeMode">⛶</button>
+        <button class="dock-collapse" type="button" :title="rightPanelCollapsed ? '展开右侧工作区' : '收起右侧工作区'" :aria-label="rightPanelCollapsed ? '展开右侧工作区' : '收起右侧工作区'" @click="rightPanelCollapsed = !rightPanelCollapsed">{{ rightPanelCollapsed ? '‹' : '›' }}</button>
       </nav>
       <div class="right-panel-content">
-        <BrowserPanel v-if="activeRightPanel === 'browser'" :open="true" @close="activeRightPanel = null" />
+        <BrowserPanel v-if="activeRightPanel === 'browser'" :open="true" @close="collapseRightPanel" />
         <TerminalSession v-else-if="activeRightPanel === 'terminal' && terminalWorkspace" :key="terminalWorkspace" :workspace-id="terminalWorkspace" />
         <ChatTaskCenter v-else-if="activeRightPanel === 'tasks'" :open="true" :conversation-id="convId" :title="title"
-          @close="activeRightPanel = null; loadBackgroundTasks()"
+          @close="collapseRightPanel(); loadBackgroundTasks()"
           @changed="loadBackgroundTasks"
-          @reference="(path) => { activeRightPanel = null; insertWorkspaceFileReference(path) }" />
+          @reference="(path) => { collapseRightPanel(); insertWorkspaceFileReference(path) }" />
       </div>
     </aside>
     </div>
