@@ -22,6 +22,7 @@ import {
 } from '@/lib/derive'
 import { compactNumber, shortTime } from '@/lib/format'
 import { clampPage, DEFAULT_PAGE_SIZE, pageCount, pageSlice } from '@/lib/paging'
+import { workspaceLabel } from '@/lib/workspaceOptions'
 import { usageSummary } from '@/lib/usage'
 import { useAppStore } from '@/stores/app'
 import { useChatWindowsStore } from '@/stores/chatWindows'
@@ -277,8 +278,7 @@ function workspaceOf(conv: (typeof data.conversations)[number]): string {
 }
 
 function workspaceName(id?: string): string {
-  const wsId = String(id || '')
-  return data.workspaces.find((ws) => ws.id === wsId)?.name || '默认工作区'
+  return workspaceLabel(id, data.workspaces)
 }
 
 // 会话列表显示在办工单数（角色 / 群组后台任务自动建单）。
@@ -392,7 +392,7 @@ function onCreated(_kind: string, id: string): void {
         <div class="tile-chips">
           <span class="chip ws-chip" :title="`工作区：${workspaceOf(conv)}`">{{ workspaceOf(conv) }}</span>
           <span v-if="Number(conv.thread_count || 1) > 1" class="chip" :title="`这个会话有 ${conv.thread_count} 个栏目`">{{ conv.thread_count }} 个栏目</span>
-          <span v-if="openWorkByConv.get(conv.id)" class="chip work-chip">{{ openWorkByConv.get(conv.id) }} 工单</span>
+          <span v-if="openWorkByConv.get(conv.id)" class="chip work-chip">{{ openWorkByConv.get(conv.id) }} 个任务</span>
           <span v-if="conv.forked_from_id" class="chip" title="分支会话">分支</span>
           <span v-for="chip in chipsOf(conv)" :key="chip" class="chip">{{ chip }}</span>
           <button v-if="conv.team_id" class="chip link-chip" type="button" title="打开群组" @click.stop="goTeam(conv.team_id)">群组</button>

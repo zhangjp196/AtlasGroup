@@ -37,6 +37,9 @@ function send(data: string): void {
 function resize(): void {
   const el = surface.value
   if (!el || socket?.readyState !== WebSocket.OPEN) return
+  // v-show keeps the terminal mounted while another dock is active. A hidden
+  // element reports 0×0; do not resize the PTY to the fallback minimum size.
+  if (el.clientWidth <= 0 || el.clientHeight <= 0) return
   const cols = Math.max(30, Math.floor(el.clientWidth / 8.2))
   const rows = Math.max(8, Math.floor(el.clientHeight / 18))
   buffer.resize(cols)

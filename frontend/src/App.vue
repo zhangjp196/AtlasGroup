@@ -8,6 +8,7 @@ import NoticeStack from '@/components/NoticeStack.vue'
 import QuickSearch from '@/components/QuickSearch.vue'
 import WorkspaceTabs from '@/components/WorkspaceTabs.vue'
 import OnlineRoles from '@/components/OnlineRoles.vue'
+import WorkspaceToolPanel, { type WorkspaceToolPanelState } from '@/components/WorkspaceToolPanel.vue'
 import StartupSplash from '@/components/StartupSplash.vue'
 import { api } from '@/api/client'
 import type { Conversation } from '@/api/types'
@@ -15,14 +16,22 @@ import { playSound } from '@/lib/sound'
 import { useAppStore } from '@/stores/app'
 import { useAttentionStore } from '@/stores/attention'
 import { conversationTitle } from '@/lib/derive'
-import { useChatWindowsStore, type ChatPresentation } from '@/stores/chatWindows'
+import { PANEL_BOARD_KEY, useChatWindowsStore, type ChatPresentation } from '@/stores/chatWindows'
 import { useDataStore } from '@/stores/data'
 import { useNoticeStore } from '@/stores/notice'
+import { storeToRefs } from 'pinia'
+import { usePanelWorkspaceStore } from '@/stores/panelWorkspace'
 
 const app = useAppStore()
 const data = useDataStore()
 const attention = useAttentionStore()
 const chatWindows = useChatWindowsStore()
+const panelWorkspace = usePanelWorkspaceStore()
+const {
+  desktops, desktopAssignments, hiddenPanels: boardHidden, toolPanels,
+  layouts: panelLayouts, page: desktopPage, pageCount: desktopPages,
+  visibleDesktops: desktopsOnPage,
+} = storeToRefs(panelWorkspace)
 const notice = useNoticeStore()
 const route = useRoute()
 const router = useRouter()
@@ -41,7 +50,84 @@ const globalPanels = computed(() => [
   { key: 'global-chat', id: globalChatId.value, label: '全局对话', agent: false },
 ].filter((panel) => panel.id))
 const globalModes = ref<Record<string, ChatPresentation>>({})
+const boardChatWindows = computed(() => chatWindows.windows.filter((item) => item.presentation === 'board'))
+const desktopFor = panelWorkspace.desktopFor
+const boardPanels = computed(() => [
+  ...boardChatWindows.value.map((item) => ({ key: item.key, title: item.title || '聊天', desktopId: desktopFor(item.key), hidden: Boolean(boardHidden.value[item.key]), kind: 'chat' })),
+  ...globalPanels.value.filter((item) => globalModes.value[item.key] === 'board')
+    .map((item) => ({ key: item.key, title: item.label, desktopId: desktopFor(item.key), hidden: Boolean(boardHidden.value[item.key]), kind: 'chat' })),
+  ...toolPanels.value.map((item) => ({ key: item.key, title: ({
+    browser: '浏览器', terminal: '终端', tasks: '协作中心', conversations: '会话',
+    schedules: '定时任务', workspaces: '工作区', organization: '组织',
+  } as Record<WorkspaceToolPanelState['kind'], string>)[item.kind], desktopId: item.desktopId, hidden: Boolean(item.hidden), kind: 'tool' })),
+])
+watch(() => boardPanels.value.length, (count) => {
+  if (!count && chatWindows.activeTab === PANEL_BOARD_KEY) chatWindows.activeTab = ''
+})
+const boardLayoutClass = computed(() => `count-${desktopsOnPage.value.length}`)
+function desktopPanelLayoutClass(desktopId: string): string {
+  const count = boardPanels.value.filter((panel) => panel.desktopId === desktopId && !panel.hidden).length
+  return `panel-count-${count > 4 ? 'many' : count}`
+}
+function addDesktop(): void {
+  panelWorkspace.addDesktop()
+}
+function removeDesktop(id: string): void {
+  panelWorkspace.removeDesktop(id)
+}
+function assignPanelToDesktop(key: string, desktopId: string): void {
+  panelWorkspace.assign(key, desktopId)
+}
+function dropBoardPanel(desktopId: string, event: DragEvent): void {
+  const key = event.dataTransfer?.getData('text/plain') || ''
+  if (!key || !boardPanels.value.some((panel) => panel.key === key)) return
+  const target = (event.target as HTMLElement).closest<HTMLElement>('[data-board-panel-key]')
+  const beforeKey = target?.dataset.boardPanelKey || ''
+  if (key === beforeKey) return
+  const targetKeys = boardPanels.value.filter((panel) => panel.desktopId === desktopId).map((panel) => panel.key)
+  panelWorkspace.placePanel(key, desktopId, beforeKey, targetKeys)
+}
+function saveDesktopName(id: string, event: Event): void {
+  panelWorkspace.renameDesktop(id, (event.target as HTMLInputElement).value)
+}
+function addToolPanel(kind: WorkspaceToolPanelState['kind'], event: Event, desktopId: string): void {
+  const workspaceId = kind === 'terminal' ? data.workspaces.find((item) => !item.chat_only)?.id || '' : ''
+  const conversationId = kind === 'tasks' ? data.conversations.find((item) => item.message_count || item.last_message)?.id || '' : ''
+  panelWorkspace.addToolPanel(kind, desktopId, workspaceId, conversationId)
+  const details = (event.currentTarget as HTMLElement | null)?.closest('details')
+  if (details) details.open = false
+  chatWindows.activeTab = PANEL_BOARD_KEY
+}
+function patchToolPanel(key: string, patch: Partial<WorkspaceToolPanelState>): void {
+  panelWorkspace.patchToolPanel(key, patch)
+}
+function closeToolPanel(key: string): void {
+  panelWorkspace.closeToolPanel(key)
+}
+function updateChatPanelLayout(key: string, layout: { minimized: boolean; maximized: boolean }): void {
+  panelWorkspace.updateLayout(key, layout)
+}
+function toggleBoardPanel(key: string): void {
+  panelWorkspace.toggleHidden(key)
+}
+function setWindowPresentation(key: string, mode: ChatPresentation): void {
+  const boardWasActive = chatWindows.activeTab === PANEL_BOARD_KEY
+  if (mode === 'board' && !desktopAssignments.value[key]) {
+    assignPanelToDesktop(key, desktopsOnPage.value[0]?.id || desktops.value[0]?.id || 'desktop-1')
+  }
+  chatWindows.setPresentation(key, mode)
+  if (boardWasActive && mode !== 'tab' && boardPanels.value.length) chatWindows.activeTab = PANEL_BOARD_KEY
+}
+
+function closeChatWindow(key: string): void {
+  const boardWasActive = chatWindows.activeTab === PANEL_BOARD_KEY
+  chatWindows.close(key)
+  panelWorkspace.removePanel(key)
+  if (boardWasActive && boardPanels.value.length) chatWindows.activeTab = PANEL_BOARD_KEY
+}
 const workspaceTabs = computed(() => [
+  ...(chatWindows.windows.some((item) => item.presentation === 'board') || globalPanels.value.some((item) => globalModes.value[item.key] === 'board') || toolPanels.value.length
+    ? [{ key: PANEL_BOARD_KEY, label: '面板工作区', closable: false }] : []),
   ...routeTabs.value.map((tab) => ({ ...tab, closable: routeTabs.value.length > 1 })),
   ...chatWindows.windows.filter((item) => item.presentation === 'tab').map((item) => {
     const conv = data.conversations.find((entry) => entry.id === item.conversationId)
@@ -60,7 +146,10 @@ watch(() => route.fullPath, (path) => {
   chatWindows.activeTab = ''
   const key = routeTabKey.value
   const hit = routeTabs.value.find((tab) => tab.key === key)
-  if (hit) hit.path = path
+  if (hit) {
+    hit.path = path
+    hit.label = String(route.meta.title)
+  }
   else routeTabs.value.push({ key, label: String(route.meta.title), path })
 }, { immediate: true, flush: 'sync' })
 
@@ -74,17 +163,38 @@ function selectWorkspaceTab(key: string): void {
 
 function closeGlobalPanel(key: string): void {
   if (chatWindows.activeTab === key) chatWindows.activeTab = ''
+  panelWorkspace.removePanel(key)
   if (key === 'global-agent') {
     globalAgentId.value = ''
     globalAgentTab.value = 'chat'
   } else globalChatId.value = ''
+  if (chatWindows.activeTab === PANEL_BOARD_KEY
+    && !chatWindows.windows.some((item) => item.presentation === 'board')
+    && !globalPanels.value.some((item) => item.key !== key && globalModes.value[item.key] === 'board')
+    && !toolPanels.value.length) {
+    chatWindows.activeTab = ''
+  }
 }
 
 function setGlobalPresentation(key: string, id: string, mode: ChatPresentation): void {
+  if (mode === 'board' && !desktopAssignments.value[key]) {
+    assignPanelToDesktop(key, desktopsOnPage.value[0]?.id || desktops.value[0]?.id || 'desktop-1')
+  }
   globalModes.value[key] = mode
   chatWindows.rememberPresentation(id, mode)
   if (mode === 'tab') chatWindows.activeTab = key
+  else if (mode === 'board') chatWindows.activeTab = PANEL_BOARD_KEY
   else if (chatWindows.activeTab === key) chatWindows.activeTab = ''
+  else if (chatWindows.activeTab === PANEL_BOARD_KEY
+    && !chatWindows.windows.some((item) => item.presentation === 'board')
+    && !globalPanels.value.some((item) => item.key !== key && globalModes.value[item.key] === 'board')
+    && !toolPanels.value.length) {
+    chatWindows.activeTab = ''
+  }
+}
+
+function hideBoardPanel(key: string): void {
+  panelWorkspace.hide(key)
 }
 
 function closeWorkspaceTab(key: string): void {
@@ -96,21 +206,21 @@ function closeWorkspaceTab(key: string): void {
     const replacement = routeTabs.value[Math.max(0, index - 1)]
     if (wasCurrent && replacement) void router.push(replacement.path)
   } else if (globalPanels.value.some((item) => item.key === key)) closeGlobalPanel(key)
-  else chatWindows.close(key)
+  else closeChatWindow(key)
 }
 
 
 // 右侧会话 / 角色栏：默认 320px，可拖拽、可收起；状态跨刷新保留。
 const DOCK_KEY = 'atlasx.dock.v1'
 const dockCollapsed = ref(false)
-const dockWidth = ref(320)
+const dockWidth = ref(288)
 const RAIL_COLLAPSED_KEY = 'atlasx.rail.collapsed.v1'
 const railCollapsed = ref(false)
 try {
   railCollapsed.value = localStorage.getItem(RAIL_COLLAPSED_KEY) === '1'
   const saved = JSON.parse(localStorage.getItem(DOCK_KEY) || '{}')
   if (typeof saved.collapsed === 'boolean') dockCollapsed.value = saved.collapsed
-  if (Number.isFinite(saved.width)) dockWidth.value = Math.min(720, Math.max(320, Number(saved.width)))
+  if (Number.isFinite(saved.width)) dockWidth.value = Math.min(560, Math.max(248, Number(saved.width)))
 } catch { /* ignore */ }
 const mobileDockOpen = ref(false)
 watch(() => route.fullPath, () => { mobileDockOpen.value = false })
@@ -211,7 +321,7 @@ function toggleDock(): void {
 
 function resizeDock(width: number): void {
   dockCollapsed.value = false
-  dockWidth.value = Math.min(720, Math.max(320, Math.round(width)))
+  dockWidth.value = Math.min(560, Math.max(248, Math.round(width)))
   saveDockState()
 }
 // 启动动画：默认固定展示 5s（可点击跳过），后续界面在它背后并行加载。
@@ -254,10 +364,12 @@ function openConversationIds(): Set<string> {
   const active = chatWindows.activeTab
   const ids = new Set<string>()
   for (const item of chatWindows.windows) {
-    if (item.conversationId && (item.presentation !== 'tab' || item.key === active)) ids.add(item.conversationId)
+    if (item.conversationId && (item.presentation !== 'tab' && item.presentation !== 'board'
+      || item.key === active || (item.presentation === 'board' && active === PANEL_BOARD_KEY && !boardHidden.value[item.key]))) ids.add(item.conversationId)
   }
   for (const panel of globalPanels.value) {
-    if (globalModes.value[panel.key] !== 'tab' || panel.key === active) ids.add(panel.id)
+    if ((globalModes.value[panel.key] !== 'tab' && globalModes.value[panel.key] !== 'board')
+      || panel.key === active || (globalModes.value[panel.key] === 'board' && active === PANEL_BOARD_KEY && !boardHidden.value[panel.key])) ids.add(panel.id)
   }
   return ids
 }
@@ -492,18 +604,64 @@ onMounted(async () => {
       <div id="workspace-content" class="workspace-content" role="tabpanel"
         :aria-labelledby="`workspace-tab-${activeWorkspaceTab}`">
         <div v-show="!chatWindows.activeTab" class="workspace-view"><router-view /></div>
-        <div id="workspace-chat" v-show="chatWindows.activeTab" class="workspace-view" />
+        <div id="workspace-chat" v-show="chatWindows.activeTab && chatWindows.activeTab !== PANEL_BOARD_KEY" class="workspace-view" />
+        <section id="workspace-board" v-show="chatWindows.activeTab === PANEL_BOARD_KEY" class="workspace-view panel-board-view" aria-label="面板工作区">
+          <header class="panel-board-toolbar">
+            <div class="panel-board-heading"><b>多桌面</b><span>桌面持续并行运行，每屏最多显示四个</span></div>
+            <div class="desktop-page-controls">
+              <button type="button" aria-label="上一组桌面" :disabled="desktopPage <= 0" @click="desktopPage--">‹</button>
+              <span>{{ desktopPage + 1 }} / {{ desktopPages }}</span>
+              <button type="button" aria-label="下一组桌面" :disabled="desktopPage >= desktopPages - 1" @click="desktopPage++">›</button>
+              <button type="button" class="desktop-add" title="新建一个桌面" @click="addDesktop">＋ 新建桌面</button>
+            </div>
+            <div class="panel-board-controls" aria-label="已隐藏的面板">
+              <button v-for="panel in boardPanels" :key="panel.key" type="button"
+                :class="{ hidden: panel.hidden }" :aria-pressed="!panel.hidden"
+                :title="panel.hidden ? `显示 ${panel.title}` : `隐藏 ${panel.title}`"
+                @click="toggleBoardPanel(panel.key)">{{ panel.title }}</button>
+            </div>
+            <span>{{ desktops.length }} 个桌面 · {{ boardPanels.length }} 个面板</span>
+          </header>
+          <div class="desktop-overview" :class="boardLayoutClass">
+            <section v-for="(desktop, index) in desktops" :key="desktop.id" v-show="Math.floor(index / 4) === desktopPage" class="desktop-card">
+              <header class="desktop-card-head">
+                <input v-model="desktop.name" :aria-label="`桌面 ${index + 1} 名称`" @change="saveDesktopName(desktop.id, $event)" />
+                <details class="panel-add-menu">
+                  <summary :aria-label="`向${desktop.name}添加面板`" title="向此桌面添加面板">＋ 添加面板</summary>
+                  <div>
+                    <button type="button" @click="addToolPanel('browser', $event, desktop.id)">浏览器</button>
+                    <button type="button" @click="addToolPanel('terminal', $event, desktop.id)">终端</button>
+                    <button type="button" @click="addToolPanel('tasks', $event, desktop.id)">协作中心</button>
+                    <button type="button" @click="addToolPanel('conversations', $event, desktop.id)">会话</button>
+                    <button type="button" @click="addToolPanel('schedules', $event, desktop.id)">定时任务</button>
+                    <button type="button" @click="addToolPanel('workspaces', $event, desktop.id)">工作区</button>
+                    <button type="button" @click="addToolPanel('organization', $event, desktop.id)">组织</button>
+                  </div>
+                </details>
+                <span>{{ boardPanels.filter((panel) => panel.desktopId === desktop.id).length }} 个面板</span>
+                <button v-if="desktops.length > 1" type="button" :aria-label="`关闭${desktop.name}`" @click="removeDesktop(desktop.id)">×</button>
+              </header>
+              <div :id="`desktop-panels-${desktop.id}`" class="desktop-panels" :class="desktopPanelLayoutClass(desktop.id)"
+                @dragover.prevent @drop="dropBoardPanel(desktop.id, $event)">
+                <WorkspaceToolPanel v-for="panel in toolPanels.filter((item) => item.desktopId === desktop.id)" :key="panel.key"
+                  v-show="!panel.hidden" :panel="panel" :style="{ order: panelWorkspace.orderOf(panel.key, boardPanels.findIndex((item) => item.key === panel.key)) }"
+                  :desktops="desktops" :workspaces="data.workspaces" :conversations="data.conversations"
+                  @patch="patchToolPanel" @hide="(key) => patchToolPanel(key, { hidden: true })" @close="closeToolPanel" />
+              </div>
+            </section>
+          </div>
+        </section>
       </div>
     </main>
-    <button v-if="mobileDockOpen" class="mobile-dock-backdrop" type="button" aria-label="关闭协作中心"
-      @click="mobileDockOpen = false" />
     <OnlineRoles id="activity-dock" :collapsed="dockCollapsed && !mobileDockOpen"
       @toggle="toggleDock" @resize="resizeDock" @open-chat="mobileDockOpen = false" />
+    <button v-if="mobileDockOpen" class="mobile-dock-backdrop" type="button" aria-label="关闭协作中心"
+      @click="mobileDockOpen = false" />
   </div>
 
   <Teleport v-for="win in chatWindows.windows" :key="win.key"
-    :to="win.presentation === 'tab' ? '#workspace-chat' : 'body'">
-    <ChatPanel v-show="win.presentation !== 'tab' || chatWindows.activeTab === win.key"
+    :to="win.presentation === 'tab' ? '#workspace-chat' : win.presentation === 'board' ? `#desktop-panels-${desktopFor(win.key)}` : 'body'">
+    <ChatPanel v-show="win.presentation === 'board' ? chatWindows.activeTab === PANEL_BOARD_KEY && !boardHidden[win.key] : win.presentation !== 'tab' || chatWindows.activeTab === win.key"
       :conversation-id="win.conversationId"
       :window-key="win.key"
       :session-root-id="win.sessionRootId"
@@ -514,29 +672,45 @@ onMounted(async () => {
       :draft-workspace-id="win.workspaceId || ''"
       :draft-team-id="win.teamId || ''"
       :presentation="win.presentation"
+      :board-panel-key="win.key"
+      :panel-layout="panelLayouts[win.key]"
+      :style="{ order: panelWorkspace.orderOf(win.key, boardPanels.findIndex((item) => item.key === win.key)) }"
+      :desktop-id="desktopFor(win.key)"
+      :desktop-options="desktops"
       :popup="win.popup"
       @update:popup="(popup) => chatWindows.setPopup(win.key, popup)"
       @title="(title) => chatWindows.setTitle(win.key, title)"
-      @update:presentation="(mode) => chatWindows.setPresentation(win.key, mode)"
+      @update:presentation="(mode) => setWindowPresentation(win.key, mode)"
       @switch-tab="(tabKey) => chatWindows.activateTab(win.key, tabKey)"
       @add-tab="chatWindows.addTab(win.key)"
       @draft-text="(text) => chatWindows.rememberTabText(win.key, text)"
-      @close="chatWindows.close(win.key)"
+      @close="closeChatWindow(win.key)"
+      @board-hide="hideBoardPanel(win.key)"
+      @desktop-change="(id) => assignPanelToDesktop(win.key, id)"
+      @panel-layout-change="(layout) => updateChatPanelLayout(win.key, layout)"
       @promoted="(id) => chatWindows.promote(win.key, id)"
       @draft-workspace="(id) => win.workspaceId = id"
     />
   </Teleport>
 
   <Teleport v-for="panel in globalPanels" :key="panel.key"
-    :to="globalModes[panel.key] === 'tab' ? '#workspace-chat' : 'body'">
-    <ChatPanel v-show="globalModes[panel.key] !== 'tab' || chatWindows.activeTab === panel.key"
+    :to="globalModes[panel.key] === 'tab' ? '#workspace-chat' : globalModes[panel.key] === 'board' ? `#desktop-panels-${desktopFor(panel.key)}` : 'body'">
+    <ChatPanel v-show="globalModes[panel.key] === 'board' ? chatWindows.activeTab === PANEL_BOARD_KEY && !boardHidden[panel.key] : globalModes[panel.key] !== 'tab' || chatWindows.activeTab === panel.key"
       :conversation-id="panel.id" :initial-tab="panel.agent ? globalAgentTab : 'chat'"
       :global-agent="panel.agent" :global-conversation="!panel.agent"
       :presentation="globalModes[panel.key]"
+      :board-panel-key="panel.key"
+      :panel-layout="panelLayouts[panel.key]"
+      :style="{ order: panelWorkspace.orderOf(panel.key, boardPanels.findIndex((item) => item.key === panel.key)) }"
+      :desktop-id="desktopFor(panel.key)"
+      :desktop-options="desktops"
       :popup="chatWindows.popupFor(panel.id)"
       @update:popup="(popup) => chatWindows.rememberPopup(panel.id, popup)"
       @update:presentation="(mode) => setGlobalPresentation(panel.key, panel.id, mode)"
       @close="closeGlobalPanel(panel.key)"
+      @board-hide="hideBoardPanel(panel.key)"
+      @desktop-change="(id) => assignPanelToDesktop(panel.key, id)"
+      @panel-layout-change="(layout) => updateChatPanelLayout(panel.key, layout)"
     />
   </Teleport>
 
@@ -545,9 +719,9 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.app.flat { grid-template-columns: 196px minmax(0, 1fr) min(var(--dock-width), 36vw); }
+.app.flat { grid-template-columns: minmax(0, var(--rail-width, 196px)) minmax(0, 1fr) minmax(0, var(--dock-width)); }
 @media (max-width: 1210px) {
-  .app.flat { grid-template-columns: 64px minmax(0, 1fr) min(var(--dock-width), 33vw); }
+  .app.flat { grid-template-columns: 64px minmax(0, 1fr) minmax(0, var(--dock-width)); }
 }
 @media (max-width: 840px) {
   .app.flat { grid-template-columns: 52px minmax(0, 1fr); }

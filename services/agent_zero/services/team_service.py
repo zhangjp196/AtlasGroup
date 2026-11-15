@@ -588,6 +588,8 @@ def delete_team(team_id: str) -> bool:
             text(f"DELETE FROM {_q('permission_scope_grants')} WHERE team_id = :id"),
             {"id": team_id},
         )
+        # 群组机器人绑定与角色使用相同的删除生命周期；历史会话本身仍保留。
+        zero_store.clear_bot_target_bindings(db, "group", team_id)
         db.execute(text(f"DELETE FROM {_q('agent_teams')} WHERE id = :id"),
                    {"id": team_id})
         db.commit()

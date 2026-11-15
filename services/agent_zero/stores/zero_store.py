@@ -391,6 +391,26 @@ def upsert_role(row: Dict[str, Any]) -> Dict[str, Any]:
     return get_role(rid) or {}
 
 
+def clear_bot_target_bindings(db: Any, target_type: str, target_id: str) -> None:
+    """在实体删除事务中清理机器人绑定和 peer 路由；不删除历史会话。"""
+    db.execute(
+        text(
+            f"DELETE FROM {_q('bot_routes')} WHERE bot_id IN ("
+            f"SELECT id FROM {_q('conversation_bots')} "
+            "WHERE target_type = :target_type AND target_id = :target_id)"
+        ),
+        {"target_type": target_type, "target_id": target_id},
+    )
+    db.execute(
+        text(
+            f"UPDATE {_q('conversation_bots')} "
+            "SET target_type = NULL, target_id = NULL "
+            "WHERE target_type = :target_type AND target_id = :target_id"
+        ),
+        {"target_type": target_type, "target_id": target_id},
+    )
+
+
 def delete_role(role_id: str) -> bool:
     # 角色删除时带走它的专属技能（全局技能不受影响）。
     try:
@@ -401,6 +421,9 @@ def delete_role(role_id: str) -> bool:
         logger.debug("清理角色专属技能失败（忽略）: %s", e)
     SessionLocal = get_session_local()
     with SessionLocal() as db:
+        # 角色也是机器人绑定目标。移除目标时同步解绑并清除外部聊天路由，
+        # 防止机器人继续尝试向已经不存在的角色创建会话。
+        clear_bot_target_bindings(db, "role", role_id)
         db.execute(text(f"DELETE FROM {_q('roles')} WHERE id = :id"), {"id": role_id})
         db.commit()
     return True

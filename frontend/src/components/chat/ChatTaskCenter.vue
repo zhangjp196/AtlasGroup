@@ -30,6 +30,8 @@ const dispatchGoal = ref('')
 const dispatchMember = ref('')
 const dispatching = ref(false)
 let timer = 0
+let metaRequest = 0
+let workRequest = 0
 
 const team = computed<Team | null>(() => {
   const tid = String(conv.value?.team_id || '')
@@ -65,13 +67,18 @@ function statusLabel(status?: string): string {
 }
 
 async function loadMeta(): Promise<void> {
-  const known = dataStore.conversations.find((item) => item.id === props.conversationId)
-  if (known) conv.value = known
+  const conversationId = props.conversationId
+  const requestId = ++metaRequest
+  const known = dataStore.conversations.find((item) => item.id === conversationId)
+  conv.value = known || null
   try {
-    conv.value = await api<Conversation>(`/conversations/${encodeURIComponent(props.conversationId)}`)
+    const fresh = await api<Conversation>(`/conversations/${encodeURIComponent(conversationId)}`)
+    if (requestId !== metaRequest || conversationId !== props.conversationId) return
+    conv.value = fresh
   } catch {
-    /* 保留列表里的快照 */
+    /* 保留当前会话的列表快照；不能沿用上一个会话的元数据。 */
   }
+  if (requestId !== metaRequest || conversationId !== props.conversationId) return
   if (!members.value.length) dispatchMember.value = ''
   else if (!members.value.some((member) => member.id === dispatchMember.value)) {
     dispatchMember.value = String(members.value[0].id || '')
@@ -79,21 +86,29 @@ async function loadMeta(): Promise<void> {
 }
 
 async function refreshWork(): Promise<void> {
-  if (!props.conversationId) return
+  const conversationId = props.conversationId
+  if (!conversationId) return
+  const requestId = ++workRequest
   workLoading.value = !workItems.value.length
   try {
     const out = await api<{ items?: WorkItem[] }>(
-      `/work-items?conversation_id=${encodeURIComponent(props.conversationId)}&limit=80`,
+      `/work-items?conversation_id=${encodeURIComponent(conversationId)}&limit=80`,
     )
+    if (requestId !== workRequest || conversationId !== props.conversationId) return
     workItems.value = out.items || []
     if (workDetail.value) {
       const fresh = workItems.value.find((item) => item.id === workDetail.value?.id)
-      if (fresh) workDetail.value = fresh
+      workDetail.value = fresh || null
     }
   } catch {
-    workItems.value = []
+    if (requestId === workRequest && conversationId === props.conversationId) {
+      workItems.value = []
+      workDetail.value = null
+    }
   } finally {
-    workLoading.value = false
+    if (requestId === workRequest && conversationId === props.conversationId) {
+      workLoading.value = false
+    }
   }
 }
 
@@ -104,19 +119,23 @@ async function refresh(): Promise<void> {
 async function dispatchTask(): Promise<void> {
   const goal = dispatchGoal.value.trim()
   if (!goal || dispatching.value) return
+  const conversationId = props.conversationId
+  const assignee = assigneeName.value
   dispatching.value = true
   try {
-    await api(`/conversations/${encodeURIComponent(props.conversationId)}/team-tasks`, {
+    await api(`/conversations/${encodeURIComponent(conversationId)}/team-tasks`, {
       method: 'POST',
       body: {
         goal,
         member_id: members.value.length ? dispatchMember.value : undefined,
       },
     })
-    dispatchGoal.value = ''
-    app.toast(`已派发给 ${assigneeName.value}，后台执行中`, 'ok', 3000)
-    await refreshWork()
-    emit('changed')
+    app.toast(`已派发给 ${assignee}，后台执行中`, 'ok', 3000)
+    if (props.conversationId === conversationId) {
+      dispatchGoal.value = ''
+      await refreshWork()
+      emit('changed')
+    }
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad', 5000)
   } finally {
@@ -132,20 +151,33 @@ function close(): void {
   emit('close')
 }
 
-watch(() => [props.open, props.conversationId], ([open]) => {
+watch(() => ({ open: props.open, conversationId: props.conversationId }),
+  ({ open, conversationId }, previous) => {
   if (open) {
     tab.value = 'runs'
+    if (!previous?.open || conversationId !== previous.conversationId) {
+      metaRequest += 1
+      workRequest += 1
+      conv.value = dataStore.conversations.find((item) => item.id === conversationId) || null
+      workItems.value = []
+      workDetail.value = null
+      dispatchGoal.value = ''
+      dispatchMember.value = ''
+      workLoading.value = true
+    }
     void refresh()
     if (timer) window.clearInterval(timer)
     timer = window.setInterval(() => {
       if (props.open) void refreshWork()
     }, 3000)
   } else {
+    metaRequest += 1
+    workRequest += 1
     window.clearInterval(timer)
     timer = 0
     workDetail.value = null
   }
-}, { immediate: true })
+  }, { immediate: true })
 
 onBeforeUnmount(() => window.clearInterval(timer))
 </script>
@@ -156,7 +188,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
       <span class="tc-mark">▦</span>
       <div class="tc-title">
         <b>任务中心</b>
-        <span>{{ title || '当前会话' }} · 执行与工单统一查看</span>
+        <span>{{ title || '当前会话' }} · 执行与任务统一查看</span>
       </div>
       <div class="tc-head-actions">
         <span v-if="attentionItems.length" class="tc-chip danger">{{ attentionItems.length }} 需要你</span>
@@ -172,7 +204,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
       </button>
       <button class="tc-tab" :class="{ on: tab === 'work' }" type="button" role="tab"
         :aria-selected="tab === 'work'" @click="tab = 'work'">
-        <span class="tc-tab-dot work" />工单
+        <span class="tc-tab-dot work" />任务
         <span v-if="openItems.length" class="tc-tab-count">{{ openItems.length }}</span>
       </button>
       <button class="tc-tab" :class="{ on: tab === 'changes' }" type="button" role="tab"
@@ -225,9 +257,9 @@ onBeforeUnmount(() => window.clearInterval(timer))
               <span class="tc-work-go">›</span>
             </span>
           </button>
-          <div v-if="workLoading" class="tc-empty">加载工单…</div>
+          <div v-if="workLoading" class="tc-empty">加载任务…</div>
           <div v-else-if="!workItems.length" class="tc-empty">
-            这个会话还没有工单。派发后台任务会自动建单。
+            这个会话还没有任务。派发后台任务后会自动出现在这里。
           </div>
         </div>
 

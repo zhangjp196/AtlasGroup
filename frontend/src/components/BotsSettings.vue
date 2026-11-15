@@ -40,6 +40,7 @@ const data = useDataStore()
 const chatWindows = useChatWindowsStore()
 const items = ref<Bot[]>([])
 const selected = reactive<Record<string, string>>({})
+const persistedTargets = reactive<Record<string, string>>({})
 const conversations = reactive<Record<string, BotConversation[]>>({})
 const provider = ref<Bot['provider']>('feishu')
 const account = ref('')
@@ -78,8 +79,9 @@ function targetValue(bot: Bot): string {
   return bot.target_type && bot.target_id ? `${bot.target_type}:${bot.target_id}` : ''
 }
 function targetName(bot: Bot): string {
+  if (!bot.bound) return '尚未绑定'
   const key = targetValue(bot)
-  return targetOptions.value.find((option) => option.value === key)?.label || '尚未绑定'
+  return targetOptions.value.find((option) => option.value === key)?.label || '绑定目标已删除或不可用'
 }
 
 async function refresh(): Promise<void> {
@@ -87,7 +89,11 @@ async function refresh(): Promise<void> {
     const result = await api<{ items: Bot[] }>('/bots')
     items.value = result.items || []
     await Promise.all(items.value.map(async (bot) => {
-      if (!selected[bot.id]) selected[bot.id] = targetValue(bot)
+      const persisted = targetValue(bot)
+      if (!(bot.id in selected) || selected[bot.id] === persistedTargets[bot.id]) {
+        selected[bot.id] = persisted
+      }
+      persistedTargets[bot.id] = persisted
       conversations[bot.id] = bot.bound
         ? (await api<{ items: BotConversation[] }>(`/bots/${encodeURIComponent(bot.id)}/conversations`)).items || []
         : []
@@ -164,7 +170,7 @@ async function remove(bot: Bot): Promise<void> {
   busy.value = bot.id; error.value = ''
   try {
     await api('/bots/' + encodeURIComponent(bot.id), { method: 'DELETE' })
-    delete selected[bot.id]; delete conversations[bot.id]
+    delete selected[bot.id]; delete persistedTargets[bot.id]; delete conversations[bot.id]
     app.toast('机器人已删除'); await refresh()
   } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
   finally { busy.value = '' }

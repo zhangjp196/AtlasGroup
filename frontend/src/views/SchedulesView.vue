@@ -9,6 +9,7 @@ import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
 import type { ScheduledTask } from '@/api/types'
 import { shortTime } from '@/lib/format'
+import { workspaceLabel } from '@/lib/workspaceOptions'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -98,7 +99,7 @@ function roleName(task: ScheduledTask): string {
 }
 
 function workspaceName(task: ScheduledTask): string {
-  return data.workspaces.find((ws) => ws.id === task.workspace_id)?.name || '默认工作区'
+  return workspaceLabel(task.workspace_id, data.workspaces)
 }
 
 function openCreate(): void {

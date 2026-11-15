@@ -70,7 +70,7 @@ const labels: Record<CreateKind, string> = {
   ws: '添加工作区',
   role: '新建角色',
   team: '新建群组',
-  work: '新建工单',
+  work: '新建任务',
 }
 
 watch(() => [props.open, props.kind], () => {

@@ -89,7 +89,7 @@ async function setStatus(status: string): Promise<void> {
   try {
     await api(`/work-items/${encodeURIComponent(props.item.id)}`, { method: 'PATCH', body: { status } })
     await data.loadWork()
-    app.toast(status === 'done' ? '工单已完成' : status === 'closed' ? '工单已关闭' : '工单已重新打开')
+    app.toast(status === 'done' ? '任务已完成' : status === 'closed' ? '任务已关闭' : '任务已重新打开')
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
   } finally {
@@ -99,12 +99,12 @@ async function setStatus(status: string): Promise<void> {
 
 async function remove(): Promise<void> {
   if (!props.item || busy.value) return
-  if (!window.confirm(`删除工单「${props.item.title || ''}」？已创建的会话不会被删除。`)) return
+  if (!window.confirm(`删除任务「${props.item.title || ''}」？已创建的会话不会被删除。`)) return
   busy.value = true
   try {
     await api(`/work-items/${encodeURIComponent(props.item.id)}`, { method: 'DELETE' })
     await data.loadWork()
-    app.toast('工单已删除')
+    app.toast('任务已删除')
     emit('deleted', props.item.id)
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
@@ -122,10 +122,10 @@ function onSaved(): void {
 <template>
   <Teleport to="body">
     <div v-show="open" class="drawer-scrim" @click="close" />
-    <aside v-show="open" class="side-drawer" aria-label="工单详情">
+    <aside v-show="open" class="side-drawer" aria-label="任务详情">
       <header class="side-drawer-head">
         <div>
-          <h2>工单</h2>
+          <h2>任务</h2>
           <p>{{ item?.title || '' }} · {{ badge }}</p>
         </div>
         <button class="iconbtn" type="button" title="关闭" aria-label="关闭" @click="close">
@@ -145,8 +145,8 @@ function onSaved(): void {
               </svg>
             </span>
             <div class="sa-detail-title">
-              <div class="sa-eyebrow">工单 · {{ item.source || 'manual' }}</div>
-              <h1>{{ item.title || '未命名工单' }}</h1>
+              <div class="sa-eyebrow">任务 · {{ item.source || 'manual' }}</div>
+              <h1>{{ item.title || '未命名任务' }}</h1>
             </div>
             <span class="work-badge" :class="item.status">{{ badge }}</span>
           </div>
@@ -175,12 +175,12 @@ function onSaved(): void {
             <span class="sa-attention-ico danger">
               <svg viewBox="0 0 24 24"><path d="M12 4 3 20h18Z" /><path d="M12 10v4M12 17h.01" /></svg>
             </span>
-            <span>需要你：{{ item.attention_reason || '处理这个工单' }}</span>
+            <span>需要你：{{ item.attention_reason || '处理这个任务' }}</span>
             <button v-if="item.conversation_id" class="btn primary" type="button" @click="openConversation">打开会话处理</button>
             <button v-if="item.conversation_id && !waiting" class="btn" type="button" @click="dispatch">重新派活</button>
           </div>
 
-          <div class="sa-detail-label">工单说明</div>
+          <div class="sa-detail-label">任务说明</div>
           <div class="work-body">
             <Markdown v-if="item.body" :text="String(item.body)" />
             <span v-else>（没有补充说明）</span>
@@ -196,7 +196,7 @@ function onSaved(): void {
             <span v-if="item.run_id"><i>run</i><code>{{ item.run_id }}</code></span>
             <span v-if="item.conversation_id"><i>会话</i><code>{{ item.conversation_id }}</code></span>
             <span v-if="item.finished_at"><i>结束</i>{{ item.finished_at }}</span>
-            <span>只展示需要人的工单；其余在后台推进。</span>
+            <span>只展示需要你处理的任务；其余任务会在后台推进。</span>
           </div>
         </article>
       </div>

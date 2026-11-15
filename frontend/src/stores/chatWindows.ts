@@ -1,12 +1,13 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { api } from '@/api/client'
-import type { Conversation, ListResponse, Team } from '@/api/types'
+import type { Conversation, ListResponse, Role, Team } from '@/api/types'
 import { GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE } from '@/lib/derive'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
-export type ChatPresentation = 'popup' | 'drawer' | 'tab'
+export type ChatPresentation = 'popup' | 'drawer' | 'tab' | 'board'
+export const PANEL_BOARD_KEY = 'workspace:panel-board'
 
 export type ChatPopup = { x: number; y: number; w: number; h: number }
 type ChatLayout = { presentation?: ChatPresentation; popup?: ChatPopup }
@@ -194,6 +195,7 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
   function focus(key: string): void {
     const hit = windows.value.find((item) => item.key === key)
     if (hit?.presentation === 'tab') activeTab.value = key
+    else if (hit?.presentation === 'board') activeTab.value = PANEL_BOARD_KEY
   }
 
   function setTitle(key: string, title: string): void {
@@ -210,9 +212,11 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     hit.presentation = presentation
     rememberPresentation(layoutTarget(hit), presentation)
     if (presentation === 'tab') activeTab.value = key
+    else if (presentation === 'board') activeTab.value = PANEL_BOARD_KEY
     else {
-      if (activeTab.value === key) activeTab.value = ''
-      windows.value = windows.value.filter((item) => item.key === key || item.presentation === 'tab')
+      if (activeTab.value === key) activeTab.value = windows.value.some((item) => item.key !== key && item.presentation === 'board')
+        ? PANEL_BOARD_KEY : ''
+      windows.value = windows.value.filter((item) => item.key === key || item.presentation === 'tab' || item.presentation === 'board')
     }
   }
 
@@ -224,8 +228,8 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
       focus(same.key)
       return
     }
-    if (next.presentation !== 'tab') {
-      windows.value = windows.value.filter((item) => item.presentation === 'tab')
+    if (next.presentation !== 'tab' && next.presentation !== 'board') {
+      windows.value = windows.value.filter((item) => item.presentation === 'tab' || item.presentation === 'board')
     }
     windows.value.push(next)
     focus(next.key)
@@ -374,6 +378,84 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     push(challenge)
   }
 
+  function isNonGlobalConversation(conv: Conversation): boolean {
+    return ![GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE].includes(String(conv.zone || ''))
+  }
+
+  async function findEntityConversation(
+    query: string,
+    matches: (conv: Conversation) => boolean,
+    workspaceId: string,
+    limit: number,
+  ): Promise<Conversation | null> {
+    const preferred = (conv: Conversation) => String(conv.workspace_id || '') === workspaceId
+    const local = useDataStore().conversations.filter(matches)
+    const current = local.find(preferred) || local[0]
+    if (current) return current
+    try {
+      const result = await api<ListResponse<Conversation>>(
+        `/conversations?${query}&roots_only=1&limit=${limit}`,
+      )
+      const items = (result.items || []).filter(matches)
+      return items.find(preferred) || items[0] || null
+    } catch {
+      // 会话查询失败时仍允许打开草稿；发送消息后会正常创建会话。
+      return null
+    }
+  }
+
+  function newRoleConversation(role: Role): boolean {
+    if (role.scope === 'temporary') {
+      if (role.session_id) void openConversation(role.session_id)
+      else useAppStore().toast('临时角色属于某个会话，请在该会话里使用', 'bad')
+      return false
+    }
+    openDraft(role.id, { workspaceId: String(role.workspace_id || '') })
+    return true
+  }
+
+  function newGroupConversation(team: Team): boolean {
+    if (!team.members?.length || !team.leader?.id) {
+      useAppStore().toast('请先在群组资料中设置群主和成员', 'bad')
+      return false
+    }
+    openDraft(team.leader.id, {
+      teamId: team.id,
+      workspaceId: String(team.workspace_id || ''),
+    })
+    return true
+  }
+
+  const openingRoles = new Set<string>()
+  async function openRole(role: Role): Promise<boolean> {
+    if (role.scope === 'temporary') {
+      if (role.session_id) await openConversation(role.session_id)
+      else useAppStore().toast('临时角色属于某个会话，请在该会话里使用', 'bad')
+      return Boolean(role.session_id)
+    }
+    if (openingRoles.has(role.id)) return false
+    openingRoles.add(role.id)
+    try {
+      const isRoleConversation = (conv: Conversation) => {
+        if (!isNonGlobalConversation(conv) || conv.role_id !== role.id) return false
+        if (!conv.team_id) return true
+        const team = useDataStore().teams.find((item) => item.id === conv.team_id)
+        return String(team?.kind || '') === 'participants'
+      }
+      const existing = await findEntityConversation(
+        `role_id=${encodeURIComponent(role.id)}`,
+        isRoleConversation,
+        String(role.workspace_id || ''),
+        50,
+      )
+      if (existing) await openConversation(existing.id)
+      else newRoleConversation(role)
+      return true
+    } finally {
+      openingRoles.delete(role.id)
+    }
+  }
+
   const openingGroups = new Set<string>()
   async function openGroup(team: Team): Promise<boolean> {
     if (!team.members?.length || !team.leader?.id) {
@@ -383,21 +465,14 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     if (openingGroups.has(team.id)) return false
     openingGroups.add(team.id)
     try {
-      const matches = (conv: Conversation) => conv.team_id === team.id
-        && ![GLOBAL_AGENT_ZONE, GLOBAL_CHAT_ZONE].includes(String(conv.zone || ''))
       const ws = String(team.workspace_id || '')
-      const preferred = (conv: Conversation) => String(conv.workspace_id || '') === ws
-      let existing = useDataStore().conversations.filter(matches).find(preferred)
-        || useDataStore().conversations.find(matches)
-      if (!existing) {
-        const result = await api<ListResponse<Conversation>>(
-          `/conversations?team_id=${encodeURIComponent(team.id)}&roots_only=1&limit=20`,
-        ).catch(() => null)
-        const items = (result?.items || []).filter(matches)
-        existing = items.find(preferred) || items[0]
-      }
+      const matches = (conv: Conversation) => conv.team_id === team.id
+        && isNonGlobalConversation(conv)
+      const existing = await findEntityConversation(
+        `team_id=${encodeURIComponent(team.id)}`, matches, ws, 50,
+      )
       if (existing) await openConversation(existing.id)
-      else openDraft(team.leader.id, { teamId: team.id })
+      else newGroupConversation(team)
       return true
     } finally {
       openingGroups.delete(team.id)
@@ -438,7 +513,8 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     const duplicate = windows.value.find((item) => item.key !== key
       && item.tabs.some((other) => other.conversationId === id))
     if (duplicate) {
-      if (activeTab.value === duplicate.key) activeTab.value = hit.presentation === 'tab' ? key : ''
+      if (activeTab.value === duplicate.key) activeTab.value = hit.presentation === 'tab'
+        ? key : hit.presentation === 'board' ? PANEL_BOARD_KEY : ''
       windows.value = windows.value.filter((item) => item.key === key
         || !item.tabs.some((other) => other.conversationId === id))
     }
@@ -543,6 +619,9 @@ export const useChatWindowsStore = defineStore('chatWindows', () => {
     focus,
     openConversation,
     openDraft,
+    openRole,
+    newRoleConversation,
+    newGroupConversation,
     openGroup,
     promote,
     addTab,

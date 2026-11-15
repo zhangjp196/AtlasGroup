@@ -114,13 +114,7 @@ function openSession(conv: Conversation): void {
 
 async function openRoleChat(role: Role): Promise<void> {
   menu.open = false
-  const existing = sessions.value.find((row) => row.role?.id === role.id)
-  if (existing) {
-    openSession(existing.conv)
-    return
-  }
-  chatWindows.openDraft(role.id)
-  emit('open-chat')
+  if (await chatWindows.openRole(role)) emit('open-chat')
 }
 
 function openRoleDetail(role: Role): void {
@@ -245,7 +239,7 @@ async function onMenu(action: string): Promise<void> {
     if (action === 'chat') await openRoleChat(menu.role)
     else if (action === 'draft') {
       menu.open = false
-      chatWindows.openDraft(menu.role.id)
+      chatWindows.newRoleConversation(menu.role)
     } else if (action === 'detail') openRoleDetail(menu.role)
     else if (action === 'offline') await setOffline(menu.role)
     return
@@ -276,7 +270,7 @@ function startResize(event: PointerEvent): void {
   dockStart = { x: event.clientX, w: aside.getBoundingClientRect().width }
   const onMove = (move: PointerEvent): void => {
     if (!dockStart) return
-    const next = Math.min(720, Math.max(320, dockStart.w + (dockStart.x - move.clientX)))
+    const next = Math.min(560, Math.max(248, dockStart.w + (move.clientX - dockStart.x)))
     emit('resize', next)
   }
   const onUp = (): void => {
@@ -293,7 +287,7 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
 
 <template>
   <aside class="side-dock" :class="{ mini: collapsed }" aria-label="协作中心">
-    <span class="rs rs-left" title="拖拽调整宽度" @pointerdown.prevent="startResize" />
+    <span class="rs rs-right" title="拖拽调整宽度" @pointerdown.prevent="startResize" />
     <div v-if="!collapsed" class="dock-title"><h2>协作中心</h2></div>
     <header class="dock-head">
       <button class="dock-toggle" type="button" :title="collapsed ? '展开侧栏' : '收起侧栏'"
@@ -410,12 +404,12 @@ onBeforeUnmount(() => document.removeEventListener('click', closeMenu))
 </template>
 
 <style scoped>
-.side-dock { position: relative; min-width: 0; height: 100%; display: flex; flex-direction: column; border-left: 1px solid var(--line-soft); background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 4%, var(--panel)), var(--panel)); box-shadow: -12px 0 32px color-mix(in srgb, #000 18%, transparent); }
+.side-dock { position: relative; min-width: 0; height: 100%; display: flex; flex-direction: column; border-right: 1px solid var(--line-soft); background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 4%, var(--panel)), var(--panel)); box-shadow: 12px 0 32px color-mix(in srgb, #000 10%, transparent); }
 .side-dock.mini { width: 64px; }
 
 .rs { position: absolute; z-index: 8; touch-action: none; }
-.rs-left { left: -3px; top: 0; bottom: 0; width: 8px; cursor: ew-resize; opacity: 0; }
-.rs-left:hover, .rs-left:active { opacity: .9; background: color-mix(in srgb, var(--accent) 28%, transparent); border-radius: 4px; }
+.rs-right { right: -3px; top: 0; bottom: 0; width: 8px; cursor: ew-resize; opacity: 0; }
+.rs-right:hover, .rs-right:active { opacity: .9; background: color-mix(in srgb, var(--accent) 28%, transparent); border-radius: 4px; }
 
 .dock-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 12px 12px 8px; }
 .dock-toggle { flex: none; width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-2); color: var(--dim); display: grid; place-items: center; cursor: pointer; }

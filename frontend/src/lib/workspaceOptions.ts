@@ -2,6 +2,13 @@ import type { Workspace } from '@/api/types'
 
 export type WorkspaceStatusFilter = 'active' | 'all'
 
+/** 用统一名称展示未指定工作区和已删除工作区，避免不同页面语义不一致。 */
+export function workspaceLabel(id: string | undefined, workspaces: Workspace[]): string {
+  const workspaceId = String(id || '').trim()
+  if (!workspaceId || workspaceId === 'default') return '默认工作区'
+  return workspaces.find((workspace) => workspace.id === workspaceId)?.name || '工作区不存在'
+}
+
 /** 工作区筛选：名称 / 路径 / id 模糊匹配。 */
 export function matchesWorkspace(workspace: Workspace, query: string): boolean {
   const q = query.trim().toLowerCase()

@@ -48,7 +48,7 @@ const form = reactive({
 })
 
 const isNew = computed(() => !props.item)
-const title = computed(() => props.item ? '编辑工单' : '新建工单')
+const title = computed(() => props.item ? '编辑任务' : '新建任务')
 
 const statuses = [
   { value: 'inbox', label: '待分派' },
@@ -75,7 +75,7 @@ async function save(): Promise<void> {
   if (saving.value) return
   const title = form.title.trim()
   if (!title) {
-    app.toast('工单标题不能为空', 'bad')
+    app.toast('任务标题不能为空', 'bad')
     return
   }
   saving.value = true
@@ -93,7 +93,7 @@ async function save(): Promise<void> {
       ? await api<WorkItem>(`/work-items/${encodeURIComponent(props.item.id)}`, { method: 'PATCH', body })
       : await api<WorkItem>('/work-items', { method: 'POST', body })
     await data.loadWork()
-    app.toast(props.item ? '工单已更新' : '工单已创建')
+    app.toast(props.item ? '任务已更新' : '任务已创建')
     emit('saved', item.id)
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
@@ -125,8 +125,8 @@ async function save(): Promise<void> {
         <WorkspacePicker
           v-model="form.workspace_id"
           :workspaces="data.workspaces"
-          empty-label="使用工单设置"
-          placeholder="使用工单设置"
+          empty-label="使用工作台设置"
+          placeholder="使用工作台设置"
         />
       </div>
       <div class="field">
@@ -137,7 +137,7 @@ async function save(): Promise<void> {
           title="选择角色"
           placeholder="默认角色"
           empty-label="默认角色"
-          empty-hint="使用工单策略里的默认角色"
+          empty-hint="使用工作台执行策略里的默认角色"
         />
       </div>
       <div class="field">

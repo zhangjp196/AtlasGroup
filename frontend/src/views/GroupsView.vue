@@ -11,6 +11,7 @@ import { api } from '@/api/client'
 import type { Conversation, Team } from '@/api/types'
 import { modeLabel } from '@/lib/derive'
 import { compactNumber } from '@/lib/format'
+import { workspaceLabel } from '@/lib/workspaceOptions'
 import { usageSummary } from '@/lib/usage'
 import { useAppStore } from '@/stores/app'
 import { useChatWindowsStore } from '@/stores/chatWindows'
@@ -30,7 +31,7 @@ const menuItems = computed<ContextMenuItem[]>(() => [
   { label: '打开群资料', action: 'detail' },
   { label: '打开群聊', action: 'chat', disabled: !(menu.team?.members || []).length },
   { label: '全部会话（会话中心）', action: 'sessions' },
-  { label: '新建群工单', action: 'work', disabled: !(menu.team?.members || []).length },
+  { label: '新建群组任务', action: 'work', disabled: !(menu.team?.members || []).length },
   { label: '复制群名', action: 'copy' },
   { label: '', action: '', separator: true },
   { label: '解散群聊', action: 'delete', danger: true },
@@ -133,8 +134,7 @@ function teamById(id: string): Team | null {
 }
 
 function workspaceName(id?: string): string {
-  const ws = data.workspaces.find((item) => item.id === String(id || ''))
-  return ws?.name || ''
+  return workspaceLabel(id, data.workspaces)
 }
 
 function openDetail(team: Team): void {
@@ -163,16 +163,7 @@ function openDrawerChat(id: string): void {
 function openDrawerNewChat(id: string): void {
   const team = teamById(id)
   if (!team) return
-  const leader = String(team.leader?.id || '')
-  if (!leader) {
-    app.toast('请先在群组资料中设置群主', 'bad')
-    return
-  }
-  closeDetail()
-  chatWindows.openDraft(leader, {
-    teamId: team.id,
-    workspaceId: String(team.workspace_id || ''),
-  })
+  if (chatWindows.newGroupConversation(team)) closeDetail()
 }
 
 function openWork(team: Team): void {
@@ -192,7 +183,7 @@ function onSaved(): void {
   <div class="canvas-body">
     <div class="group-hero">
       <el-input v-model="query" placeholder="搜索群名 / 简介 / 成员" clearable style="max-width:300px" />
-      <span class="group-mode-hint">点击群卡打开群聊；右键查看群资料 / 群工单。</span>
+      <span class="group-mode-hint">点击群卡打开群聊；右键查看群资料和任务。</span>
     </div>
 
     <div class="group-gallery">
@@ -202,7 +193,7 @@ function onSaved(): void {
         class="group-card"
         role="button"
         tabindex="0"
-        title="点击打开群聊；右键打开群资料 / 群工单"
+        title="点击打开群聊；右键打开群资料和任务"
         @click="openChat(team)"
         @keydown.enter.prevent="openChat(team)"
         @keydown.space.prevent="openChat(team)"
@@ -218,11 +209,11 @@ function onSaved(): void {
         <p class="group-card-count">
           {{ (team.members || []).length }} 个角色
           <span v-if="boundConversations(team.id).length"> · {{ boundConversations(team.id).length }} 条群聊</span>
-          <span v-if="openWorkByTeam.get(team.id)"> · {{ openWorkByTeam.get(team.id) }} 个工单在办</span>
+          <span v-if="openWorkByTeam.get(team.id)"> · {{ openWorkByTeam.get(team.id) }} 个任务在办</span>
           <span v-if="teamTokens(team.id)"> · {{ compactNumber(teamTokens(team.id)) }} tokens</span>
         </p>
         <div class="chips group-name-chips">
-          <span v-if="workspaceName(team.workspace_id)" class="chip">工作区：{{ workspaceName(team.workspace_id) }}</span>
+          <span class="chip">工作区：{{ workspaceName(team.workspace_id) }}</span>
           <span v-for="member in (team.members || []).slice(0, 8)" :key="member.id || member.name" class="chip">
             {{ member.name }}
           </span>

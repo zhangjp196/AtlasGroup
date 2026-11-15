@@ -483,7 +483,7 @@ function onWorkSaved(): void {
 
       <footer class="side-drawer-foot">
         <button class="btn" type="button" @click="openChat">打开群聊</button>
-        <button class="btn" type="button" @click="openWork">新建工单</button>
+        <button class="btn" type="button" @click="openWork">新建任务</button>
         <span class="spacer" />
         <button class="btn" type="button" @click="close">取消</button>
         <button class="btn primary" type="button" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存修改' }}</button>

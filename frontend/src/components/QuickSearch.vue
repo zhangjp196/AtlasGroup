@@ -10,7 +10,7 @@ const dialog = ref<HTMLDialogElement>()
 const query = ref('')
 const selected = ref(0)
 const sections = [
-  ['工单', '/work'], ['会话', '/conv'], ['定时任务', '/schedule'],
+  ['工作台', '/work'], ['会话', '/conv'], ['定时任务', '/schedule'], ['组织', '/organization/roles'],
   ['工作区', '/ws'], ['组织与角色', '/role'], ['群组', '/group'],
   ['设置', '/settings'], ['关于', '/about'],
 ]
@@ -21,11 +21,11 @@ const results = computed(() => {
   if (!terms.length) return pages
   const entries = [
     ...pages,
-    ...data.workItems.map((item) => ({ title: item.title || '未命名工单', path: '/work/' + encodeURIComponent(item.id), type: '工单', keywords: item.body || '' })),
+    ...data.workItems.map((item) => ({ title: item.title || '未命名任务', path: '/work/' + encodeURIComponent(item.id), type: '任务', keywords: item.body || '' })),
     ...data.conversations.map((item) => ({ title: item.title || '未命名会话', path: '/conv/' + encodeURIComponent(item.id), type: '会话', keywords: '' })),
     ...data.workspaces.map((item) => ({ title: item.name || item.id, path: '/ws/' + encodeURIComponent(item.id), type: '工作区', keywords: item.root_path || '' })),
-    ...data.persistentRoles.map((item) => ({ title: item.name || item.id, path: '/role/' + encodeURIComponent(item.id), type: '角色', keywords: item.title || '' })),
-    ...data.groups.map((item) => ({ title: item.name || item.id, path: '/group/' + encodeURIComponent(item.id), type: '群组', keywords: '' })),
+    ...data.persistentRoles.map((item) => ({ title: item.name || item.id, path: '/organization/roles/' + encodeURIComponent(item.id), type: '角色', keywords: item.title || '' })),
+    ...data.groups.map((item) => ({ title: item.name || item.id, path: '/organization/groups/' + encodeURIComponent(item.id), type: '群组', keywords: '' })),
   ]
   return entries.filter(({ title, type, keywords }) => {
     const content = `${title} ${type} ${keywords}`.toLowerCase()
@@ -82,7 +82,7 @@ onUnmounted(() => window.removeEventListener('keydown', onShortcut))
           <input v-model="query" autofocus role="combobox" aria-label="搜索页面和已加载的内容"
             aria-controls="quick-results" :aria-expanded="Boolean(results.length)"
             :aria-activedescendant="results[selected] ? `quick-result-${selected}` : undefined"
-            placeholder="搜索页面、工单、会话或角色…"
+            placeholder="搜索页面、任务、会话、角色或群组…"
             @input="selected = 0" @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)"
             @keydown.enter.prevent="!$event.isComposing && go(results[selected]?.path)" />
         </div>

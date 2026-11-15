@@ -11,6 +11,7 @@ import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
 import type { Role, Skill, ToolItem } from '@/api/types'
 import { DEFAULT_PAGE_SIZE, pageSlice } from '@/lib/paging'
+import { workspaceLabel } from '@/lib/workspaceOptions'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
 
@@ -172,8 +173,7 @@ async function switchWorkspace(value?: string): Promise<void> {
 }
 
 function workspaceName(id?: string): string {
-  const wsId = String(id || '')
-  return data.workspaces.find((ws) => ws.id === wsId)?.name || '默认工作区'
+  return workspaceLabel(id, data.workspaces)
 }
 
 function close(): void {
@@ -386,6 +386,7 @@ async function removeRole(): Promise<void> {
             <h3>会话</h3>
             <span>这个角色的历史会话</span>
             <button class="btn small" type="button" @click="emit('new-chat', role.id)">新会话</button>
+            <button class="btn small" type="button" @click="openChat">打开角色会话</button>
           </div>
           <SessionList
             :role-id="role.id"
@@ -393,6 +394,7 @@ async function removeRole(): Promise<void> {
             class="fill-height"
             empty-text="还没有会话。点「新会话」开始第一条。"
             @open="emit('session', $event)"
+            @changed="data.loadAll()"
           />
         </section>
 
@@ -487,7 +489,7 @@ async function removeRole(): Promise<void> {
       <footer class="side-drawer-foot">
         <button class="btn primary" type="button" @click="openChat">单聊</button>
         <button class="btn" type="button" @click="emit('edit')">编辑</button>
-        <button class="btn" type="button" @click="openWork">新建工单</button>
+        <button class="btn" type="button" @click="openWork">新建任务</button>
         <button v-if="temporary" class="btn" type="button" @click="promote">存为持久角色</button>
         <span class="spacer" />
         <button class="btn" type="button" @click="close">关闭</button>

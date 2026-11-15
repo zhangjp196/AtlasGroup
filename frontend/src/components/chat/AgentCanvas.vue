@@ -41,6 +41,7 @@ const flowWrapEl = ref<HTMLElement | null>(null)
 const vfNodes = computed(() => flowNodes.value)
 const vfEdges = computed(() => flowEdges.value)
 let timer: number | null = null
+let refreshRequest = 0
 let flowSignature = ''
 
 const {
@@ -521,14 +522,17 @@ function syncSelectedRun(): void {
 }
 
 async function refresh(): Promise<void> {
-  if (!props.conversationId) return
+  const conversationId = props.conversationId
+  if (!conversationId) return
+  const requestId = ++refreshRequest
   loading.value = !data.value
   tasksLoading.value = !data.value
   try {
     const [graph, taskData] = await Promise.all([
-      api<AgentGraph>(`/conversations/${encodeURIComponent(props.conversationId)}/graph`),
-      api<{ items: TeamTask[]; running?: number }>(`/conversations/${encodeURIComponent(props.conversationId)}/team-tasks`),
+      api<AgentGraph>(`/conversations/${encodeURIComponent(conversationId)}/graph`),
+      api<{ items: TeamTask[]; running?: number }>(`/conversations/${encodeURIComponent(conversationId)}/team-tasks`),
     ])
+    if (requestId !== refreshRequest || conversationId !== props.conversationId) return
     data.value = graph
     tasks.value = taskData.items || []
     const active = tasks.value.filter((task) => task.status === 'running' || task.status === 'paused')
@@ -546,6 +550,7 @@ async function refresh(): Promise<void> {
     buildFlow()
     syncSelectedRun()
   } catch (error) {
+    if (requestId !== refreshRequest || conversationId !== props.conversationId) return
     data.value = {
       conversation: { title: '画布加载失败' },
       nodes: [],
@@ -553,8 +558,10 @@ async function refresh(): Promise<void> {
     }
     tasks.value = []
   } finally {
-    loading.value = false
-    tasksLoading.value = false
+    if (requestId === refreshRequest && conversationId === props.conversationId) {
+      loading.value = false
+      tasksLoading.value = false
+    }
   }
 }
 
@@ -566,8 +573,19 @@ function stop(): void {
   closeStream()
 }
 
-watch(() => [props.open, props.conversationId], ([open]) => {
+watch(() => ({ open: props.open, conversationId: props.conversationId }),
+  ({ open, conversationId }, previous) => {
+  refreshRequest += 1
   if (open) {
+    if (!previous?.open || conversationId !== previous.conversationId) {
+      data.value = null
+      tasks.value = []
+      selectedTaskId.value = ''
+      selectedRoleId.value = ''
+      selectedRunId.value = ''
+      selectedId.value = ''
+      closeStream()
+    }
     void refresh()
     if (timer) window.clearInterval(timer)
     timer = window.setInterval(() => {
@@ -576,7 +594,7 @@ watch(() => [props.open, props.conversationId], ([open]) => {
   } else {
     stop()
   }
-}, { immediate: true })
+  }, { immediate: true })
 
 watch(selectedTaskId, () => {
   selectedRoleId.value = ''

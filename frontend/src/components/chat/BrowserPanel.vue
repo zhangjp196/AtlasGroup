@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { api } from '@/api/client'
-import { automateEmbeddedBrowser, hasNativeBridge, navigateEmbeddedBrowser } from '@/composables/useNative'
+import { onMounted, ref } from 'vue'
+import { automateEmbeddedBrowser, navigateEmbeddedBrowser } from '@/composables/useNative'
+import { startBrowserCommandBridge } from '@/lib/browserBridge'
 import { useAppStore } from '@/stores/app'
 
 defineProps<{ open: boolean }>()
@@ -17,17 +17,6 @@ const pageStatus = ref('输入网址开始浏览')
 const history = ref<string[]>([])
 const historyIndex = ref(-1)
 const automationOpen = ref(false)
-let stopped = false
-let heartbeatTimer = 0
-
-interface QueuedBrowserCommand {
-  id: string
-  op: string
-  url?: string
-  selector?: string
-  value?: string
-}
-
 function normalizeUrl(input: string): string {
   const raw = input.trim()
   if (!raw) throw new Error('请输入网页地址')
@@ -47,49 +36,8 @@ function showPage(url: string, remember = true): void {
   }
 }
 
-async function commandPump(): Promise<void> {
-  while (!stopped) {
-    if (!hasNativeBridge()) {
-      await new Promise((resolve) => window.setTimeout(resolve, 700))
-      continue
-    }
-    try {
-      const command = await api<QueuedBrowserCommand | null>('/local/browser/next')
-      if (!command) continue
-      let commandResult: unknown = null
-      let error = ''
-      try {
-        if (command.op === 'navigate') {
-          const opened = await navigateEmbeddedBrowser(command.url || '')
-          if (!opened) throw new Error('无法打开桌面内置浏览器')
-          commandResult = { navigated: true, url: command.url || '' }
-        } else {
-          const action = command.op === 'read_text' ? 'text' : command.op
-          commandResult = (await automateEmbeddedBrowser(action, command.selector || '', command.value || '')).result
-        }
-      } catch (cause) {
-        error = cause instanceof Error ? cause.message : String(cause)
-      }
-      await api(`/local/browser/${encodeURIComponent(command.id)}/result`, {
-        method: 'POST', body: { result: commandResult, error },
-      })
-    } catch {
-      if (!stopped) await new Promise((resolve) => window.setTimeout(resolve, 900))
-    }
-  }
-}
-
 onMounted(() => {
-  const ping = () => {
-    if (hasNativeBridge()) void api('/local/browser/heartbeat', { method: 'POST' }).catch(() => undefined)
-  }
-  ping()
-  heartbeatTimer = window.setInterval(ping, 4000)
-  void commandPump()
-})
-onBeforeUnmount(() => {
-  stopped = true
-  window.clearInterval(heartbeatTimer)
+  startBrowserCommandBridge()
 })
 
 function navigate(): void {

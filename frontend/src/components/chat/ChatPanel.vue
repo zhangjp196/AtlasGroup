@@ -50,6 +50,10 @@ const chat = useChat()
 const props = defineProps<{
   conversationId: string
   presentation?: ChatPresentation
+  panelLayout?: { minimized?: boolean; maximized?: boolean }
+  desktopId?: string
+  desktopOptions?: { id: string; name: string }[]
+  boardPanelKey?: string
   popup?: ChatPopup
   globalAgent?: boolean
   globalConversation?: boolean
@@ -68,6 +72,9 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   (e: 'close'): void
+  (e: 'board-hide'): void
+  (e: 'desktop-change', desktopId: string): void
+  (e: 'panel-layout-change', layout: { minimized: boolean; maximized: boolean }): void
   (e: 'title', title: string): void
   (e: 'promoted', conversationId: string): void
   (e: 'draft-workspace', workspaceId: string): void
@@ -453,6 +460,24 @@ const tempOpen = ref(false)
 const tempForm = reactive({ name: '', expertise: '', persona: '' })
 type RightPanel = 'browser' | 'terminal' | 'tasks'
 const activeRightPanel = ref<RightPanel | null>(props.conversationId ? 'tasks' : isDraft.value ? 'browser' : null)
+const browserPanelReady = ref(activeRightPanel.value === 'browser')
+const terminalPanelReady = ref(activeRightPanel.value === 'terminal')
+const boardMinimized = ref(false)
+const boardMaximized = ref(false)
+watch(() => props.panelLayout, (layout) => {
+  boardMinimized.value = Boolean(layout?.minimized)
+  boardMaximized.value = Boolean(layout?.maximized)
+}, { immediate: true, deep: true })
+function updateBoardLayout(patch: Partial<{ minimized: boolean; maximized: boolean }>): void {
+  if (patch.minimized !== undefined) boardMinimized.value = patch.minimized
+  if (patch.maximized !== undefined) boardMaximized.value = patch.maximized
+  emit('panel-layout-change', { minimized: boardMinimized.value, maximized: boardMaximized.value })
+}
+function startBoardPanelDrag(event: DragEvent): void {
+  if (!props.boardPanelKey || !event.dataTransfer) return
+  event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData('text/plain', props.boardPanelKey)
+}
 const rightPanelCollapsed = ref(true)
 const conversationLargeMode = ref(false)
 const lastRightPanel = ref<RightPanel>('tasks')
@@ -894,6 +919,8 @@ async function loadBackgroundTasks(): Promise<void> {
 function toggleRightPanel(panel: RightPanel): void {
   if (panel === 'terminal' && (!terminalAvailable.value || workspaceSwitching.value)) return
   if (panel === 'tasks' && !convId.value) return
+  if (panel === 'browser') browserPanelReady.value = true
+  if (panel === 'terminal') terminalPanelReady.value = true
   if (conversationLargeMode.value) conversationLargeMode.value = false
   activeRightPanel.value = panel
   lastRightPanel.value = panel
@@ -903,7 +930,7 @@ function toggleRightPanel(panel: RightPanel): void {
 function toggleRightPanelCollapsed(): void {
   if (conversationLargeMode.value) {
     conversationLargeMode.value = false
-    rightPanelCollapsed.value = true
+    rightPanelCollapsed.value = false
     return
   }
   rightPanelCollapsed.value = !rightPanelCollapsed.value
@@ -930,6 +957,7 @@ function collapseRightPanel(): void {
 
 function toggleConversationLargeMode(): void {
   conversationLargeMode.value = !conversationLargeMode.value
+  if (conversationLargeMode.value) rightPanelCollapsed.value = true
 }
 
 async function continueTaskNow(): Promise<void> {
@@ -1344,8 +1372,15 @@ function onRoleEditorSaved(): void {
 
 function startNewRoleChatFromSettings(roleId: string): void {
   const role = data.roles.find((item) => item.id === roleId)
+  if (!role) return
   roleSettingsOpen.value = false
-  chatWindows.openDraft(roleId, { workspaceId: String(role?.workspace_id || '') })
+  chatWindows.newRoleConversation(role)
+}
+
+function openRoleChatFromSettings(roleId: string): void {
+  const role = data.roles.find((item) => item.id === roleId)
+  roleSettingsOpen.value = false
+  if (role) void chatWindows.openRole(role)
 }
 
 function openRoleSessionFromSettings(id: string): void {
@@ -1403,7 +1438,7 @@ async function createWorkItem(heading: string, roleId?: string): Promise<void> {
       },
     })
     await data.loadWork()
-    app.toast(`已创建工单：${item.title || clean}`, 'ok', 3000)
+    app.toast(`已创建任务：${item.title || clean}`, 'ok', 3000)
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
   }
@@ -1608,7 +1643,8 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
   <div
     ref="chatPanelEl"
     class="chat-panel"
-    :class="[floating ? 'ga-win' : presentation === 'drawer' ? 'chat-shell' : 'chat-tab-panel', { 'right-panel-resizing': rightPanelResizing, 'conversation-large-mode': conversationLargeMode }]"
+    :data-board-panel-key="presentation === 'board' ? boardPanelKey : undefined"
+    :class="[floating ? 'ga-win' : presentation === 'drawer' ? 'chat-shell' : 'chat-tab-panel', { 'board-panel': presentation === 'board', 'board-minimized': boardMinimized, 'board-maximized': boardMaximized, 'right-panel-resizing': rightPanelResizing, 'conversation-large-mode': conversationLargeMode }]"
     :style="[popupStyle, { '--lanes-width': `${laneWidth}px`, '--right-panel-width': `${rightPanelWidth}px` }]"
     :data-dragging="(dragging || resizing || laneResizing || rightPanelResizing) || undefined"
     :data-lane-resizing="laneResizing || undefined"
@@ -1674,7 +1710,19 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
           <option value="popup">弹框</option>
           <option value="drawer">抽屉</option>
           <option value="tab">标签页</option>
+          <option value="board">面板工作区</option>
         </select>
+        <template v-if="presentation === 'board'">
+          <button class="head-btn board-drag-handle" type="button" draggable="true" title="拖动排序或移动到其他桌面"
+            aria-label="拖动排序或移动到其他桌面" @pointerdown.stop @dragstart="startBoardPanelDrag">⠿</button>
+          <select class="chat-presentation input" :value="desktopId" aria-label="选择所在桌面"
+            @change="emit('desktop-change', ($event.target as HTMLSelectElement).value)">
+            <option v-for="desktop in desktopOptions || []" :key="desktop.id" :value="desktop.id">{{ desktop.name }}</option>
+          </select>
+          <button class="head-btn" type="button" :title="boardMinimized ? '展开面板' : '最小化面板'" :aria-label="boardMinimized ? '展开面板' : '最小化面板'" @click="updateBoardLayout({ minimized: !boardMinimized })">{{ boardMinimized ? '▣' : '−' }}</button>
+          <button class="head-btn" type="button" :title="boardMaximized ? '还原面板' : '最大化面板'" :aria-label="boardMaximized ? '还原面板' : '最大化面板'" :aria-pressed="boardMaximized" @click="updateBoardLayout({ maximized: !boardMaximized })">⛶</button>
+          <button class="head-btn" type="button" title="隐藏面板" aria-label="隐藏面板" @click="emit('board-hide')">×</button>
+        </template>
         <button v-if="isGroupChat" class="head-btn" title="群资料 / 群成员" aria-label="群资料" @click="openGroupSettings">♚</button>
         <button v-if="!globalAgent && !isGroupChat && currentRole" class="head-btn" title="角色资料 / 管理" aria-label="角色管理" @click="openRoleSettings">♟</button>
         <button v-if="!globalAgent && !isDraft && !isGroupChat" class="head-btn" title="管理参与角色" aria-label="管理参与角色" @click="participantsOpen = true">♙</button>
@@ -1918,9 +1966,9 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
         <button class="dock-collapse" type="button" :title="rightPanelCollapsed || conversationLargeMode ? '展开右侧工作区' : '收起右侧工作区'" :aria-label="rightPanelCollapsed || conversationLargeMode ? '展开右侧工作区' : '收起右侧工作区'" @click="toggleRightPanelCollapsed">{{ rightPanelCollapsed || conversationLargeMode ? '‹' : '›' }}</button>
       </nav>
       <div class="right-panel-content">
-        <BrowserPanel v-if="activeRightPanel === 'browser'" :open="true" @close="collapseRightPanel" />
-        <TerminalSession v-else-if="activeRightPanel === 'terminal' && terminalWorkspace" :key="terminalWorkspace" :workspace-id="terminalWorkspace" />
-        <ChatTaskCenter v-else-if="activeRightPanel === 'tasks'" :open="true" :conversation-id="convId" :title="title"
+        <BrowserPanel v-if="browserPanelReady" v-show="activeRightPanel === 'browser'" :open="true" @close="collapseRightPanel" />
+        <TerminalSession v-if="terminalPanelReady && terminalWorkspace" v-show="activeRightPanel === 'terminal'" :key="terminalWorkspace" :workspace-id="terminalWorkspace" />
+        <ChatTaskCenter v-if="activeRightPanel === 'tasks'" :open="true" :conversation-id="convId" :title="title"
           @close="collapseRightPanel(); loadBackgroundTasks()"
           @changed="loadBackgroundTasks"
           @reference="(path) => { collapseRightPanel(); insertWorkspaceFileReference(path) }" />
@@ -1961,7 +2009,7 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
       @close="roleSettingsOpen = false"
       @edit="editRoleFromSettings"
       @deleted="roleSettingsOpen = false"
-      @chat="roleSettingsOpen = false"
+      @chat="openRoleChatFromSettings"
       @new-chat="startNewRoleChatFromSettings"
       @session="openRoleSessionFromSettings"
       @work="createWorkFromRole"

@@ -6,7 +6,7 @@ export const ACTION_COMMANDS: SlashCommand[] = [
   { name: 'compact', description: '压缩当前会话上下文', builtin: true, source: 'action' },
   { name: 'clear', description: '清空模型上下文（历史消息保留）', argument_hint: '[all|current]', builtin: true, source: 'action' },
   { name: 'clean', description: '清空会话：上下文 + 历史全部删除（需确认）', builtin: true, source: 'action' },
-  { name: 'work', description: '交给工单', argument_hint: '[标题]', builtin: true, source: 'action' },
+  { name: 'work', description: '创建工作台任务', argument_hint: '[标题]', builtin: true, source: 'action' },
   { name: 'stop', description: '停止当前运行', builtin: true, source: 'action' },
   { name: 'attach', description: '添加附件', builtin: true, source: 'action' },
   { name: 'model', description: '聚焦模型选择器', builtin: true, source: 'action' },

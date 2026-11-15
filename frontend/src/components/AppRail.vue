@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { useDataStore } from '@/stores/data'
+import WorkbenchNav from '@/components/WorkbenchNav.vue'
 
 const app = useAppStore()
 const data = useDataStore()
@@ -13,16 +14,12 @@ const props = defineProps<{ pendingCount?: number; globalAgentOpen?: boolean; gl
 const emit = defineEmits<{ (e: 'global-agent'): void; (e: 'global-chat'): void; (e: 'navigate'): void; (e: 'toggle-collapse'): void }>()
 
 const sections = [
-  { key: 'work', label: '工单', path: '/work' },
-  { key: 'conv', label: '会话', path: '/conv' },
-  { key: 'schedule', label: '定时任务', path: '/schedule' },
-  { key: 'ws', label: '工作区', path: '/ws' },
-  { key: 'role', label: '组织与角色', path: '/role' },
-  { key: 'group', label: '群组', path: '/group' },
+  { key: 'work', label: '协作中心', path: '/work' },
 ]
 
 const attention = computed(() => Number(data.workStats?.attention || 0))
 const current = computed(() => String(route.meta.section || 'work'))
+const workbenchActive = computed(() => ['work', 'conv', 'schedule', 'ws', 'organization'].includes(current.value))
 
 function go(path: string): void {
   emit('navigate')
@@ -36,7 +33,7 @@ function toggle(): void {
 
 <template>
   <nav class="rail" aria-label="主导航">
-    <router-link class="rail-brand" to="/work" aria-label="AtlasX 工作台" @click="emit('navigate')">
+    <router-link class="rail-brand" to="/work" aria-label="AtlasX 协作中心" @click="emit('navigate')">
       <span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 17h-5l-4-8-4 8H3L12 3Z" fill="currentColor"/><path d="M10.5 19h3v2h-3z" fill="currentColor"/></svg></span>
       <span class="rail-brand-name">AtlasX</span>
     </router-link>
@@ -46,13 +43,11 @@ function toggle(): void {
       <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="props.collapsed ? 'm9 6 6 6-6 6' : 'm15 6-6 6 6 6'" /></svg>
       <span>{{ props.collapsed ? '展开' : '收起' }}</span>
     </button>
-    <span class="rail-heading">工作空间</span>
-
     <button
       v-for="section in sections"
       :key="section.key"
       class="rail-btn"
-      :class="{ active: current === section.key }"
+      :class="{ active: section.key === 'work' ? workbenchActive : current === section.key }"
       :title="section.label"
       :aria-label="section.label"
       :aria-current="current === section.key ? 'page' : undefined"
@@ -68,6 +63,7 @@ function toggle(): void {
       <span class="rail-label">{{ section.label }}</span>
       <span v-if="section.key === 'work' && attention > 0" class="rail-badge">{{ attention > 99 ? '99+' : attention }}</span>
     </button>
+    <WorkbenchNav :collapsed="props.collapsed" />
 
     <div class="spacer" />
     <span class="rail-heading">系统</span>

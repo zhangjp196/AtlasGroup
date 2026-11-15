@@ -14,6 +14,7 @@ import { api } from '@/api/client'
 import type { Conversation, Department, ListResponse, Role } from '@/api/types'
 import { departmentPath, departmentRoleCounts, departmentSubtree, orderedDepartments } from '@/lib/derive'
 import { clampPage, DEFAULT_PAGE_SIZE, pageCount, pageSlice } from '@/lib/paging'
+import { workspaceLabel } from '@/lib/workspaceOptions'
 import { useAppStore } from '@/stores/app'
 import { useChatWindowsStore } from '@/stores/chatWindows'
 import { useDataStore } from '@/stores/data'
@@ -222,7 +223,7 @@ const roleId = computed(() => String(route.params.id || ''))
 const selectedRole = computed(() => data.roles.find((role) => role.id === roleId.value) || null)
 
 function workspaceName(id?: string): string {
-  return data.workspaces.find((ws) => ws.id === String(id || ''))?.name || ''
+  return workspaceLabel(id, data.workspaces)
 }
 
 function openRole(role: Role): void {
@@ -254,15 +255,6 @@ function onRoleDeleted(): void {
   closeRole()
 }
 
-function isRoleChat(conv: Conversation): boolean {
-  if (conv.zone) return false
-  if (!conv.team_id) return true
-  const team = data.teams.find((item) => item.id === conv.team_id)
-  // 共享群聊的 role_id 是群主；点击群主角色不应该把它当成单聊打开。
-  // 团队信息缺失时也按「不是单聊」处理，宁可新建草稿也不误开群聊。
-  return String(team?.kind || '') === 'participants'
-}
-
 const openingRole = ref('')
 
 async function startRoleChat(id: string): Promise<void> {
@@ -280,40 +272,7 @@ async function startRoleChat(id: string): Promise<void> {
       app.toast('角色不存在或已删除', 'bad')
       return
     }
-    if (role.scope === 'temporary') {
-      if (role.session_id) {
-        chatWindows.openConversation(role.session_id)
-        return
-      }
-      app.toast('临时角色属于某个会话，请在该会话里使用', 'bad')
-      return
-    }
-    const rid = role.id
-    const localChats = data.conversations.filter(
-      (conv) => conv.role_id === rid && isRoleChat(conv),
-    )
-    // 同一角色 + 工作区只保留一条「当前会话」：优先打开工作区匹配的那条。
-    const roleWs = String(role.workspace_id || '')
-    let existing = localChats.find((conv) => String(conv.workspace_id || '') === roleWs)
-      || localChats[0] || null
-    if (!existing) {
-      // 最近 80 条里没有时再按 role_id 查一次：避免重复建单聊。
-      try {
-        const out = await api<ListResponse<Conversation>>(
-          `/conversations?role_id=${encodeURIComponent(rid)}&roots_only=1&limit=50`,
-        )
-        const chats = (out.items || []).filter(isRoleChat)
-        existing = chats.find((conv) => String(conv.workspace_id || '') === roleWs)
-          || chats[0] || null
-      } catch {
-        // 查询失败不阻塞：退回到草稿窗口，消息发出后仍可正常落库。
-      }
-    }
-    if (existing) {
-      chatWindows.openConversation(existing.id)
-      return
-    }
-    chatWindows.openDraft(rid, { workspaceId: roleWs })
+    await chatWindows.openRole(role)
   } finally {
     openingRole.value = ''
   }
@@ -323,7 +282,7 @@ async function startRoleChat(id: string): Promise<void> {
 function startNewRoleChat(id: string): void {
   const role = data.roles.find((item) => item.id === id)
   if (!role) return
-  chatWindows.openDraft(id, { workspaceId: String(role.workspace_id || '') })
+  chatWindows.newRoleConversation(role)
 }
 
 /** 从角色详情的会话列表打开一条历史会话。 */
@@ -484,9 +443,9 @@ function onWorkSaved(): void {
             </div>
             <div class="role-line">{{ role.department ? `部门：${role.department}` : '未安排部门' }}</div>
             <div class="role-line">模型：{{ role.model_code || '未指定' }}</div>
-            <div class="role-line">工作区：{{ workspaceName(role.workspace_id) || '默认工作区' }}</div>
+            <div class="role-line">工作区：{{ workspaceName(role.workspace_id) }}</div>
             <div class="chips">
-              <span v-if="openWorkByRole.get(role.id)" class="chip work-chip">{{ openWorkByRole.get(role.id) }} 个工单在办</span>
+              <span v-if="openWorkByRole.get(role.id)" class="chip work-chip">{{ openWorkByRole.get(role.id) }} 个任务在办</span>
               <span v-for="tool in (role.tools || []).slice(0, 6)" :key="tool" class="chip">{{ tool }}</span>
               <span v-if="!(role.tools || []).length" class="chip">全部工具</span>
             </div>

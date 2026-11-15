@@ -32,7 +32,7 @@ const filter = ref('open')
 const sort = ref<'recent' | 'priority'>('recent')
 const listHeading = ref<HTMLHeadingElement>()
 const metrics = [
-  { key: 'open', label: '待办工单', icon: Document, tone: 'neutral' },
+  { key: 'open', label: '待处理任务', icon: Document, tone: 'neutral' },
   { key: 'working', label: '正在执行', icon: Clock, tone: 'accent' },
   { key: 'attention', label: '需要处理', icon: Warning, tone: 'warning' },
   { key: 'done', label: '已完成', icon: Check, tone: 'success' },
@@ -64,13 +64,13 @@ const workMenuItems = computed<ContextMenuItem[]>(() => {
   const item = workMenu.item
   const done = ['done', 'closed'].includes(String(item?.status || ''))
   return [
-    { label: '打开工单', action: 'open' },
+    { label: '打开任务', action: 'open' },
     { label: '复制标题', action: 'copy' },
     { label: '', action: '', separator: true },
     { label: '派活 / 重新派活', action: 'dispatch', disabled: done },
     { label: '标记完成', action: 'done', disabled: done },
     { label: '', action: '', separator: true },
-    { label: '删除工单', action: 'delete', danger: true },
+    { label: '删除任务', action: 'delete', danger: true },
   ]
 })
 
@@ -99,16 +99,16 @@ async function onWorkMenu(action: string): Promise<void> {
     if (action === 'dispatch') {
       await api(`/work-items/${encodeURIComponent(item.id)}/dispatch`, { method: 'POST' })
       await data.loadWork()
-      app.toast('工单已派活')
+      app.toast('任务已派发')
     } else if (action === 'done') {
       await api(`/work-items/${encodeURIComponent(item.id)}`, { method: 'PATCH', body: { status: 'done' } })
       await data.loadWork()
-      app.toast('工单已标记完成')
+      app.toast('任务已标记完成')
     } else if (action === 'delete') {
-      if (!window.confirm(`删除工单「${item.title || item.id}」？`)) return
+      if (!window.confirm(`删除任务「${item.title || item.id}」？`)) return
       await api(`/work-items/${encodeURIComponent(item.id)}`, { method: 'DELETE' })
       await data.loadWork()
-      app.toast('工单已删除')
+      app.toast('任务已删除')
     }
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad', 5000)
@@ -148,6 +148,12 @@ const permissionText = computed(() => ({
 } as Record<string, string>)[String(policy.value.permission_mode || 'auto')] || '自动判断')
 const defaultWorkspace = computed(() => data.workspaces.find((ws) => ws.id === policy.value.default_workspace_id))
 const defaultWorkspaceText = computed(() => defaultWorkspace.value?.name || '默认工作区')
+const moduleCards = computed(() => [
+  { title: '会话', description: '继续处理角色与群组对话', value: `${data.conversations.length} 个会话`, path: '/conv', tone: 'conversation' },
+  { title: '定时任务', description: '管理计划任务与自动触发', value: `${data.schedules.filter((item) => item.status === 'active').length} 个运行中`, path: '/schedule', tone: 'schedule' },
+  { title: '工作区', description: '查看项目文件与执行环境', value: `${data.workspaces.filter((item) => !item.archived).length} 个可用`, path: '/ws', tone: 'workspace' },
+  { title: '组织', description: '统一管理角色、群组与成员', value: `${data.persistentRoles.length} 个角色 · ${data.groups.length} 个群组`, path: '/organization/roles', tone: 'organization' },
+])
 
 const keyword = ref('')
 const teamFilter = ref(String(route.query.team_id || ''))
@@ -294,7 +300,7 @@ async function savePolicy(): Promise<void> {
     })
     await data.loadWork()
     policyOpen.value = false
-    app.toast('工单策略已保存')
+    app.toast('执行策略已保存')
   } catch (error) {
     app.toast(error instanceof Error ? error.message : String(error), 'bad')
   } finally {
@@ -306,12 +312,16 @@ function openAttentionConversation(conversationId?: string): void {
   if (!conversationId) return
   void router.push(`/conv/${encodeURIComponent(conversationId)}`)
 }
+
+function openModule(path: string): void {
+  void router.push(path)
+}
 </script>
 
 <template>
-  <PageHeader section="工单" title="工单总览">
-    <el-button :icon="Setting" @click="openPolicy">工单策略</el-button>
-    <el-button type="primary" :icon="Plus" @click="createOpen = true">新建工单</el-button>
+  <PageHeader section="协作中心" title="协作中心">
+    <el-button :icon="Setting" @click="openPolicy">执行策略</el-button>
+    <el-button type="primary" :icon="Plus" @click="createOpen = true">新建任务</el-button>
   </PageHeader>
 
   <div class="canvas-body operations-body">
@@ -323,13 +333,21 @@ function openAttentionConversation(conversationId?: string): void {
         </div>
         <div class="operations-copy">
           <span class="sa-pill"><i class="sa-dot" :class="{ on: mode === 'auto' }" />{{ modeText }}</span>
-          <h2 id="operations-title">Agent 任务中心</h2>
-          <p>跟踪工单执行、处理授权与提问。</p>
+          <h2 id="operations-title">任务与运行总览</h2>
+          <p>在这里查看任务进度、待处理事项和自动执行状态。</p>
           <TokenMeter v-if="hasWorkUsage" :usage="workUsage" variant="hero" />
         </div>
       </section>
 
-      <div class="operations-metrics" aria-label="按工单状态筛选">
+      <section class="workbench-modules" aria-label="协作中心模块概览">
+        <button v-for="module in moduleCards" :key="module.title" class="workbench-module-card" :class="module.tone"
+          type="button" @click="openModule(module.path)">
+          <span class="module-card-copy"><b>{{ module.title }}</b><small>{{ module.description }}</small></span>
+          <span class="module-card-meta"><strong>{{ module.value }}</strong><span aria-hidden="true">›</span></span>
+        </button>
+      </section>
+
+      <div class="operations-metrics" aria-label="按任务状态筛选">
         <button v-for="metric in metrics" :key="metric.key" class="operations-metric" type="button"
           :data-tone="metric.tone" :aria-pressed="filter === metric.key" @click="focusFilter(metric.key)">
           <span class="metric-icon"><component :is="metric.icon" aria-hidden="true" /></span>
@@ -362,12 +380,12 @@ function openAttentionConversation(conversationId?: string): void {
       <div class="sa-columns">
         <section class="sa-section">
           <div class="sa-section-head">
-            <h2 ref="listHeading" tabindex="-1">工单列表</h2>
+            <h2 ref="listHeading" tabindex="-1">任务列表</h2>
             <span class="sa-count" aria-live="polite">{{ filteredItems.length }} 条结果</span>
           </div>
           <div class="list-toolbar">
-            <el-input v-model="keyword" :prefix-icon="Search" aria-label="搜索工单" placeholder="搜索工单" clearable />
-            <select v-model="sort" class="input work-sort" aria-label="工单排序">
+            <el-input v-model="keyword" :prefix-icon="Search" aria-label="搜索任务" placeholder="搜索任务" clearable />
+            <select v-model="sort" class="input work-sort" aria-label="任务排序">
               <option value="recent">最近更新</option>
               <option value="priority">优先级优先</option>
             </select>
@@ -391,7 +409,7 @@ function openAttentionConversation(conversationId?: string): void {
           </div>
 
           <div v-if="data.workError" class="work-load-error" role="status">
-            <span>{{ workReady ? '工单刷新失败，正在显示上次结果' : '工单加载失败' }}</span>
+            <span>{{ workReady ? '任务刷新失败，正在显示上次结果' : '任务加载失败' }}</span>
             <button class="btn small" type="button" @click="data.loadWork()">重试</button>
           </div>
           <div v-if="filteredItems.length" class="work-queue">
@@ -406,12 +424,12 @@ function openAttentionConversation(conversationId?: string): void {
                 <span class="work-status" :class="item.status" />
                 <div class="tile-title">
                   <router-link class="work-queue-link" :to="`/work/${encodeURIComponent(item.id)}`">
-                    {{ item.title || '未命名工单' }}
+                    {{ item.title || '未命名任务' }}
                   </router-link>
                   <span>{{ statusLabels[String(item.status || '')] || item.status || '待分派' }} · {{ item.source || 'manual' }}{{ item.source_ref ? ` · ${item.source_ref}` : '' }}</span>
                 </div>
                 <span v-if="Number(item.priority || 0) > 0" class="tag">高优先级</span>
-                <button class="iconbtn work-queue-menu" type="button" :aria-label="`工单操作：${item.title || item.id}`"
+                <button class="iconbtn work-queue-menu" type="button" :aria-label="`任务操作：${item.title || item.id}`"
                   @click="openWorkMenu($event, item)"><MoreFilled aria-hidden="true" /></button>
               </div>
               <p class="tile-preview">{{ item.body || item.attention_reason || '没有补充说明' }}</p>
@@ -420,14 +438,14 @@ function openAttentionConversation(conversationId?: string): void {
             </article>
           </div>
           <div v-else-if="data.workItems.length" class="empty">
-            没有符合条件的工单
+            没有符合条件的任务
             <br />
             <button class="mini-link" type="button" @click="clearFilters">清除筛选</button>
           </div>
           <div v-else-if="workReady" class="work-empty">
             <Document aria-hidden="true" />
-            <b>还没有工单</b>
-            <button class="btn primary" type="button" @click="createOpen = true">创建工单</button>
+            <b>还没有任务</b>
+            <button class="btn primary" type="button" @click="createOpen = true">创建任务</button>
           </div>
           <ListPager :page="page" :pages="pages" :total="filteredItems.length" :page-size="PAGE_SIZE" @update:page="page = $event" />
         </section>
@@ -451,14 +469,14 @@ function openAttentionConversation(conversationId?: string): void {
     @deleted="onDeleted"
   />
 
-  <SideDrawer :open="policyOpen" title="工单策略" subtitle="决定工单何时自动推进" width="560px" @close="policyOpen = false">
+  <SideDrawer :open="policyOpen" title="工作台执行策略" subtitle="决定任务何时自动推进" width="560px" @close="policyOpen = false">
     <div class="work-settings-grid">
       <div class="field">
         <label>运行模式</label>
         <select v-model="policyForm.mode" class="input">
-          <option value="off">关闭：只手动创建工单</option>
+          <option value="off">关闭：只手动创建任务</option>
           <option value="observe">观察：只记录，不自动派活</option>
-          <option value="auto">自动：新建工单后自动派活</option>
+          <option value="auto">自动：新建任务后自动派发</option>
         </select>
       </div>
       <div class="field">
