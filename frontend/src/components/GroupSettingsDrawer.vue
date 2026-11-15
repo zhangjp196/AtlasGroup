@@ -416,7 +416,7 @@ function onWorkSaved(): void {
           <div class="field">
             <label>绑定工作区</label>
             <select v-model="draft.workspace_id" class="input">
-              <option value="">无工作区</option>
+              <option value="">默认工作区</option>
               <option v-for="ws in data.activeWorkspaces" :key="ws.id" :value="ws.id">{{ ws.name }}</option>
             </select>
           </div>

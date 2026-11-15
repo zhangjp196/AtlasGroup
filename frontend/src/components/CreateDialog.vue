@@ -245,8 +245,8 @@ async function submit(): Promise<void> {
           <WorkspacePicker
             v-model="convForm.workspace_id"
             :workspaces="data.workspaces"
-            empty-label="无工作区"
-            placeholder="无工作区"
+            empty-label="默认工作区"
+            placeholder="默认工作区"
           />
         </el-form-item>
       </template>
@@ -270,8 +270,8 @@ async function submit(): Promise<void> {
           <WorkspacePicker
             v-model="roleForm.workspace_id"
             :workspaces="data.workspaces"
-            empty-label="无工作区"
-            placeholder="无工作区"
+            empty-label="默认工作区"
+            placeholder="默认工作区"
           />
         </el-form-item>
         <el-form-item label="部门">
@@ -310,8 +310,8 @@ async function submit(): Promise<void> {
           <WorkspacePicker
             v-model="teamForm.workspace_id"
             :workspaces="data.workspaces"
-            empty-label="无工作区"
-            placeholder="无工作区"
+            empty-label="默认工作区"
+            placeholder="默认工作区"
           />
         </el-form-item>
         <el-form-item label="协作方式">

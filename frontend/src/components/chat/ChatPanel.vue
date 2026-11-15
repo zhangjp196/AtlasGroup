@@ -9,7 +9,7 @@ import Modal from '@/components/Modal.vue'
 import TokenMeter from '@/components/TokenMeter.vue'
 import WorkspacePicker from '@/components/WorkspacePicker.vue'
 import { api } from '@/api/client'
-import type { Conversation, SlashCommand, WorkItem } from '@/api/types'
+import type { Conversation, Role, SlashCommand, WorkItem } from '@/api/types'
 import { ACTION_COMMANDS } from '@/lib/commands'
 import { conversationIsSharedGroup, conversationMeta, conversationTitle, GLOBAL_AGENT_ZONE } from '@/lib/derive'
 import { compactNumber, shortTime } from '@/lib/format'
@@ -32,6 +32,8 @@ import SessionFilesPanel from './SessionFilesPanel.vue'
 import { appendWorkspaceFileReference } from '@/lib/workspaceReference'
 import { continuationPrompt } from '@/lib/continuationPrompt'
 import GroupSettingsDrawer from '@/components/GroupSettingsDrawer.vue'
+import RoleSettingsDrawer from '@/components/RoleSettingsDrawer.vue'
+import RoleEditorDialog from '@/components/RoleEditorDialog.vue'
 import GlobalInbox from './GlobalInbox.vue'
 import LiveMessage from './LiveMessage.vue'
 import MessageItem from './MessageItem.vue'
@@ -457,6 +459,9 @@ const lastRightPanel = ref<RightPanel>('tasks')
 const settingsOpen = ref(false)
 const participantsOpen = ref(false)
 const groupInfoOpen = ref(false)
+const roleSettingsOpen = ref(false)
+const roleEditorOpen = ref(false)
+const roleBeingEdited = ref<Role | null>(null)
 const avatarMenu = reactive({ open: false, x: 0, y: 0 })
 const avatarMenuItems = computed<ContextMenuItem[]>(() => {
   if (isDraft.value) {
@@ -769,6 +774,10 @@ const groupId = computed(() => String(conversation.value?.team_id || ''))
 const currentGroup = computed(() => data.groups.find(
   (team) => team.id === groupId.value,
 ) || null)
+const currentRole = computed(() => {
+  const roleId = String(conversation.value?.role_id || props.draftRoleId || '')
+  return data.roles.find((role) => role.id === roleId) || null
+})
 const model = computed(() => {
   const codes = data.models.map((item) => item.code)
   const saved = selectedModel.value
@@ -1316,6 +1325,40 @@ function openGroupPage(): void {
   void router.push(`/group/${encodeURIComponent(groupId.value)}`)
 }
 
+function openRoleSettings(): void {
+  if (currentRole.value) roleSettingsOpen.value = true
+}
+
+function editRoleFromSettings(): void {
+  if (!currentRole.value) return
+  roleBeingEdited.value = currentRole.value
+  roleSettingsOpen.value = false
+  roleEditorOpen.value = true
+}
+
+function onRoleEditorSaved(): void {
+  roleEditorOpen.value = false
+  roleSettingsOpen.value = true
+  roleBeingEdited.value = null
+}
+
+function startNewRoleChatFromSettings(roleId: string): void {
+  const role = data.roles.find((item) => item.id === roleId)
+  roleSettingsOpen.value = false
+  chatWindows.openDraft(roleId, { workspaceId: String(role?.workspace_id || '') })
+}
+
+function openRoleSessionFromSettings(id: string): void {
+  roleSettingsOpen.value = false
+  chatWindows.openConversation(id)
+}
+
+function createWorkFromRole(id: string): void {
+  const role = data.roles.find((item) => item.id === id)
+  roleSettingsOpen.value = false
+  void createWorkItem(`来自角色「${role?.name || id}」`, id)
+}
+
 async function renameConversation(nextTitle: string): Promise<void> {
   if (!conversation.value) return
   const value = nextTitle || window.prompt(isGroupChat.value ? '群名称' : '会话标题', title.value) || ''
@@ -1344,16 +1387,17 @@ async function renameConversation(nextTitle: string): Promise<void> {
   }
 }
 
-async function createWorkItem(heading: string): Promise<void> {
+async function createWorkItem(heading: string, roleId?: string): Promise<void> {
   const clean = heading || `来自会话「${title.value}」`
+  const role = roleId ? data.roles.find((item) => item.id === roleId) : null
   try {
     const item = await api<WorkItem>('/work-items', {
       method: 'POST',
       body: {
         title: clean,
         body: `来自会话「${title.value}」\n\n`,
-        workspace_id: conversation.value?.workspace_id || undefined,
-        role_id: conversation.value?.role_id || undefined,
+        workspace_id: role?.workspace_id || conversation.value?.workspace_id || undefined,
+        role_id: roleId || conversation.value?.role_id || undefined,
         // 工单只挂共享群组；会话私有参与角色不跟着工单走。
         team_id: isGroupChat.value ? groupId.value : undefined,
       },
@@ -1588,7 +1632,7 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
         :workspaces="data.workspaces"
         variant="chip"
         title="切换会话工作区"
-        empty-label="无工作区"
+        empty-label="默认工作区"
         trigger-hint="点击切换会话工作区"
         :disabled="workspaceSwitching"
         @update:model-value="switchConversationWorkspace"
@@ -1632,7 +1676,8 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
           <option value="tab">标签页</option>
         </select>
         <button v-if="isGroupChat" class="head-btn" title="群资料 / 群成员" aria-label="群资料" @click="openGroupSettings">♚</button>
-        <button v-else-if="!globalAgent && !isDraft" class="head-btn" title="管理参与角色" aria-label="管理参与角色" @click="participantsOpen = true">♙</button>
+        <button v-if="!globalAgent && !isGroupChat && currentRole" class="head-btn" title="角色资料 / 管理" aria-label="角色管理" @click="openRoleSettings">♟</button>
+        <button v-if="!globalAgent && !isDraft && !isGroupChat" class="head-btn" title="管理参与角色" aria-label="管理参与角色" @click="participantsOpen = true">♙</button>
         <button
           v-if="!globalAgent && !isDraft && !isGroupChat && conversation?.team_id"
           class="head-btn"
@@ -1822,7 +1867,9 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
         <span class="queue-text">{{ item.content || item.title || '' }}</span>
         <button class="wbtn" :disabled="index === 0" title="上移" @click="chat.moveQueued(item.id, 'up')">↑</button>
         <button class="wbtn" :disabled="index === queued.length - 1" title="下移" @click="chat.moveQueued(item.id, 'down')">↓</button>
-        <button class="wbtn" :disabled="!chat.streaming.value" title="插队：停止当前回复并立即执行这条" @click="chat.injectQueued(item.id)">插队</button>
+        <button class="wbtn queue-icon-btn" :disabled="!chat.streaming.value" title="插队：停止当前回复并立即执行这条" aria-label="插队" @click="chat.injectQueued(item.id)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 2-9 12h7l-1 8 10-13h-7l1-7Z" /></svg>
+        </button>
         <button class="wbtn" title="取消" @click="chat.cancelQueued(item.id)">×</button>
       </div>
     </div>
@@ -1906,6 +1953,24 @@ function onConversationLink(event: MouseEvent | KeyboardEvent): void {
       @saved="onGroupSaved"
       @deleted="onGroupDeleted"
       @chat="groupInfoOpen = false"
+    />
+
+    <RoleSettingsDrawer
+      :open="roleSettingsOpen && Boolean(currentRole)"
+      :role="currentRole"
+      @close="roleSettingsOpen = false"
+      @edit="editRoleFromSettings"
+      @deleted="roleSettingsOpen = false"
+      @chat="roleSettingsOpen = false"
+      @new-chat="startNewRoleChatFromSettings"
+      @session="openRoleSessionFromSettings"
+      @work="createWorkFromRole"
+    />
+    <RoleEditorDialog
+      :open="roleEditorOpen"
+      :role="roleBeingEdited"
+      @close="roleEditorOpen = false; roleBeingEdited = null; roleSettingsOpen = true"
+      @saved="onRoleEditorSaved"
     />
 
     <ParticipantsDrawer

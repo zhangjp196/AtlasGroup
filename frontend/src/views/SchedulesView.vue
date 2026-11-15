@@ -98,7 +98,7 @@ function roleName(task: ScheduledTask): string {
 }
 
 function workspaceName(task: ScheduledTask): string {
-  return data.workspaces.find((ws) => ws.id === task.workspace_id)?.name || '无工作区'
+  return data.workspaces.find((ws) => ws.id === task.workspace_id)?.name || '默认工作区'
 }
 
 function openCreate(): void {
@@ -371,7 +371,7 @@ void data.loadSchedules()
       </div>
       <div class="field">
         <label>执行工作区</label>
-        <WorkspacePicker v-model="form.workspace_id" :workspaces="data.workspaces" empty-label="无工作区" placeholder="无工作区" />
+        <WorkspacePicker v-model="form.workspace_id" :workspaces="data.workspaces" empty-label="默认工作区" placeholder="默认工作区" />
       </div>
     </div>
 

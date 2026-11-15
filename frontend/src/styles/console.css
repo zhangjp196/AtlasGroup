@@ -336,6 +336,25 @@
 }
 
 .app { --workspace-header-height: 40px; }
+.app-icon-tooltip {
+  position: fixed;
+  z-index: 10000;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--panel-3);
+  color: var(--text);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, .28);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .07s ease;
+}
+.app-icon-tooltip.visible { opacity: 1; }
 .workspace-header {
   display: flex;
   flex: none;

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElConfigProvider } from 'element-plus'
-import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import AppRail from '@/components/AppRail.vue'
@@ -120,6 +120,83 @@ function toggleRail(): void {
   railCollapsed.value = !railCollapsed.value
   try { localStorage.setItem(RAIL_COLLAPSED_KEY, railCollapsed.value ? '1' : '0') } catch { /* ignore */ }
 }
+
+let iconTooltip: HTMLDivElement | null = null
+let iconTooltipTarget: HTMLElement | null = null
+let iconTooltipTitle = ''
+
+function iconControl(target: EventTarget | null): HTMLElement | null {
+  if (!(target instanceof Element)) return null
+  const control = target.closest<HTMLElement>('button[title],button[aria-label],a[title],a[aria-label],[role="button"][title],[role="button"][aria-label]')
+  if (!control) return null
+  const visibleText = String((control as HTMLElement).innerText || '').replace(/\d+/g, '').trim()
+  if (/[\p{L}]/u.test(visibleText)) return null
+  return control
+}
+
+function showIconTooltip(control: HTMLElement | null): void {
+  if (!control || iconTooltipTarget === control) return
+  hideIconTooltip()
+  const label = control.getAttribute('aria-label')?.trim() || control.getAttribute('title')?.trim()
+  if (!label) return
+  if (!iconTooltip) {
+    iconTooltip = document.createElement('div')
+    iconTooltip.className = 'app-icon-tooltip'
+    iconTooltip.setAttribute('role', 'tooltip')
+    document.body.append(iconTooltip)
+  }
+  iconTooltipTarget = control
+  iconTooltip.textContent = label
+  iconTooltip.classList.add('visible')
+  iconTooltipTitle = control.getAttribute('title') || ''
+  if (iconTooltipTitle) control.removeAttribute('title')
+  const rect = control.getBoundingClientRect()
+  const tooltipRect = iconTooltip.getBoundingClientRect()
+  const left = Math.max(8, Math.min(window.innerWidth - tooltipRect.width - 8, rect.left + (rect.width - tooltipRect.width) / 2))
+  const top = rect.top >= tooltipRect.height + 10 ? rect.top - tooltipRect.height - 7 : rect.bottom + 7
+  iconTooltip.style.left = `${left}px`
+  iconTooltip.style.top = `${Math.max(8, Math.min(window.innerHeight - tooltipRect.height - 8, top))}px`
+}
+
+function hideIconTooltip(): void {
+  if (iconTooltipTarget && iconTooltipTitle) iconTooltipTarget.setAttribute('title', iconTooltipTitle)
+  iconTooltipTarget = null
+  iconTooltipTitle = ''
+  iconTooltip?.classList.remove('visible')
+}
+
+function onIconControlPointerOver(event: PointerEvent): void {
+  if (event.pointerType === 'touch') return
+  showIconTooltip(iconControl(event.target))
+}
+
+function onIconControlPointerOut(event: PointerEvent): void {
+  if (iconTooltipTarget && !iconTooltipTarget.contains(event.relatedTarget as Node | null)) hideIconTooltip()
+}
+
+function onIconControlFocusIn(event: FocusEvent): void {
+  showIconTooltip(iconControl(event.target))
+}
+
+function onIconControlFocusOut(event: FocusEvent): void {
+  if (iconTooltipTarget && !iconTooltipTarget.contains(event.relatedTarget as Node | null)) hideIconTooltip()
+}
+
+onMounted(() => {
+  document.addEventListener('pointerover', onIconControlPointerOver)
+  document.addEventListener('pointerout', onIconControlPointerOut)
+  document.addEventListener('focusin', onIconControlFocusIn)
+  document.addEventListener('focusout', onIconControlFocusOut)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerover', onIconControlPointerOver)
+  document.removeEventListener('pointerout', onIconControlPointerOut)
+  document.removeEventListener('focusin', onIconControlFocusIn)
+  document.removeEventListener('focusout', onIconControlFocusOut)
+  hideIconTooltip()
+  iconTooltip?.remove()
+  iconTooltip = null
+})
 
 function saveDockState(): void {
   try {

@@ -373,8 +373,8 @@ async function removeConversation(): Promise<void> {
             <WorkspacePicker
               v-model="draft.workspace_id"
               :workspaces="data.workspaces"
-              empty-label="无工作区"
-              placeholder="无工作区"
+              empty-label="默认工作区"
+              placeholder="默认工作区"
               title="选择本会话使用的工作区"
             />
           </div>
